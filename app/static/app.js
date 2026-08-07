@@ -6,12 +6,15 @@ const submitBtn = document.getElementById("submit-btn");
 const formError = document.getElementById("form-error");
 const statusEl = document.getElementById("status");
 const resultsSection = document.getElementById("results");
-const intentCard = document.getElementById("intent-card");
+const parsedCard = document.getElementById("parsed-card");
 const metricsEl = document.getElementById("metrics");
+const linkActions = document.getElementById("link-actions");
+const copyBtn = document.getElementById("copy-btn");
 const resultList = document.getElementById("result-list");
 const emptyState = document.getElementById("empty-state");
 
-/** 在文本节点安全插入，避免渲染第三方 HTML。 */
+let currentLinks = [];
+
 function setText(el, text) {
   el.textContent = text;
 }
@@ -38,20 +41,24 @@ function hideFormError() {
   formError.hidden = true;
 }
 
-function renderIntent(intent) {
-  intentCard.hidden = false;
-  intentCard.innerHTML = "";
-  const title = document.createElement("h2");
-  setText(title, "系统理解");
-  intentCard.appendChild(title);
+function renderParsed(parsed) {
+  parsedCard.hidden = false;
+  parsedCard.innerHTML = "";
+  const h = document.createElement("h2");
+  setText(h, "资源识别");
+  parsedCard.appendChild(h);
 
-  const typeLine = document.createElement("p");
-  setText(typeLine, "资源类型：" + intent.resource_type + "　关键词：" + intent.keywords.join("、"));
-  intentCard.appendChild(typeLine);
+  const p = document.createElement("p");
+  const bits = [parsed.resource];
+  if (parsed.quality) bits.push("清晰度: " + parsed.quality);
+  if (parsed.english_name) bits.push("英文名: " + parsed.english_name);
+  if (parsed.aliases && parsed.aliases.length) bits.push("别名: " + parsed.aliases.join("、"));
+  setText(p, bits.join("　|　"));
+  parsedCard.appendChild(p);
 
-  const variants = document.createElement("p");
-  setText(variants, "搜索查询：" + intent.query_variants.join(" ｜ "));
-  intentCard.appendChild(variants);
+  const v = document.createElement("p");
+  setText(v, "搜索查询：" + parsed.search_suggestions.join(" ｜ "));
+  parsedCard.appendChild(v);
 }
 
 function renderMetrics(metrics, providers) {
@@ -59,49 +66,86 @@ function renderMetrics(metrics, providers) {
   metricsEl.innerHTML = "";
   const parts = [
     "总耗时 " + metrics.duration_ms + "ms",
-    "原始结果 " + metrics.raw_result_count + " 条",
+    "原始 " + metrics.raw_result_count + " 条",
     "去重后 " + metrics.deduplicated_result_count + " 条",
     providers.map((p) => p.name + ": " + p.status).join("；"),
   ];
-  if (metrics.fallback_used) {
-    parts.push("已使用基础查询（AI 解析暂不可用）");
-  }
+  if (metrics.fallback_used) parts.push("已使用基础查询（AI 解析暂不可用）");
   const p = document.createElement("p");
   setText(p, parts.join("　·　"));
   metricsEl.appendChild(p);
 }
 
-function renderResults(results) {
+function renderLinks(links) {
+  currentLinks = links;
   resultList.innerHTML = "";
-  for (const r of results) {
+  for (const l of links) {
     const li = document.createElement("li");
     li.className = "result-card";
 
-    const link = document.createElement("a");
-    link.href = r.url;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    setText(link, r.title);
-    li.appendChild(link);
+    const head = document.createElement("div");
+    head.className = "link-head";
 
-    const snippet = document.createElement("p");
-    setText(snippet, r.snippet || "（无摘要）");
-    li.appendChild(snippet);
+    const name = document.createElement("strong");
+    setText(name, l.name);
+    head.appendChild(name);
+
+    const conf = document.createElement("span");
+    conf.className = "badge badge-" + (l.conf === "高" ? "high" : l.conf === "低" ? "low" : "mid");
+    setText(conf, l.conf + "置信");
+    head.appendChild(conf);
+    li.appendChild(head);
+
+    const url = document.createElement("a");
+    url.className = "share-url";
+    url.href = "https://pan.quark.cn/s/" + l.share;
+    url.target = "_blank";
+    url.rel = "noopener noreferrer";
+    setText(url, "https://pan.quark.cn/s/" + l.share);
+    li.appendChild(url);
 
     const meta = document.createElement("div");
     meta.className = "meta";
-    setText(meta,
-      "相关度 " + r.score + "/100　来源: " + r.sources.join("+") + "　" + r.reason);
+    const pwdTxt = l.pwd ? "提取码: " + l.pwd : "无提取码";
+    const httpTxt = l.http === 200 ? "✓ 可达" : (l.http ? "HTTP " + l.http : "✗ 不可达");
+    setText(meta, pwdTxt + "　|　" + httpTxt + "　|　" + l.time + "　|　来源: " + l.source);
     li.appendChild(meta);
+
+    const row = document.createElement("div");
+    row.className = "row-actions";
+    const copyOne = document.createElement("button");
+    copyOne.type = "button";
+    copyOne.className = "secondary-btn small";
+    setText(copyOne, "复制");
+    copyOne.addEventListener("click", () => {
+      const link = "https://pan.quark.cn/s/" + l.share + (l.pwd ? "?pwd=" + l.pwd : "");
+      navigator.clipboard.writeText(link).then(() => {
+        showStatus("已复制: " + link, "info");
+        setTimeout(hideStatus, 2000);
+      });
+    });
+    row.appendChild(copyOne);
+    li.appendChild(row);
 
     resultList.appendChild(li);
   }
 }
 
+copyBtn.addEventListener("click", () => {
+  const lines = currentLinks.map((l) => {
+    const link = "https://pan.quark.cn/s/" + l.share + (l.pwd ? "?pwd=" + l.pwd : "");
+    return [l.name, link, l.pwd || "-", l.time, l.conf, l.http === 200 ? "可达" : "不可达"].join("\t");
+  });
+  navigator.clipboard.writeText(lines.join("\n")).then(() => {
+    showStatus("已复制 " + lines.length + " 条链接", "info");
+    setTimeout(hideStatus, 2000);
+  });
+});
+
 async function doSearch(query) {
   hideFormError();
   resultsSection.hidden = true;
-  showStatus("正在理解需求、生成查询、检索并整理结果…", "loading");
+  showStatus("正在解析资源、搜索网盘链接并验证可达性…", "loading");
   submitBtn.disabled = true;
 
   try {
@@ -130,22 +174,18 @@ async function doSearch(query) {
     const data = await resp.json();
     hideStatus();
 
-    renderIntent(data.intent);
+    renderParsed(data.parsed);
     renderMetrics(data.metrics, data.providers);
 
-    const partial = data.providers.some((p) => p.status === "error");
-    if (data.results.length === 0) {
+    if (data.links.length === 0) {
       resultList.innerHTML = "";
+      linkActions.hidden = true;
       emptyState.hidden = false;
-      emptyState.textContent = partial
-        ? "没有找到结果，且部分搜索源不可用。建议简化约束或更换关键词后重试。"
-        : "没有找到结果。建议简化约束、更换关键词或换一种表述。";
+      setText(emptyState, "没有找到夸克网盘链接。建议换一种写法（别名、英文名、加 4K/全集 等）后重试。");
     } else {
       emptyState.hidden = true;
-      renderResults(data.results);
-      if (partial) {
-        showStatus("部分搜索源暂不可用，以下为可用来源的结果。", "warn");
-      }
+      renderLinks(data.links);
+      linkActions.hidden = false;
     }
     resultsSection.hidden = false;
   } catch (err) {

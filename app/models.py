@@ -5,7 +5,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field
 
 ResourceType = Literal["game", "movie", "music", "software", "other"]
 
@@ -14,15 +14,6 @@ class SearchRequest(BaseModel):
     """`POST /api/search` 请求体。"""
 
     query: str = Field(min_length=2, max_length=200)
-
-
-class SearchIntent(BaseModel):
-    """DeepSeek 解析出的结构化意图（失败时由规则降级生成）。"""
-
-    resource_type: ResourceType
-    keywords: list[str] = Field(min_length=1, max_length=8)
-    constraints: list[str] = Field(default_factory=list, max_length=8)
-    query_variants: list[str] = Field(min_length=1, max_length=3)
 
 
 class RawSearchResult(BaseModel):
@@ -35,15 +26,27 @@ class RawSearchResult(BaseModel):
     relevance: float | None = None  # 供应商相关性；缺失时评分用中性值
 
 
-class SearchResult(BaseModel):
-    """聚合排序后的最终结果。"""
+class ParsedResource(BaseModel):
+    """DeepSeek 解析出的影视资源信息（失败时由规则降级生成）。"""
 
-    title: str
-    url: HttpUrl
-    snippet: str
-    sources: list[str]
-    score: int = Field(ge=0, le=100)
-    reason: str
+    resource: str
+    quality: str | None = None
+    preference: str | None = None
+    aliases: list[str] = Field(default_factory=list, max_length=8)
+    english_name: str | None = None
+    search_suggestions: list[str] = Field(min_length=1, max_length=6)
+
+
+class QuarkLink(BaseModel):
+    """一条夸克网盘分享链接（含提取码与可达性验证）。"""
+
+    name: str
+    share: str
+    pwd: str | None = None
+    source: str
+    time: str
+    conf: str = "中"  # 置信度：高/中/低
+    http: int | None = None  # 可达性验证状态码，None=验证失败
 
 
 class ProviderStatus(BaseModel):
@@ -65,11 +68,12 @@ class SearchMetrics(BaseModel):
     fallback_used: bool = False
 
 
-class SearchResponse(BaseModel):
-    """`POST /api/search` 响应体。"""
+class QuarkSearchResponse(BaseModel):
+    """`POST /api/search` 响应体（网盘链接搜索）。"""
 
     request_id: str
-    intent: SearchIntent
-    results: list[SearchResult] = Field(default_factory=list)
+    query: str
+    parsed: ParsedResource
+    links: list[QuarkLink] = Field(default_factory=list)
     providers: list[ProviderStatus] = Field(default_factory=list)
     metrics: SearchMetrics

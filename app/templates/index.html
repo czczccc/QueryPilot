@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>QueryPilot - 可解释的 AI 聚合搜索</title>
+  <title>夸克网盘资源搜索 - QueryPilot</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
   <main class="container">
     <header>
-      <h1>QueryPilot</h1>
-      <p class="tagline">用一句话描述你想找的东西，系统负责理解、搜索，并解释为什么返回这些结果</p>
+      <h1>夸克网盘资源搜索</h1>
+      <p class="tagline">输入影视/剧集名，自动全网搜索夸克网盘分享链接（含提取码、可达性验证与置信度）</p>
     </header>
 
     <section aria-label="搜索输入">
@@ -18,16 +18,16 @@
         <label class="visually-hidden" for="query">搜索内容</label>
         <div class="search-row">
           <input id="query" name="query" type="search" autocomplete="off"
-                 placeholder="例如：想找一款适合四个人玩的轻量联机游戏，最好支持中文"
+                 placeholder="例如：漫长的季节 4K / 绝命律师 全集 / 沙丘2"
                  minlength="2" maxlength="200" required>
           <button id="submit-btn" type="submit">搜索</button>
         </div>
         <p id="form-error" class="form-error" role="alert" hidden></p>
         <div class="examples" aria-label="示例查询">
           <span>试试：</span>
-          <button type="button" class="example" data-query="想找一款适合四个人玩的轻量联机游戏，最好支持中文">四人联机游戏</button>
-          <button type="button" class="example" data-query="推荐一部悬疑烧脑的电影">悬疑电影</button>
-          <button type="button" class="example" data-query="好用的截图工具软件">截图软件</button>
+          <button type="button" class="example" data-query="漫长的季节 4K">漫长的季节</button>
+          <button type="button" class="example" data-query="绝命律师 全集">绝命律师</button>
+          <button type="button" class="example" data-query="沙丘2 4K HDR">沙丘2</button>
         </div>
       </form>
     </section>
@@ -35,14 +35,17 @@
     <p id="status" class="status" role="status" aria-live="polite" hidden></p>
 
     <section id="results" hidden aria-label="搜索结果">
-      <div id="intent-card" class="card" hidden></div>
+      <div id="parsed-card" class="card" hidden></div>
       <div id="metrics" class="metrics" hidden></div>
+      <div id="link-actions" class="link-actions" hidden>
+        <button id="copy-btn" type="button" class="secondary-btn">复制全部链接</button>
+      </div>
       <ol id="result-list" class="result-list"></ol>
       <div id="empty-state" class="empty" hidden></div>
     </section>
 
     <footer>
-      <p>结果来自公开搜索源，相关性分数为启发式结果，不代表真实性或质量保证。</p>
+      <p>结果来自公开搜索源，仅供合规用途；链接可达性与内容有效性请自行判断。</p>
     </footer>
   </main>
   <script src="/static/app.js"></script>

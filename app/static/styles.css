@@ -175,6 +175,62 @@ header h1 {
   color: var(--muted);
 }
 
+.link-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.badge-high { color: #166534; border-color: #86efac; background: #f0fdf4; }
+.badge-mid { color: #92400e; border-color: #fcd34d; background: #fffbeb; }
+.badge-low { color: #7f1d1d; border-color: #fca5a5; background: #fef2f2; }
+
+.share-url {
+  display: inline-block;
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: 0.9rem;
+  word-break: break-all;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.share-url:hover { text-decoration: underline; }
+.share-url:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.link-actions { margin-bottom: 0.75rem; }
+
+.secondary-btn {
+  padding: 0.45rem 1rem;
+  font-size: 0.9rem;
+  color: var(--accent);
+  background: var(--card);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.secondary-btn:hover { background: #eff6ff; }
+.secondary-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.secondary-btn.small { padding: 0.2rem 0.7rem; font-size: 0.8rem; }
+
+.row-actions { margin-top: 0.4rem; }
+
 .empty {
   background: var(--card);
   border: 1px dashed var(--border);
