@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 import httpx
 
 from app.models import QuarkLink
+from app.security import is_safe_fetch_url
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,10 @@ def _headers(referer: str | None = None) -> dict[str, str]:
 async def deep_fetch_links(
     url: str, client: httpx.AsyncClient, timeout: float = 10.0
 ) -> list[tuple[str, str | None]]:
-    """抓取页面完整 HTML，提取 [(share_id, pwd)]（失败返回空列表）。"""
+    """抓取页面完整 HTML，提取 [(share_id, pwd)]（失败或非公网 URL 返回空列表）。"""
+    if not await is_safe_fetch_url(url):
+        logger.warning("深度抓取跳过非公网 URL: %s", url[:80])
+        return []
     try:
         resp = await client.get(url, headers=_headers(), timeout=timeout, follow_redirects=True)
         text = resp.text

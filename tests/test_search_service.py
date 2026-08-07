@@ -1,5 +1,7 @@
 """QuarkSearchService 编排测试：假解析器 + 假 Tavily + MockTransport 深度抓取/验证。"""
 
+import socket
+
 import httpx
 import pytest
 
@@ -7,6 +9,15 @@ from app.models import RawSearchResult, SearchRequest
 from app.providers.base import ProviderError
 from app.services.intent import ParseOutcome, rule_based_parsed
 from app.services.search import QuarkSearchService, SearchUnavailableError
+
+
+@pytest.fixture(autouse=True)
+def _public_dns(monkeypatch):
+    """固定 DNS 解析为公网 IP：避免本机代理 fake-ip 导致 SSRF 校验误拦截。"""
+    monkeypatch.setattr(
+        socket, "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("93.184.216.34", 0))],
+    )
 
 
 class FakeParser:
