@@ -14,6 +14,7 @@ const resultList = document.getElementById("result-list");
 const emptyState = document.getElementById("empty-state");
 
 let currentLinks = [];
+let hideDead = true;
 
 function setText(el, text) {
   el.textContent = text;
@@ -78,8 +79,9 @@ function renderMetrics(metrics, providers) {
 
 function renderLinks(links) {
   currentLinks = links;
+  const visible = hideDead ? links.filter((l) => l.state !== "invalid") : links;
   resultList.innerHTML = "";
-  for (const l of links) {
+  for (const l of visible) {
     const li = document.createElement("li");
     li.className = "result-card";
 
@@ -94,6 +96,17 @@ function renderLinks(links) {
     conf.className = "badge badge-" + (l.conf === "高" ? "high" : l.conf === "低" ? "low" : "mid");
     setText(conf, l.conf + "置信");
     head.appendChild(conf);
+
+    const stateBadge = document.createElement("span");
+    const stateMap = {
+      valid: ["有效", "ok"],
+      invalid: ["已失效", "dead"],
+      unknown: ["待确认", "unknown"],
+    };
+    const [stateText, stateCls] = stateMap[l.state] || ["待确认", "unknown"];
+    stateBadge.className = "badge badge-" + stateCls;
+    setText(stateBadge, stateText);
+    head.appendChild(stateBadge);
     li.appendChild(head);
 
     const url = document.createElement("a");
@@ -107,9 +120,12 @@ function renderLinks(links) {
     const meta = document.createElement("div");
     meta.className = "meta";
     const pwdTxt = l.pwd ? "提取码: " + l.pwd : "无提取码";
-    const httpTxt = l.http === 200 ? "✓ 可达" : (l.http ? "HTTP " + l.http : "✗ 不可达");
-    setText(meta, pwdTxt + "　|　" + httpTxt + "　|　" + l.time + "　|　来源: " + l.source);
+    setText(meta, pwdTxt + "　|　" + l.time + "　|　来源: " + l.source);
     li.appendChild(meta);
+
+    if (l.state === "invalid") {
+      li.classList.add("result-dead");
+    }
 
     const row = document.createElement("div");
     row.className = "row-actions";
@@ -132,14 +148,20 @@ function renderLinks(links) {
 }
 
 copyBtn.addEventListener("click", () => {
-  const lines = currentLinks.map((l) => {
+  const visible = hideDead ? currentLinks.filter((l) => l.state !== "invalid") : currentLinks;
+  const lines = visible.map((l) => {
     const link = "https://pan.quark.cn/s/" + l.share + (l.pwd ? "?pwd=" + l.pwd : "");
-    return [l.name, link, l.pwd || "-", l.time, l.conf, l.http === 200 ? "可达" : "不可达"].join("\t");
+    return [l.name, link, l.pwd || "-", l.time, l.conf, l.state === "valid" ? "有效" : "失效"].join("\t");
   });
   navigator.clipboard.writeText(lines.join("\n")).then(() => {
     showStatus("已复制 " + lines.length + " 条链接", "info");
     setTimeout(hideStatus, 2000);
   });
+});
+
+document.getElementById("hide-dead").addEventListener("change", (e) => {
+  hideDead = e.target.checked;
+  if (currentLinks.length) renderLinks(currentLinks);
 });
 
 async function doSearch(query) {

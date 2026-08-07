@@ -33,6 +33,10 @@ BLOCKED_DOMAINS = ("weibo.com", "tieba.baidu.com", "bilibili.com", "zhihu.com")
 
 QKYUNSO_BASE = "https://qkyunso.com"
 
+# 夸克分享验证 API（来自 pan.quark.cn 分享页前端 share.js v4.6.3）
+TOKEN_URL = "https://pan.quark.cn/1/clouddrive/share/sharepage/token"
+DETAIL_URL = "https://pan.quark.cn/1/clouddrive/share/sharepage/detail"
+
 
 def find_pwd(text: str) -> str | None:
     """从文本中找提取码（4 位）。"""
@@ -95,20 +99,72 @@ async def deep_fetch_links(
 
 
 async def verify_quark(
-    share_id: str, client: httpx.AsyncClient, timeout: float = 12.0
-) -> int | None:
-    """验证夸克链接可达性（弱验证：静态壳页均返回 200）。"""
+    share_id: str, client: httpx.AsyncClient, timeout: float = 8.0, pwd: str | None = None
+) -> tuple[int | None, str]:
+    """严格验证夸克分享链接，返回 `(壳页状态码, 状态)`。
+
+    状态：
+    - `valid`   分享存在且有文件列表（可正常访问）
+    - `invalid` 分享不存在（404/41006）或文件已被删空（detail 无文件）
+    - `unknown` 网络异常或无法判定
+    """
+    headers = {
+        "User-Agent": UA,
+        "Content-Type": "application/json",
+        "Referer": f"https://pan.quark.cn/s/{share_id}",
+        "Origin": "https://pan.quark.cn",
+    }
+    # 1) 获取 stoken（分享不存在时返回 404/41006）
     try:
-        url = f"https://pan.quark.cn/s/{share_id}"
-        resp = await client.get(
-            url,
-            headers=_headers(referer="https://www.quark.cn/"),
+        resp = await client.post(
+            TOKEN_URL,
+            json={
+                "pwd_id": share_id,
+                "passcode": pwd or "",
+                "support_visit_limit_private_share": True,
+            },
+            headers=headers,
             timeout=timeout,
-            follow_redirects=True,
         )
-        return resp.status_code
-    except httpx.HTTPError:
-        return None
+        if resp.status_code == 404:
+            return 404, "invalid"
+        resp.raise_for_status()
+        data = resp.json()
+    except (httpx.HTTPError, ValueError):
+        return None, "unknown"
+    stoken = (data.get("data") or {}).get("stoken")
+    if not stoken:
+        return 200, "invalid" if data.get("code") == 41006 else "unknown"
+
+    # 2) 分享详情：有效分享返回文件列表
+    try:
+        detail_resp = await client.get(
+            DETAIL_URL,
+            params={
+                "ver": 2,
+                "pwd_id": share_id,
+                "stoken": stoken,
+                "pdir_fid": "0",
+                "force": 0,
+                "_page": 1,
+                "_size": 50,
+                "_fetch_banner": 1,
+                "_fetch_share": 1,
+                "fetch_relate_conversation": 1,
+            },
+            headers=headers,
+            timeout=timeout,
+        )
+        detail_resp.raise_for_status()
+        detail = detail_resp.json()
+    except (httpx.HTTPError, ValueError):
+        return 200, "unknown"
+
+    lst = (detail.get("data") or {}).get("list") or []
+    share_status = (detail.get("data") or {}).get("share", {}).get("status")
+    if lst and share_status == 1:
+        return 200, "valid"
+    return 200, "invalid"
 
 
 # ---------------- 引擎：夸克云搜（始终启用） ----------------

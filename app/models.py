@@ -46,7 +46,8 @@ class QuarkLink(BaseModel):
     source: str
     time: str
     conf: str = "中"  # 置信度：高/中/低
-    http: int | None = None  # 可达性验证状态码，None=验证失败
+    http: int | None = None  # 壳页状态码
+    state: str = "unknown"  # 严格验证状态：valid / invalid / unknown
 
 
 class ProviderStatus(BaseModel):

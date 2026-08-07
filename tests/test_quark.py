@@ -87,18 +87,56 @@ def test_parse_qkyunso_detail():
 
 # ---------------- 验证（MockTransport） ----------------
 
-async def test_verify_quark_returns_status():
+def _verify_ok_handler():
+    """token 返回 stoken，detail 返回带文件列表的分享。"""
+
     async def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.host == "pan.quark.cn"
-        return httpx.Response(200)
+        if request.url.path.endswith("/sharepage/token"):
+            assert request.url.host == "pan.quark.cn"
+            return httpx.Response(200, json={"code": 0, "data": {"stoken": "testtoken"}})
+        if request.url.path.endswith("/sharepage/detail"):
+            return httpx.Response(200, json={
+                "code": 0,
+                "data": {"share": {"status": 1}, "list": [{"file_name": "电影.mkv"}]},
+            })
+        return httpx.Response(404)
+
+    return handler
+
+
+async def test_verify_quark_valid():
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_verify_ok_handler()))
+    code, state = await verify_quark("abc1234567", client, timeout=5)
+    assert code == 200
+    assert state == "valid"
+
+
+async def test_verify_quark_missing_share_invalid():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"status": 404, "code": 41006, "message": "分享不存在"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    assert await verify_quark("abc1234567", client, timeout=5) == 200
+    code, state = await verify_quark("abc1234567", client, timeout=5)
+    assert code == 404
+    assert state == "invalid"
 
 
-async def test_verify_quark_network_error_returns_none():
+async def test_verify_quark_empty_detail_invalid():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/sharepage/token"):
+            return httpx.Response(200, json={"code": 0, "data": {"stoken": "t"}})
+        return httpx.Response(200, json={"code": 0, "data": {"share": {"status": 3}, "list": []}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    _, state = await verify_quark("abc1234567", client, timeout=5)
+    assert state == "invalid"
+
+
+async def test_verify_quark_network_error_unknown():
     async def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused")
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    assert await verify_quark("abc1234567", client, timeout=5) is None
+    code, state = await verify_quark("abc1234567", client, timeout=5)
+    assert code is None
+    assert state == "unknown"

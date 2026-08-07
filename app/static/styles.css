@@ -193,6 +193,14 @@ header h1 {
 .badge-high { color: #166534; border-color: #86efac; background: #f0fdf4; }
 .badge-mid { color: #92400e; border-color: #fcd34d; background: #fffbeb; }
 .badge-low { color: #7f1d1d; border-color: #fca5a5; background: #fef2f2; }
+.badge-ok { color: #166534; border-color: #86efac; background: #f0fdf4; }
+.badge-dead { color: #7f1d1d; border-color: #fca5a5; background: #fef2f2; }
+.badge-unknown { color: #4b5563; border-color: #d1d5db; background: #f9fafb; }
+
+.result-dead {
+  opacity: 0.55;
+  background: #fafafa;
+}
 
 .share-url {
   display: inline-block;
@@ -209,7 +217,21 @@ header h1 {
   outline-offset: 2px;
 }
 
-.link-actions { margin-bottom: 0.75rem; }
+.link-actions { margin-bottom: 0.75rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+
+.filter-label {
+  font-size: 0.9rem;
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+
+.filter-label input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 .secondary-btn {
   padding: 0.45rem 1rem;

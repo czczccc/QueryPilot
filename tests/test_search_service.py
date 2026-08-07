@@ -39,7 +39,14 @@ def _quark_result(url: str) -> RawSearchResult:
 
 def _ok_client() -> httpx.AsyncClient:
     async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200)
+        if request.url.path.endswith("/sharepage/token"):
+            return httpx.Response(200, json={"code": 0, "data": {"stoken": "t"}})
+        if request.url.path.endswith("/sharepage/detail"):
+            return httpx.Response(200, json={
+                "code": 0,
+                "data": {"share": {"status": 1}, "list": [{"file_name": "电影.mkv"}]},
+            })
+        return httpx.Response(200, json={})
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 

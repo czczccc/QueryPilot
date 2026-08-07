@@ -104,20 +104,23 @@ class QuarkSearchService:
             uniq.setdefault(link.share, link)
         final = list(uniq.values())
 
-        # 并发验证可达性（限制 8 并发，避免打满夸克服务）
+        # 并发验证有效性（限制 8 并发，避免打满夸克服务）
         verify_sem = asyncio.Semaphore(8)
 
         async def check(link: QuarkLink) -> None:
             async with verify_sem:
-                link.http = await verify_quark(link.share, self._client, timeout=8.0)
+                link.http, link.state = await verify_quark(
+                    link.share, self._client, timeout=8.0, pwd=link.pwd
+                )
 
         await asyncio.gather(*(check(link) for link in final))
 
-        # 排序：可达优先，其次置信度，再按分享码稳定
+        # 排序：有效优先，未知居中，失效最后；同状态按置信度
+        state_rank = {"valid": 0, "unknown": 1, "invalid": 2}
         conf_rank = {"高": 0, "中": 1, "低": 2}
         final.sort(
             key=lambda l: (
-                0 if l.http == 200 else 1,
+                state_rank.get(l.state, 1),
                 conf_rank.get(l.conf, 1),
                 l.share,
             )
