@@ -69,6 +69,7 @@ quark-search-tool/
 │  │  └─ tavily.py            # Tavily 适配器（Bearer 认证、错误映射）
 │  ├─ services/
 │  │  ├─ intent.py            # DeepSeek 影视解析 + _coerce 归一化 + 规则降级
+│  │  ├─ douban.py            # 豆瓣链接识别（移动版页面 og:title 提取片名/年份/类型）
 │  │  ├─ search.py            # QuarkSearchService：编排、并发、部分成功、验证
 │  │  └─ quark.py             # 链接提取、深度抓取、严格验证、Bing/垂直站引擎
 │  ├─ templates/index.html    # 单页搜索界面
@@ -80,6 +81,7 @@ quark-search-tool/
 │  ├─ test_intent.py          # LLM 解析与降级
 │  ├─ test_providers.py       # Tavily 适配器
 │  ├─ test_quark.py           # 提取/置信度/验证/Bing/垂直站
+│  ├─ test_douban.py          # 豆瓣链接识别（URL 检测/页面解析/失败兜底）
 │  └─ test_search_service.py  # 编排：部分成功、去重、验证
 ├─ docs/
 ├─ tasks/
@@ -178,6 +180,15 @@ DeepSeek 响应先解析 JSON，再经 `_coerce` 归一化（截断超限字段�
 2. `GET /1/clouddrive/share/sharepage/detail`：带 `stoken` 查文件列表，`data.list` 非空且 `share.status == 1` 判 `valid`，否则 `invalid`。
 
 网络异常或 JSON 解析失败判 `unknown`。此验证取代旧的"HTTP 200 = 可达"弱验证（壳页假象）。
+
+### 6.5 豆瓣链接识别（douban.fetch_douban_meta）
+
+用户输入豆瓣链接时（`movie.douban.com/subject/<id>`），先识别影视资源再搜索：
+
+- 豆瓣 PC 端对无 Cookie 请求返回 JS 挑战页，**移动版 `m.douban.com` 可直接抓取**；
+- 从页面 `og:title`（如「漫长的季节 (2023) - 电视剧」）提取片名/年份/类型；
+- 识别结果填充到响应 `douban` 字段，片名进入正常解析与搜索链路；
+- 识别失败（404/网络错误）时回退为把原始文本交给解析器，不影响主流程。
 
 ## 7. API 设计
 

@@ -24,8 +24,10 @@ class FakeParser:
     def __init__(self, parsed=None, fallback=False):
         self._parsed = parsed or rule_based_parsed("漫长的季节")
         self._fallback = fallback
+        self.last_query = None
 
     async def parse(self, query: str) -> ParseOutcome:
+        self.last_query = query
         return ParseOutcome(parsed=self._parsed, fallback_used=self._fallback)
 
 
@@ -134,3 +136,35 @@ async def test_fallback_flag_propagates():
                              client=_ok_client())
     resp = await svc.search(_req())
     assert resp.metrics.fallback_used is True
+
+
+async def test_douban_link_resolves_to_title():
+    """输入豆瓣链接时，先用移动版页面识别片名，再交给解析器搜索。"""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "m.douban.com":
+            return httpx.Response(
+                200,
+                text='<meta property="og:title" content="漫长的季节 (2023) - 电视剧" />',
+            )
+        if request.url.path.endswith("/sharepage/token"):
+            return httpx.Response(200, json={"code": 0, "data": {"stoken": "t"}})
+        if request.url.path.endswith("/sharepage/detail"):
+            return httpx.Response(200, json={
+                "code": 0,
+                "data": {"share": {"status": 1}, "list": [{"file_name": "电影.mkv"}]},
+            })
+        return httpx.Response(200, json={})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    parser = FakeParser()
+    provider = FakeTavily(results=[_quark_result("https://pan.quark.cn/s/abc1234567")])
+    svc = QuarkSearchService(parser=parser, tavily=provider, use_qkyunso=False,
+                             use_bing=False, client=client)
+    resp = await svc.search(SearchRequest(query="https://movie.douban.com/subject/35320175/"))
+    # 解析器收到的是识别出的片名而非原始 URL
+    assert parser.last_query == "漫长的季节 2023"
+    assert resp.douban is not None
+    assert resp.douban.title == "漫长的季节"
+    assert resp.douban.year == "2023"
+    assert resp.douban.kind == "电视剧"

@@ -42,7 +42,7 @@ function hideFormError() {
   formError.hidden = true;
 }
 
-function renderParsed(parsed) {
+function renderParsed(parsed, douban) {
   parsedCard.hidden = false;
   parsedCard.innerHTML = "";
   const h = document.createElement("h2");
@@ -56,6 +56,14 @@ function renderParsed(parsed) {
   if (parsed.aliases && parsed.aliases.length) bits.push("别名: " + parsed.aliases.join("、"));
   setText(p, bits.join("　|　"));
   parsedCard.appendChild(p);
+
+  if (douban) {
+    const d = document.createElement("p");
+    setText(d, "来源：豆瓣链接 → " + douban.title +
+      (douban.year ? " (" + douban.year + ")" : "") +
+      (douban.kind ? " · " + douban.kind : ""));
+    parsedCard.appendChild(d);
+  }
 
   const v = document.createElement("p");
   setText(v, "搜索查询：" + parsed.search_suggestions.join(" ｜ "));
@@ -200,7 +208,7 @@ async function doSearch(query) {
     const data = await resp.json();
     hideStatus();
 
-    renderParsed(data.parsed);
+    renderParsed(data.parsed, data.douban);
     renderMetrics(data.metrics, data.providers);
 
     if (data.links.length === 0) {

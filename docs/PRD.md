@@ -65,7 +65,8 @@ QueryPilot 将用户的自然语言需求转换成结构化搜索计划，通过
 
 - DeepSeek 将输入解析为 `resource`、`quality`、`aliases`、`english_name` 和 5~6 个 `search_suggestions`；
 - 模型输出必须经过归一化 + Pydantic 校验，不可信 JSON 不得直接进入搜索层；
-- DeepSeek 超时、限流或输出无效时，系统使用规则降级（关键词清洗 + 默认查询词）并标记降级模式。
+- DeepSeek 超时、限流或输出无效时，系统使用规则降级（关键词清洗 + 默认查询词）并标记降级模式；
+- 输入为豆瓣链接（`movie.douban.com/subject/<id>`）时，先抓取移动版页面识别片名/年份/类型，再进入解析；响应携带 `douban` 元信息。
 
 #### FR-03 多源检索
 

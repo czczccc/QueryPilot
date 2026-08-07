@@ -12,6 +12,7 @@ import uuid
 import httpx
 
 from app.models import (
+    DoubanMeta,
     ProviderStatus,
     QuarkLink,
     QuarkSearchResponse,
@@ -19,6 +20,7 @@ from app.models import (
     SearchRequest,
 )
 from app.providers.base import ProviderError, SearchProvider
+from app.services.douban import extract_douban_id, fetch_douban_meta
 from app.services.intent import IntentParser
 from app.services.quark import (
     BLOCKED_DOMAINS,
@@ -64,7 +66,27 @@ class QuarkSearchService:
     async def search(self, req: SearchRequest) -> QuarkSearchResponse:
         started = time.monotonic()
         request_id = uuid.uuid4().hex
-        outcome = await self._parser.parse(req.query)
+
+        # 豆瓣链接识别：拿到片名/年份后作为搜索查询
+        douban_meta: DoubanMeta | None = None
+        query = req.query
+        douban_id = extract_douban_id(req.query)
+        if douban_id:
+            meta = await fetch_douban_meta(douban_id, self._client, self._timeout)
+            if meta:
+                query = meta["title"]
+                if meta.get("year"):
+                    query += f" {meta['year']}"
+                douban_meta = DoubanMeta(
+                    subject_id=douban_id,
+                    url=f"https://movie.douban.com/subject/{douban_id}/",
+                    title=meta["title"],
+                    year=meta.get("year"),
+                    kind=meta.get("kind"),
+                )
+                logger.info("豆瓣链接识别: %s -> %s", douban_id, query)
+
+        outcome = await self._parser.parse(query)
         parsed = outcome.parsed
 
         providers: dict[str, ProviderStatus] = {
@@ -158,6 +180,7 @@ class QuarkSearchService:
             links=final,
             providers=list(providers.values()),
             metrics=metrics,
+            douban=douban_meta,
         )
 
     async def _tavily_pipeline(

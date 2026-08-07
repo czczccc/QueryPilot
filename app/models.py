@@ -69,6 +69,16 @@ class SearchMetrics(BaseModel):
     fallback_used: bool = False
 
 
+class DoubanMeta(BaseModel):
+    """豆瓣链接识别出的影视资源元信息。"""
+
+    subject_id: str
+    url: str
+    title: str
+    year: str | None = None
+    kind: str | None = None
+
+
 class QuarkSearchResponse(BaseModel):
     """`POST /api/search` 响应体（网盘链接搜索）。"""
 
@@ -78,3 +88,4 @@ class QuarkSearchResponse(BaseModel):
     links: list[QuarkLink] = Field(default_factory=list)
     providers: list[ProviderStatus] = Field(default_factory=list)
     metrics: SearchMetrics
+    douban: DoubanMeta | None = None  # 输入为豆瓣链接时填充
