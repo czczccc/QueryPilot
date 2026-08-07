@@ -3,13 +3,21 @@
 页面、API 与搜索编排收敛在单个服务内，方便本地调试与国内服务器 Docker 部署。
 """
 
-from fastapi import FastAPI, HTTPException
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 from app.config import load_settings
 from app.models import SearchRequest, SearchResponse
 from app.providers.tavily import TavilyProvider
 from app.services.intent import DeepSeekParser
 from app.services.search import SearchService, SearchUnavailableError
+
+BASE_DIR = Path(__file__).resolve().parent
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
 def build_default_service() -> SearchService:
@@ -39,11 +47,12 @@ def create_app(service: SearchService | None = None) -> FastAPI:
         version="0.1.0",
     )
     app.state.search_service = resolved
+    app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
-    @app.on_event("startup")
-    async def _startup() -> None:
-        # 保持 state 一致；测试注入的 service 不被覆盖
-        app.state.search_service = resolved
+    @app.get("/", response_class=HTMLResponse)
+    async def index(request: Request) -> HTMLResponse:
+        """服务端渲染的搜索页面。"""
+        return templates.TemplateResponse(request, "index.html")
 
     @app.get("/health")
     async def health() -> dict:
