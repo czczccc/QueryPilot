@@ -89,6 +89,12 @@ tests/                   # 48 项测试（MockTransport，不调用真实 API）
 
 `http://124.223.112.9:8000`（部署于国内轻量服务器，Docker + Nginx）
 
+## 项目文档
+
+- [产品需求文档（PRD）](docs/PRD.md)
+- [开发与架构文档](docs/DEVELOPMENT.md)
+- [面试 Q&A 准备](docs/INTERVIEW.md)
+
 ## 部署（国内服务器）
 
 ```bash
