@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import base64
 import logging
 import re
 import urllib.parse
@@ -202,6 +203,59 @@ def confidence_from_months(m: int | None) -> str:
     if m <= 6:
         return "中"
     return "低"
+
+
+# ---------------- 引擎：Bing 中文（免费，无 key） ----------------
+def decode_bing_url(href: str) -> str | None:
+    """解码 Bing 跳转链接（?u=a1<base64url>）。"""
+    m = re.search(r"[?&]u=a1([^&]+)", href)
+    if not m:
+        return None
+    try:
+        b64 = urllib.parse.unquote(m.group(1))
+        b64 += "=" * (-len(b64) % 4)
+        return base64.urlsafe_b64decode(b64).decode("utf-8", "ignore")
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+async def search_bing(
+    kw: str, client: httpx.AsyncClient, timeout: float = 15.0
+) -> list[QuarkLink]:
+    """Bing 中文搜索：4 个查询词，解析结果页提取夸克链接（迁移自桌面原型）。"""
+    out: list[QuarkLink] = []
+    seen: set[str] = set()
+    queries = [f'"{kw}" 夸克网盘', f"{kw} 夸克 分享", f"{kw} 4K 夸克", f"{kw} 网盘 全集"]
+    for q in queries:
+        try:
+            url = (
+                "https://cn.bing.com/search?q=" + urllib.parse.quote(q)
+                + "&mkt=zh-CN&setlang=zh-hans"
+            )
+            resp = await client.get(
+                url, headers=_headers(referer="https://cn.bing.com/"),
+                timeout=timeout, follow_redirects=True,
+            )
+            html = resp.text
+            for m in re.finditer(
+                r'<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>(.*?)</a></h2>',
+                html, re.DOTALL,
+            ):
+                real = decode_bing_url(m.group(1)) or m.group(1)
+                if not re.match(r"^https?://", real):
+                    continue
+                title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
+                # 从 h2 开始取 6000 字符：新版 Bing 常把夸克链接直接写在标题文本里
+                seg = html[m.start() : m.end() + 6000]
+                for sid, pwd in extract_links_with_pwd(seg):
+                    if sid in seen:
+                        continue
+                    seen.add(sid)
+                    tm = re.search(r"([0-9]+)\s*(天|小时|分钟)?\s*(之前|前)", seg)
+                    out.append(make_entry(title[:40] or kw, sid, real, tm.group(0) if tm else "", pwd))
+        except httpx.HTTPError as exc:
+            logger.warning("[引擎 Bing] 查询失败: %s", exc)
+    return out
 
 
 async def search_qkyunso(

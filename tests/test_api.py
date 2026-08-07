@@ -35,7 +35,7 @@ class FailingProvider:
 
 
 def _make_client(provider=None) -> TestClient:
-    svc = QuarkSearchService(parser=FakeParser(), tavily=provider or FakeProvider(), use_qkyunso=False)
+    svc = QuarkSearchService(parser=FakeParser(), tavily=provider or FakeProvider(), use_qkyunso=False, use_bing=False)
     app = create_app(service=svc)
     return TestClient(app)
 

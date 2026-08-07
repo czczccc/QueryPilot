@@ -26,6 +26,7 @@ from app.services.quark import (
     deep_fetch_links,
     extract_links_with_pwd,
     make_entry,
+    search_bing,
     search_qkyunso,
     verify_quark,
 )
@@ -45,6 +46,7 @@ class QuarkSearchService:
         parser: IntentParser,
         tavily: SearchProvider,
         use_qkyunso: bool = True,
+        use_bing: bool = True,
         max_tasks: int = 8,
         timeout: float = 8.0,
         client: httpx.AsyncClient | None = None,
@@ -52,6 +54,7 @@ class QuarkSearchService:
         self._parser = parser
         self._tavily = tavily
         self._use_qkyunso = use_qkyunso
+        self._use_bing = use_bing
         self._max_tasks = max_tasks
         self._timeout = timeout
         self._client = client or httpx.AsyncClient(
@@ -69,6 +72,8 @@ class QuarkSearchService:
         }
         if self._use_qkyunso:
             providers["qkyunso"] = ProviderStatus(name="qkyunso")
+        if self._use_bing:
+            providers["bing"] = ProviderStatus(name="bing")
 
         links: list[QuarkLink] = []
 
@@ -85,11 +90,25 @@ class QuarkSearchService:
         if self._use_qkyunso:
             try:
                 t0 = time.monotonic()
-                links += await search_qkyunso(parsed.resource, self._client, self._timeout)
+                qk_links = await search_qkyunso(parsed.resource, self._client, self._timeout)
+                providers["qkyunso"].result_count = len(qk_links)
+                links += qk_links
                 providers["qkyunso"].duration_ms += int((time.monotonic() - t0) * 1000)
             except Exception:
                 logger.exception("夸克云搜异常")
                 providers["qkyunso"].error_type = "pipeline_error"
+
+        # 引擎 3：Bing 中文（免费）
+        if self._use_bing:
+            try:
+                t0 = time.monotonic()
+                bing_links = await search_bing(parsed.resource, self._client, self._timeout)
+                providers["bing"].result_count = len(bing_links)
+                links += bing_links
+                providers["bing"].duration_ms += int((time.monotonic() - t0) * 1000)
+            except Exception:  # 单引擎兜底，不中断整体
+                logger.exception("Bing 引擎异常")
+                providers["bing"].error_type = "pipeline_error"
 
         for status in providers.values():
             if status.error_type:

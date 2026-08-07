@@ -57,7 +57,7 @@ def _req(query: str = "漫长的季节 4K") -> SearchRequest:
 
 async def test_tavily_url_extracts_quark_links():
     provider = FakeTavily(results=[_quark_result("https://pan.quark.cn/s/abc1234567")])
-    svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False,
+    svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False, use_bing=False,
                              client=_ok_client())
     resp = await svc.search(_req())
     assert len(resp.links) == 1
@@ -71,7 +71,7 @@ async def test_dedupe_by_share_id():
         _quark_result("https://pan.quark.cn/s/abc1234567"),
         _quark_result("https://example.com/other 说 https://pan.quark.cn/s/abc1234567"),
     ])
-    svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False,
+    svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False, use_bing=False,
                              client=_ok_client())
     resp = await svc.search(_req())
     shares = [l.share for l in resp.links]
@@ -84,7 +84,7 @@ async def test_deep_fetch_adds_links():
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     provider = FakeTavily(results=[_quark_result("https://example.com/page")])
-    svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False, client=client)
+    svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False, use_bing=False, client=client)
     resp = await svc.search(_req())
     shares = {l.share for l in resp.links}
     assert "xyz9876543" in shares
@@ -93,21 +93,21 @@ async def test_deep_fetch_adds_links():
 async def test_verify_marks_http_status():
     client = _ok_client()
     provider = FakeTavily(results=[_quark_result("https://pan.quark.cn/s/abc1234567")])
-    svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False, client=client)
+    svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False, use_bing=False, client=client)
     resp = await svc.search(_req())
     assert resp.links[0].http == 200
 
 
 async def test_all_engines_fail_raises_unavailable():
     provider = FakeTavily(error="http_500")
-    svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False)
+    svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False, use_bing=False)
     with pytest.raises(SearchUnavailableError):
         await svc.search(_req())
 
 
 async def test_metrics_shape():
     provider = FakeTavily(results=[_quark_result("https://pan.quark.cn/s/abc1234567")])
-    svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False,
+    svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False, use_bing=False,
                              client=_ok_client())
     resp = await svc.search(_req())
     assert resp.request_id
@@ -119,7 +119,7 @@ async def test_metrics_shape():
 
 async def test_fallback_flag_propagates():
     provider = FakeTavily(results=[_quark_result("https://pan.quark.cn/s/abc1234567")])
-    svc = QuarkSearchService(parser=FakeParser(fallback=True), tavily=provider, use_qkyunso=False,
+    svc = QuarkSearchService(parser=FakeParser(fallback=True), tavily=provider, use_qkyunso=False, use_bing=False,
                              client=_ok_client())
     resp = await svc.search(_req())
     assert resp.metrics.fallback_used is True
