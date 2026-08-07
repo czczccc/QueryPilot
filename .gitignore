@@ -16,3 +16,7 @@ build/
 # ---- 系统 ----
 .DS_Store
 Thumbs.db
+
+# ---- Reasonix 内部工作文件 ----
+.reasonix/
+
