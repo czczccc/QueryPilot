@@ -4,6 +4,7 @@
 重写为异步 HTTP 客户端版本供 Web 服务使用。
 """
 
+import asyncio
 import logging
 import re
 import urllib.parse
@@ -150,23 +151,25 @@ def confidence_from_months(m: int | None) -> str:
 async def search_qkyunso(
     kw: str, client: httpx.AsyncClient, timeout: float = 15.0
 ) -> list[QuarkLink]:
-    """夸克云搜：搜索页 → 详情页 → 提取分享链接与提取码。"""
+    """夸克云搜：搜索页 → 详情页（并发）→ 提取分享链接与提取码。"""
     out: list[QuarkLink] = []
     try:
         url = f"{QKYUNSO_BASE}/search?keyword={urllib.parse.quote(kw)}"
         resp = await client.get(url, headers=_headers(referer=f"{QKYUNSO_BASE}/"), timeout=timeout)
         items = parse_qkyunso_search(resp.text)
         logger.info("夸克云搜: 找到 %d 条资源记录", len(items))
-        for it in items:
-            try:
-                durl = f"{QKYUNSO_BASE}/detail?id={it['id']}"
-                dresp = await client.get(durl, headers=_headers(referer=url), timeout=timeout)
-                sid, months = parse_qkyunso_detail(dresp.text)
-                if not sid:
-                    continue
-                pwd = find_pwd(dresp.text)
-                out.append(
-                    QuarkLink(
+        sem = asyncio.Semaphore(5)
+
+        async def fetch_detail(it: dict) -> QuarkLink | None:
+            async with sem:
+                try:
+                    durl = f"{QKYUNSO_BASE}/detail?id={it['id']}"
+                    dresp = await client.get(durl, headers=_headers(referer=url), timeout=timeout)
+                    sid, months = parse_qkyunso_detail(dresp.text)
+                    if not sid:
+                        return None
+                    pwd = find_pwd(dresp.text)
+                    return QuarkLink(
                         name=it["name"],
                         share=sid,
                         pwd=pwd,
@@ -175,9 +178,12 @@ async def search_qkyunso(
                         conf=confidence_from_months(months),
                         http=None,
                     )
-                )
-            except httpx.HTTPError as exc:
-                logger.warning("夸克云搜详情解析失败: %s", exc)
+                except httpx.HTTPError as exc:
+                    logger.warning("夸克云搜详情解析失败: %s", exc)
+                    return None
+
+        found = await asyncio.gather(*(fetch_detail(it) for it in items[:10]))
+        out = [link for link in found if link is not None]
     except httpx.HTTPError as exc:
         logger.warning("夸克云搜搜索失败: %s", exc)
     return out

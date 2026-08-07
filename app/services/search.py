@@ -104,9 +104,12 @@ class QuarkSearchService:
             uniq.setdefault(link.share, link)
         final = list(uniq.values())
 
-        # 并发验证可达性
+        # 并发验证可达性（限制 8 并发，避免打满夸克服务）
+        verify_sem = asyncio.Semaphore(8)
+
         async def check(link: QuarkLink) -> None:
-            link.http = await verify_quark(link.share, self._client, timeout=self._timeout)
+            async with verify_sem:
+                link.http = await verify_quark(link.share, self._client, timeout=8.0)
 
         await asyncio.gather(*(check(link) for link in final))
 
@@ -147,7 +150,7 @@ class QuarkSearchService:
             async with semaphore:
                 t0 = time.monotonic()
                 try:
-                    results = await self._tavily.search(query, limit=8)
+                    results = await self._tavily.search(query, limit=5)
                     status.result_count += len(results)
                     for r in results:
                         text = f"{r.url} {r.snippet}"
@@ -162,7 +165,8 @@ class QuarkSearchService:
 
         await asyncio.gather(*(run(q) for q in suggestions))
 
-        # 深度抓取（并发，最多 4 个）
+        # 深度抓取（并发，最多 4 个；限制抓取数量控制耗时）
+        fetch_plan = fetch_plan[:10]
         if fetch_plan:
             deep_sem = asyncio.Semaphore(4)
 

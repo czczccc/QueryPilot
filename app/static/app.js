@@ -145,14 +145,18 @@ copyBtn.addEventListener("click", () => {
 async function doSearch(query) {
   hideFormError();
   resultsSection.hidden = true;
-  showStatus("正在解析资源、搜索网盘链接并验证可达性…", "loading");
+  showStatus("正在解析资源、搜索网盘链接并验证可达性…通常需要 20~60 秒，请耐心等待", "loading");
   submitBtn.disabled = true;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120000);
 
   try {
     const resp = await fetch("/api/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query }),
+      signal: controller.signal,
     });
 
     if (resp.status === 422) {
@@ -190,8 +194,13 @@ async function doSearch(query) {
     resultsSection.hidden = false;
   } catch (err) {
     hideStatus();
-    showStatus("网络错误，无法连接服务，请稍后重试。", "error");
+    if (err.name === "AbortError") {
+      showStatus("搜索超时（超过 120 秒），请稍后重试或换一个更精确的资源名。", "error");
+    } else {
+      showStatus("网络错误，无法连接服务，请稍后重试。", "error");
+    }
   } finally {
+    clearTimeout(timer);
     submitBtn.disabled = false;
   }
 }
