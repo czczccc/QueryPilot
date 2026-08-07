@@ -1,0 +1,9 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+# 旧桌面原型仅作迁移参考，不参与 Web 项目的质量门禁
+exclude = ["quark_search_gui.py", ".venv"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
