@@ -1,6 +1,9 @@
 services:
   web:
-    build: .
+    build:
+      context: .
+      args:
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
     ports:
       - "8000:8000"
     env_file:
