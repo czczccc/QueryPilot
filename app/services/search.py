@@ -143,7 +143,9 @@ class QuarkSearchService:
         uniq: dict[str, QuarkLink] = {}
         for link in links:
             uniq.setdefault(link.share, link)
-        final = list(uniq.values())
+        # 验证上限：防合集站单页几百条链接导致的验证风暴，超过部分不验证（不展示）
+        MAX_VERIFY = 60
+        final = list(uniq.values())[:MAX_VERIFY]
 
         # 并发验证有效性（限制 8 并发，避免打满夸克服务）
         verify_sem = asyncio.Semaphore(8)

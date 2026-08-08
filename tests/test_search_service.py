@@ -138,6 +138,18 @@ async def test_fallback_flag_propagates():
     assert resp.metrics.fallback_used is True
 
 
+async def test_verify_capped_at_max():
+    """链接过多时只验证前 60 条，避免合集站页面造成的验证风暴。"""
+    provider = FakeTavily(results=[
+        _quark_result(f"https://pan.quark.cn/s/sid{i:010d}") for i in range(70)
+    ])
+    svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False,
+                             use_bing=False, client=_ok_client())
+    resp = await svc.search(_req())
+    assert len(resp.links) <= 60
+    assert resp.metrics.raw_result_count == 280  # 4 个变体 × 70 条
+
+
 async def test_douban_link_resolves_to_title():
     """输入豆瓣链接时，先用移动版页面识别片名，再交给解析器搜索。"""
 
