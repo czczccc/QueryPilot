@@ -12,11 +12,11 @@ from dataclasses import dataclass
 import httpx
 
 from app.models import ParsedResource, QuarkLink
+from app.services import llm
 from app.services.memory import resource_key
 
 logger = logging.getLogger(__name__)
 
-DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 
 YEAR_RE = re.compile(r"(?<!\d)(19[5-9]\d|20[0-4]\d)(?!\d)")
 CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
@@ -141,9 +141,9 @@ async def llm_judge(
     }
     try:
         resp = await client.post(
-            DEEPSEEK_URL,
+            llm.CHAT_URL,
             json={
-                "model": "deepseek-v4-flash",
+                "model": llm.MODEL,
                 "messages": [
                     {"role": "system", "content": LLM_PROMPT},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},

@@ -14,7 +14,9 @@ except ImportError:  # dotenv 未安装时直接读环境变量
 
 @dataclass(frozen=True)
 class Settings:
-    deepseek_api_key: str = ""
+    deepseek_api_key: str = field(default="", repr=False)  # 也可用 LLM_API_KEY
+    llm_base_url: str = ""  # 兼容 OpenAI 格式的第三方服务地址，空为 DeepSeek 官方
+    llm_model: str = ""  # 模型名，空为 deepseek-v4-flash
     tavily_api_key: str = ""
     app_env: str = "development"
     log_level: str = "INFO"
@@ -51,7 +53,9 @@ def load_settings() -> Settings:
         return tuple(x.strip() for x in os.getenv(name, "").split(",") if x.strip())
 
     return Settings(
-        deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+        deepseek_api_key=(os.getenv("LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY", "")).strip(),
+        llm_base_url=os.getenv("LLM_BASE_URL", "").strip(),
+        llm_model=os.getenv("LLM_MODEL", "").strip(),
         tavily_api_key=os.getenv("TAVILY_API_KEY", ""),
         app_env=os.getenv("APP_ENV", "development"),
         log_level=os.getenv("LOG_LEVEL", "INFO"),

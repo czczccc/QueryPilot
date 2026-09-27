@@ -15,10 +15,10 @@ import httpx
 from pydantic import ValidationError
 
 from app.models import ParsedResource
+from app.services import llm
 
 logger = logging.getLogger(__name__)
 
-DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 
 SYSTEM_PROMPT = (
     "你是影视资源网盘搜索助手。把用户输入解析成 JSON，只输出 JSON 本身。"
@@ -130,7 +130,7 @@ class DeepSeekParser:
             logger.info("未配置 DEEPSEEK_API_KEY，使用规则降级")
             return ParseOutcome(parsed=rule_based_parsed(query), fallback_used=True)
         payload = {
-            "model": "deepseek-v4-flash",
+            "model": llm.MODEL,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": query},
@@ -141,10 +141,10 @@ class DeepSeekParser:
         headers = {"Authorization": f"Bearer {self._api_key}"}
         try:
             if self._client is not None:
-                resp = await self._client.post(DEEPSEEK_URL, json=payload, headers=headers)
+                resp = await self._client.post(llm.CHAT_URL, json=payload, headers=headers)
             else:
                 async with httpx.AsyncClient(timeout=self._timeout) as client:
-                    resp = await client.post(DEEPSEEK_URL, json=payload, headers=headers)
+                    resp = await client.post(llm.CHAT_URL, json=payload, headers=headers)
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"]
             parsed = ParsedResource.model_validate(_coerce(json.loads(content)))
