@@ -1,7 +1,8 @@
 """订阅转存的整理规则（借鉴 MoviePilot「整理」的设计思路，未使用其代码）。
 
 - 每集只留一个版本：视频优先于压缩包，清晰度高的优先，同清晰度取体积大的；
-- 压缩包（zip/rar/7z…）和无关文件（txt/url/图片…）不存，除非分享里一个视频都没有；
+- 按集判断：有视频的集不存压缩包；某一集只有压缩包时存它（不然永远补不齐）；
+- 无关文件（txt/url/图片…）不存；
 - 字幕只跟着选中的集走；
 - 标准文件名：「片名 S01E06.mkv」（电影「片名 (年份).mkv」）。
 
@@ -69,17 +70,20 @@ def standard_name(title: str, ext: str, season: int | None = None,
 def pick_files(
     files: list[dict], movie: bool, season: int | None = None,
 ) -> tuple[list[dict], list[dict]]:
-    """从分享（已展平）的文件里挑要存的：(要存的, 没选的)。"""
+    """从分享（已展平）的文件里挑要存的：(要存的, 没选的)。
+
+    按集判断：有视频版本的集只存最好的视频；某一集只有压缩包时存这一集的压缩包
+    （否则订阅永远补不齐）。电影同理：有视频存视频，没有才存压缩包。
+    """
     names = [str(f.get("file_name") or "") for f in files]
-    videos = [f for f, n in zip(files, names, strict=True) if kind_of(n) == "video"]
-    pool = videos or [f for f, n in zip(files, names, strict=True) if kind_of(n) == "archive"]
+    media = [f for f, n in zip(files, names, strict=True) if kind_of(n) in ("video", "archive")]
     chosen: list[dict] = []
     if movie:
-        if pool:
-            chosen = [max(pool, key=version_rank)]
+        if media:
+            chosen = [max(media, key=version_rank)]  # 视频排在压缩包前面
     else:
         best: dict[int, dict] = {}
-        for f in pool:
+        for f in media:
             ep = episode_no(str(f.get("file_name") or ""), season, any_ext=True)
             if ep is None:
                 continue
