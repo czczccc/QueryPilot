@@ -14,6 +14,7 @@ import secrets
 import time
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -22,6 +23,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from app.admin import admin_router
 from app.config import load_settings
 from app.models import (
     AgentSearchResponse,
@@ -61,6 +63,18 @@ logging.basicConfig(
 )
 install_request_id_factory()
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Who:
+    """当前请求是谁：额度身份、IP 身份、是否登录，以及站长设置的单独额度 / 封禁说明。"""
+
+    subject: str
+    ip_subject: str
+    logged_in: bool
+    nickname: str | None = None
+    ai_limit: int | None = None
+    banned: str | None = None
 
 
 def build_default_service() -> QuarkSearchService:
@@ -134,6 +148,7 @@ def create_app(
     quota: QuotaGuard | None = None,
     invite_required: bool | None = None,
     invite_codes: tuple[str, ...] | None = None,
+    admin_token: str | None = None,
 ) -> FastAPI:
     """创建应用；传入 service / agent 便于测试注入假实现。"""
     resolved = service or build_default_service()
@@ -388,20 +403,36 @@ def create_app(
             return None
         return sh, cookie, row[1], row[2] or f"session:{sh[:16]}"
 
-    async def _identity(request: Request) -> tuple[str, str, bool]:
-        """(额度身份, IP 身份, 是否登录)：登录用户按账号，匿名按 IP（client_id 可随意伪造，不作依据）。"""
-        ip_subject = f"ip:{client_ip(request)}"
+    async def _identity(request: Request) -> Who:
+        """登录用户按账号，匿名按 IP（client_id 可随意伪造，不作依据）；顺带查封禁与单独额度。"""
+        ip = client_ip(request)
+        who = Who(f"ip:{ip}", f"ip:{ip}", False)
+        ban = await users.get_ip_ban(ip)
+        if ban is not None:
+            who.banned = f"该网络已被停用：{ban}" if ban else "该网络已被停用"
         user = await _user_cookie(request)
         if user is not None:
-            return f"user:{user[3]}", ip_subject, True
-        return ip_subject, ip_subject, False
+            who.subject, who.logged_in, who.nickname = f"user:{user[3]}", True, user[2]
+            row = await users.get_user(user[3])
+            if row is not None:
+                who.ai_limit = row["ai_limit"]
+                if row["banned"]:
+                    reason = row["ban_reason"]
+                    who.banned = f"该账号已被停用：{reason}" if reason else "该账号已被停用"
+        return who
+
+    async def _check(who: Who):
+        return await quota.check(who.subject, who.ip_subject, who.logged_in, who.ai_limit)
 
     async def _quota_start(request: Request):
-        """搜索前检查额度；IP 当天超限直接 429，其余情况返回 (身份, IP 身份, 决定)。"""
+        """搜索前检查封禁与额度：封禁 403、IP 当天超限 429、未登录免费次数用完 401。"""
+        who = await _identity(request)
+        if who.banned:
+            raise HTTPException(status_code=403, detail=who.banned)
         if quota is None:
             return None
-        subject, ip_subject, logged_in = await _identity(request)
-        decision = await quota.check(subject, ip_subject, logged_in)
+        subject, ip_subject = who.subject, who.ip_subject
+        decision = await _check(who)
         if decision.blocked:
             raise HTTPException(status_code=429, detail=decision.message())
         if decision.login_required:
@@ -415,29 +446,37 @@ def create_app(
         if result is not None:
             result.quota = ctx[2].to_dict()
 
+    app.include_router(admin_router(
+        users,
+        admin_token if admin_token is not None else (
+            _settings.admin_token if service is None else ""
+        ),
+        quota,
+        rate_limit_dep,
+    ))
+
     @app.get("/api/quota")
     async def quota_status(request: Request) -> dict:
         """当前访客今天的 AI 搜索额度（前端显示剩余次数）。"""
         if quota is None:
             return {"enabled": False}
-        subject, ip_subject, logged_in = await _identity(request)
-        decision = await quota.check(subject, ip_subject, logged_in)
+        decision = await _check(await _identity(request))
         return {"enabled": True, **decision.to_dict()}
 
     @app.get("/api/me")
     async def me(request: Request) -> dict:
         """当前访客：是否登录、昵称、今天的额度，以及登录/邀请制开关（前端据此显示引导）。"""
-        user = await _user_cookie(request)
+        who = await _identity(request)
         info = {
             "login": login_enabled,
             "invite_required": login_enabled and need_invite,
-            "logged_in": user is not None,
-            "nickname": user[2] if user else None,
+            "logged_in": who.logged_in,
+            "nickname": who.nickname,
+            "banned": who.banned,  # 被停用时是给用户看的说明，否则为 null
             "quota": None,
         }
         if quota is not None:
-            subject, ip_subject, logged_in = await _identity(request)
-            info["quota"] = (await quota.check(subject, ip_subject, logged_in)).to_dict()
+            info["quota"] = (await _check(who)).to_dict()
         return info
 
     @app.get("/api/save/status")
@@ -555,11 +594,12 @@ def create_app(
             raise HTTPException(status_code=401, detail="转存口令不正确")
         else:
             raise HTTPException(status_code=404, detail="一键转存未开启")
+        who = await _identity(request)
+        if who.banned:
+            raise HTTPException(status_code=403, detail=who.banned)
         ctx = None
         if quota is not None:
-            subject, ip_subject, logged_in = await _identity(request)
-            ctx = (subject, ip_subject,
-                   await quota.check(subject, ip_subject, logged_in))
+            ctx = (who.subject, who.ip_subject, await _check(who))
         allowed = ctx is None or ctx[2].reason != "site_budget"
         try:
             with llm.scope(allowed=allowed) as meter:

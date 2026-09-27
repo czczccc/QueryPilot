@@ -40,6 +40,11 @@ CREATE TABLE IF NOT EXISTS users (
     ban_reason  TEXT,
     ai_limit    INTEGER
 );
+CREATE TABLE IF NOT EXISTS ip_bans (
+    ip      TEXT PRIMARY KEY,
+    reason  TEXT,
+    created REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS invites (
     code     TEXT PRIMARY KEY,
     note     TEXT,
@@ -121,6 +126,63 @@ class UsageStore:
             )
             self._conn.commit()
         return cur.rowcount == 1
+
+    # ---------------- 站长后台 ----------------
+
+    def _query(self, sql: str, args: tuple = ()) -> list[dict]:
+        with self._lock:
+            return [dict(r) for r in self._conn.execute(sql, args).fetchall()]
+
+    def _exec(self, sql: str, args: tuple = ()) -> int:
+        with self._lock:
+            cur = self._conn.execute(sql, args)
+            self._conn.commit()
+        return cur.rowcount
+
+    async def query(self, sql: str, args: tuple = ()) -> list[dict]:
+        return await asyncio.to_thread(self._query, sql, args)
+
+    async def execute(self, sql: str, args: tuple = ()) -> int:
+        """执行一条写语句，返回影响的行数。"""
+        return await asyncio.to_thread(self._exec, sql, args)
+
+    async def get_ip_ban(self, ip: str) -> str | None:
+        """被封的 IP 返回封禁理由（可能是空串），没封返回 None。"""
+        rows = await self.query("SELECT reason FROM ip_bans WHERE ip = ?", (ip,))
+        return (rows[0]["reason"] or "") if rows else None
+
+    async def usage_by_subject(self, day: str, limit: int = 50) -> list[dict]:
+        """某天各身份的用量（全站合计除外），按 token 从多到少；登录用户附昵称。"""
+        return await self.query(
+            "SELECT u.subject, u.searches, u.llm_searches, u.llm_calls, u.tokens, s.nickname,"
+            " s.banned FROM usage_daily u LEFT JOIN users s ON u.subject = 'user:' || s.user_id"
+            " WHERE u.day = ? AND u.subject <> ? ORDER BY u.tokens DESC, u.searches DESC LIMIT ?",
+            (day, SITE, limit),
+        )
+
+    async def site_trend(self, days: int = 14) -> list[dict]:
+        """最近几天的全站合计（按日期倒序）。"""
+        return await self.query(
+            "SELECT day, searches, llm_searches, llm_calls, tokens FROM usage_daily"
+            " WHERE subject = ? ORDER BY day DESC LIMIT ?", (SITE, days),
+        )
+
+    async def list_users(self, day: str, limit: int = 50, offset: int = 0, q: str = "") -> list[dict]:
+        """账号列表：今天与累计的用量，最近登录的在前。"""
+        return await self.query(
+            "SELECT s.user_id, s.nickname, s.created, s.last_seen, s.invite_code, s.banned,"
+            " s.ban_reason, s.ai_limit,"
+            " COALESCE(SUM(CASE WHEN u.day = ? THEN u.searches END), 0) AS today_searches,"
+            " COALESCE(SUM(CASE WHEN u.day = ? THEN u.tokens END), 0) AS today_tokens,"
+            " COALESCE(SUM(u.searches), 0) AS total_searches,"
+            " COALESCE(SUM(u.llm_calls), 0) AS total_llm_calls,"
+            " COALESCE(SUM(u.tokens), 0) AS total_tokens"
+            " FROM users s LEFT JOIN usage_daily u ON u.subject = 'user:' || s.user_id"
+            " WHERE s.nickname LIKE ? OR s.user_id LIKE ?"
+            " GROUP BY s.user_id, s.nickname, s.created, s.last_seen, s.invite_code, s.banned,"
+            " s.ban_reason, s.ai_limit ORDER BY s.last_seen DESC LIMIT ? OFFSET ?",
+            (day, day, f"%{q}%", f"%{q}%", limit, offset),
+        )
 
     async def get_user(self, user_id: str) -> dict | None:
         return await asyncio.to_thread(self._get_user, user_id)
