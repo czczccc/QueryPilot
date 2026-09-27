@@ -51,6 +51,13 @@
       <p class="prefs-hint">agent 会把默认清晰度当作搜索目标，偏好的字幕/HDR 资源排在前面。偏好保存在服务器上，对应当前浏览器。</p>
     </details>
 
+    <details id="subs-panel" class="prefs" hidden>
+      <summary>我的订阅 <span id="subs-unread" class="unread" hidden></span></summary>
+      <ul id="notif-list" class="notif-list"></ul>
+      <ul id="subs-list" class="subs-list"></ul>
+      <p class="prefs-hint">订阅后服务器会定期替你重搜，有新集数或更高清的版本时在这里提醒。在搜索结果上点「订阅更新」即可添加。</p>
+    </details>
+
     <p id="status" class="status" role="status" aria-live="polite" hidden></p>
 
     <section id="agent-panel" class="card agent-panel" hidden aria-label="搜索过程">
@@ -84,6 +91,7 @@
           </select>
         </label>
         <button id="copy-btn" type="button" class="secondary-btn">复制全部链接</button>
+        <button id="subscribe-btn" type="button" class="secondary-btn" hidden>订阅更新</button>
       </div>
       <ol id="result-list" class="result-list"></ol>
       <div id="empty-state" class="empty" hidden></div>

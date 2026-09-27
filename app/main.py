@@ -23,8 +23,11 @@ from app.models import (
     AgentSearchResponse,
     AgentStep,
     FeedbackRequest,
+    Notification,
     QuarkSearchResponse,
     SearchRequest,
+    SubscribeRequest,
+    Subscription,
     UserPrefs,
 )
 from app.providers.tavily import TavilyProvider
@@ -33,6 +36,7 @@ from app.services.agent import SearchAgent
 from app.services.intent import DeepSeekParser
 from app.services.memory import LinkStore
 from app.services.search import QuarkSearchService, SearchUnavailableError
+from app.services.subscriptions import SubscriptionWatcher
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -83,11 +87,23 @@ async def _reverify_loop(service: QuarkSearchService, interval_hours: float) -> 
             logger.exception("记忆复验异常")
 
 
+async def _subscribe_loop(watcher: SubscriptionWatcher, interval_hours: float) -> None:
+    """后台定期检查追剧订阅；单轮失败只记日志。"""
+    while True:
+        await asyncio.sleep(interval_hours * 3600)
+        try:
+            notes = await watcher.run_once()
+            logger.info("订阅检查完成，新通知 %d 条", notes)
+        except Exception:
+            logger.exception("订阅检查异常")
+
+
 def create_app(
     service: QuarkSearchService | None = None,
     rate_limit_per_minute: int | None = None,
     reverify_interval_hours: float | None = None,
     agent: SearchAgent | None = None,
+    subscribe_interval_hours: float | None = None,
 ) -> FastAPI:
     """创建应用；传入 service / agent 便于测试注入假实现。"""
     resolved = service or build_default_service()
@@ -105,13 +121,32 @@ def create_app(
         else (_settings.reverify_interval_hours if service is None else 0)
     )
 
+    watcher = (
+        SubscriptionWatcher(
+            resolved_agent,
+            resolved.store,
+            webhook=_settings.notify_webhook if service is None else "",
+        )
+        if resolved.store is not None
+        else None
+    )
+    sub_interval = (
+        subscribe_interval_hours
+        if subscribe_interval_hours is not None
+        else (_settings.subscribe_interval_hours if service is None else 0)
+    )
+
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        task = asyncio.create_task(_reverify_loop(resolved, interval)) if interval > 0 else None
+        tasks = []
+        if interval > 0:
+            tasks.append(asyncio.create_task(_reverify_loop(resolved, interval)))
+        if watcher is not None and sub_interval > 0:
+            tasks.append(asyncio.create_task(_subscribe_loop(watcher, sub_interval)))
         try:
             yield
         finally:
-            if task:
+            for task in tasks:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
@@ -120,10 +155,11 @@ def create_app(
         lifespan=lifespan,
         title="QueryPilot",
         description="AI 搜索与链接验证引擎：自然语言输入，多引擎聚合检索，严格验证结果可用性。",
-        version="0.8.0",
+        version="0.9.0",
     )
     app.state.search_service = resolved
     app.state.agent = resolved_agent
+    app.state.watcher = watcher
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
     @app.middleware("http")
@@ -165,7 +201,7 @@ def create_app(
     @app.get("/health")
     async def health() -> dict:
         """健康检查：只证明应用进程可响应，不探测外部 API。"""
-        return {"status": "ok", "version": "0.8.0"}
+        return {"status": "ok", "version": "0.9.0"}
 
     @app.get("/api/memory/stats")
     async def memory_stats() -> dict:
@@ -200,6 +236,39 @@ def create_app(
         """用户复制了某条链接：记入记忆，作为排序信号。"""
         recorded = await _store_or_404().record_copy(req.share)
         return {"recorded": recorded}
+
+    ClientId = Query(min_length=8, max_length=64)
+
+    @app.post("/api/subscriptions", response_model=Subscription)
+    async def subscribe(
+        req: SubscribeRequest, _: None = Depends(rate_limit_dep)
+    ) -> Subscription:
+        """订阅：之后定期重搜，有新集数或更高清版本时产生通知。"""
+        store = _store_or_404()
+        baseline = await app.state.watcher.baseline(req.resource)
+        sub = await store.add_subscription(req.client_id, req.query, req.resource, baseline)
+        if sub is None:
+            raise HTTPException(status_code=409, detail="订阅数已达上限（20 个）")
+        return sub
+
+    @app.get("/api/subscriptions", response_model=list[Subscription])
+    async def list_subscriptions(client_id: str = ClientId) -> list[Subscription]:
+        return [sub for _, sub in await _store_or_404().list_subscriptions(client_id)]
+
+    @app.delete("/api/subscriptions/{sub_id}")
+    async def unsubscribe(sub_id: int, client_id: str = ClientId) -> dict:
+        if not await _store_or_404().delete_subscription(client_id, sub_id):
+            raise HTTPException(status_code=404, detail="订阅不存在")
+        return {"deleted": True}
+
+    @app.get("/api/notifications", response_model=list[Notification])
+    async def notifications(client_id: str = ClientId) -> list[Notification]:
+        return await _store_or_404().notifications(client_id)
+
+    @app.post("/api/notifications/read")
+    async def notifications_read(client_id: str = ClientId) -> dict:
+        await _store_or_404().mark_read(client_id)
+        return {"ok": True}
 
     @app.post("/api/search", response_model=QuarkSearchResponse)
     async def api_search(

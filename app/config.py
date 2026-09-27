@@ -25,6 +25,8 @@ class Settings:
     tg_channels: tuple[str, ...] = ()  # Telegram 公开频道用户名
     tg_proxy: str = ""  # 访问 t.me 的代理，如 http://127.0.0.1:7890
     extra_sites: tuple[str, ...] = ()  # 资源站搜索 URL 模板，{q} 为关键词
+    subscribe_interval_hours: float = 12.0  # 追剧订阅检查周期，0 关闭
+    notify_webhook: str = ""  # 订阅有更新时额外推送到这个 webhook（可选）
     extra: dict = field(default_factory=dict)
 
 
@@ -56,4 +58,6 @@ def load_settings() -> Settings:
         tg_channels=_list("TG_CHANNELS"),
         tg_proxy=os.getenv("TG_PROXY", ""),
         extra_sites=_list("EXTRA_SITES"),
+        subscribe_interval_hours=_float("SUBSCRIBE_INTERVAL_HOURS", 12.0),
+        notify_webhook=os.getenv("NOTIFY_WEBHOOK", ""),
     )
