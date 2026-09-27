@@ -41,6 +41,7 @@ from app.services.classify import Classifier
 from app.services.cookie_box import CookieBox, session_hash
 from app.services.intent import DeepSeekParser
 from app.services.memory import LinkStore
+from app.services.metadata import MetadataLookup
 from app.services.quark_login import LoginError, QuarkQrLogin, qr_svg
 from app.services.quark_save import LoginExpiredError, QuarkSaver, SaveError
 from app.services.search import QuarkSearchService, SearchUnavailableError
@@ -177,7 +178,13 @@ def create_app(
     # 一键转存：cookie 与口令都配置了才开启（测试可注入）
     # 转存自动分类：有 LLM key 用 LLM 判断，否则规则；SAVE_CLASSIFY=false 关闭
     if classifier is None and service is None and _settings.save_classify:
-        classifier = Classifier(api_key=_settings.deepseek_api_key)
+        classifier = Classifier(
+            api_key=_settings.deepseek_api_key,
+            lookup=MetadataLookup(
+                tmdb_key=_settings.tmdb_api_key, tmdb_base=_settings.tmdb_api_base,
+                douban=_settings.douban_lookup,
+            ),
+        )
     root_dir = _settings.save_root_dir if service is None else "QueryPilot"
     if saver is None and service is None and _settings.quark_cookie and _settings.save_token:
         saver = QuarkSaver(_settings.quark_cookie, _settings.quark_save_dir_fid,
@@ -426,7 +433,7 @@ def create_app(
         else:
             message = f"已提交转存{name}到{where}，夸克正在后台处理"
         if result.category:
-            message += f"（识别为{result.category}）"
+            message += f"（识别为{result.category}，依据：{result.basis}）"
         return SaveResponse(ok=True, message=message, file_count=result.file_count,
                             folder=result.folder, category=result.category)
 

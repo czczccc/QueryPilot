@@ -1,6 +1,12 @@
 """转存自动分类：判断电影/电视剧/动漫/综艺/纪录片与地区，得出网盘里的目标目录。
 
-有 LLM 时让它看分享标题与文件名判断；LLM 不可用或出错时用规则兜底：
+依据的优先级：
+1. 先用分享标题里的片名、年份去查 TMDB 和豆瓣（类型、国家/地区、年份、季数）；
+2. 有 LLM 时，把查到的资料连同分享标题、文件名交给 LLM，由它挑出对应条目并决定分类和片名；
+3. 没有 LLM 时，直接按查到的第一条资料映射（类型、国家 → 分类与地区）；
+4. 资料都查不到、LLM 也没有时，才用下面的文件名规则兜底，并在结果里注明。
+
+规则兜底：
 - 类型：文件名里的 S01E01 / 第N集 / EP01，或视频文件 ≥3 个 → 电视剧；
   标题里的动漫/番剧、综艺、纪录片等关键词优先；
 - 地区：国产/国语/大陆/港/台 → 华语，美剧/英剧/Netflix → 欧美，韩剧/日剧 → 日韩；
@@ -20,6 +26,7 @@ from dataclasses import dataclass
 import httpx
 
 from app.services import llm
+from app.services.metadata import MediaInfo, MetadataLookup
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +60,18 @@ class Category:
     region: str  # cn / west / jpkr / other
     title: str
     year: str | None = None
-    by: str = "rules"  # rules / llm
+    by: str = "rules"  # rules / llm / tmdb / douban
+    sources: tuple[str, ...] = ()  # 用到的影视资料来源
+
+    def basis(self) -> str:
+        """给用户看的判断依据。"""
+        names = {"tmdb": "TMDB", "douban": "豆瓣"}
+        src = " + ".join(names[s] for s in self.sources if s in names)
+        if self.by == "llm":
+            return f"{src} + LLM" if src else "LLM（未查到影视资料）"
+        if self.by in names:
+            return names[self.by]
+        return "文件名规则（未查到影视资料）"
 
     def folder(self, root: str = "QueryPilot") -> str:
         """网盘里的目标目录路径（以 / 开头）。"""
@@ -105,18 +123,64 @@ def classify_rules(title: str, files: list[str]) -> Category:
     return Category(kind, region, clean_title(title), year_match.group(1) if year_match else None)
 
 
-LLM_PROMPT = """你是影视资源分类器。根据网盘分享标题和文件名，判断这是什么资源。
+CN_REGIONS = {"CN", "HK", "TW", "MO", "中国大陆", "中国香港", "中国台湾", "中国澳门", "香港", "台湾",
+              "中国"}
+JPKR_REGIONS = {"JP", "KR", "日本", "韩国"}
+WEST_REGIONS = {"US", "GB", "CA", "AU", "NZ", "IE", "FR", "DE", "ES", "IT", "NL", "BE", "SE", "DK",
+                "NO", "FI", "美国", "英国", "加拿大", "澳大利亚", "新西兰", "爱尔兰", "法国", "德国",
+                "西班牙", "意大利", "荷兰", "比利时", "瑞典", "丹麦", "挪威", "芬兰"}
+LANG_REGION = {"zh": "cn", "cn": "cn", "ja": "jpkr", "ko": "jpkr", "en": "west"}
+
+
+def region_of(info: MediaInfo) -> str:
+    for c in info.countries:
+        if c in CN_REGIONS:
+            return "cn"
+        if c in JPKR_REGIONS:
+            return "jpkr"
+        if c in WEST_REGIONS:
+            return "west"
+    if info.countries:
+        return "other"
+    return LANG_REGION.get(info.language or "", "other")
+
+
+def kind_of(info: MediaInfo) -> str:
+    genres = " ".join(info.genres)
+    if re.search(r"动画|Animation", genres):
+        return "anime"
+    if re.search(r"纪录|Documentary", genres):
+        return "documentary"
+    if re.search(r"真人秀|脱口秀|综艺|Reality|Talk", genres):
+        return "variety"
+    return "tv" if info.media == "tv" else "movie"
+
+
+def classify_meta(info: MediaInfo) -> Category:
+    return Category(kind_of(info), region_of(info), info.title, info.year, by=info.source,
+                    sources=(info.source,))
+
+
+LLM_PROMPT = """你是影视资源分类器。根据网盘分享标题、文件名，以及从 TMDB/豆瓣查到的候选资料，判断这是什么资源。
+候选资料可能有多条、也可能不对应：先挑出和分享内容一致的那条，以它的类型、国家/地区、年份为准；
+都不对应时再根据标题和文件名判断。
 只输出 JSON：{"kind": "movie|tv|anime|variety|documentary", "region": "cn|west|jpkr|other",
-"title": "干净的中文片名（没有就用原名）", "year": "首播/上映年份，不确定填 null"}
+"title": "干净的中文片名（没有就用原名）", "year": "首播/上映年份，不确定填 null",
+"matched": "所用候选资料的 source（tmdb/douban），没有用就填 null"}
 说明：tv=电视剧；anime=动画/动漫（含国漫、日漫）；variety=综艺；region: cn=中国大陆/港台，
 west=欧美，jpkr=日本韩国，other=其他地区。"""
 
 
 async def classify_llm(
-    title: str, files: list[str], api_key: str, client: httpx.AsyncClient, timeout: float = 15.0
+    title: str, files: list[str], api_key: str, client: httpx.AsyncClient,
+    metas: list[MediaInfo] | None = None, timeout: float = 15.0,
 ) -> Category | None:
-    payload = {"share_title": title, "files": files[:30], "video_count": sum(
-        1 for f in files if VIDEO_EXT.search(f))}
+    payload = {
+        "share_title": title,
+        "files": files[:30],
+        "video_count": sum(1 for f in files if VIDEO_EXT.search(f)),
+        "candidates": [m.brief() for m in metas or []],
+    }
     try:
         message = await llm.chat(
             client,
@@ -144,24 +208,35 @@ async def classify_llm(
     return Category(
         kind, region, name.strip() or clean_title(title),
         year if year and YEAR.fullmatch(year) else None, by="llm",
+        sources=tuple(dict.fromkeys(m.source for m in metas or [])),
     )
 
 
 class Classifier:
     """转存时调用：`await classifier(title, files)` → Category。"""
 
-    def __init__(self, api_key: str = "", client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self, api_key: str = "", client: httpx.AsyncClient | None = None,
+        lookup: MetadataLookup | None = None,
+    ) -> None:
         self._api_key = api_key
         self._client = client
+        self._lookup = lookup
 
     async def __call__(self, title: str, files: list[str]) -> Category:
+        name = clean_title(title)
+        year_match = YEAR.search(title) or YEAR.search(" ".join(files[:10]))
+        year = year_match.group(1) if year_match else None
+        metas = await self._lookup(name, year) if self._lookup and name else []
         if self._api_key:
             client = self._client or httpx.AsyncClient(timeout=15.0)
             try:
-                got = await classify_llm(title, files, self._api_key, client)
+                got = await classify_llm(title, files, self._api_key, client, metas)
             finally:
                 if self._client is None:
                     await client.aclose()
             if got:
                 return got
+        if metas:
+            return classify_meta(metas[0])
         return classify_rules(title, files)

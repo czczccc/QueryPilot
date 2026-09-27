@@ -54,6 +54,7 @@ class SaveResult:
     done: bool  # False 表示任务已提交，但轮询期间还没完成（夸克会在后台继续）
     folder: str | None = None  # 自动分类后存入的目录（如 /QueryPilot/电视剧/国产剧/漫长的季节 (2023)）
     category: str | None = None  # 如「国产剧」「欧美电影」
+    basis: str | None = None  # 分类依据，如「TMDB + 豆瓣 + LLM」
 
 
 class QuarkSaver:
@@ -143,13 +144,13 @@ class QuarkSaver:
         title = title if isinstance(title, str) else None
 
         # 3) 自动分类：决定存到哪个目录（失败就存到默认目录）
-        to_fid, folder, category = self._to_pdir_fid, None, None
+        to_fid, folder, category, basis = self._to_pdir_fid, None, None, None
         if self._classifier is not None:
             names = await self._file_names(share_id, stoken, items, headers)
             cat = await self._classifier(title or (names[0] if names else share_id), names)
             try:
                 to_fid = await self._ensure_dir(cat.folder(self._root_dir), headers)
-                folder, category = cat.folder(self._root_dir), cat.label()
+                folder, category, basis = cat.folder(self._root_dir), cat.label(), cat.basis()
             except LoginExpiredError:
                 raise
             except (SaveError, httpx.HTTPError, ValueError, KeyError) as e:
@@ -183,9 +184,9 @@ class QuarkSaver:
             )
             task = self._check(resp.json(), "转存失败")
             if task.get("status") == 2:
-                return SaveResult(task_id, len(items), title, True, folder, category)
+                return SaveResult(task_id, len(items), title, True, folder, category, basis)
             await asyncio.sleep(self._poll_interval)
-        return SaveResult(task_id, len(items), title, False, folder, category)
+        return SaveResult(task_id, len(items), title, False, folder, category, basis)
 
     async def _file_names(
         self, share_id: str, stoken: str, items: list[dict], headers: dict
