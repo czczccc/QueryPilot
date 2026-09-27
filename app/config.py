@@ -51,6 +51,7 @@ class Settings:
     anon_daily_searches: int = 10  # 未登录每天搜索总次数，用完要求扫码登录（关闭扫码登录时不生效）
     invite_required: bool = False  # 新用户扫码登录需要邀请码
     invite_codes: tuple[str, ...] = field(default=(), repr=False)  # .env 里的固定邀请码（可多次使用）
+    admin_token: str = field(default="", repr=False)  # 站长后台口令（请求头 X-Admin-Token），空则关闭后台
     trust_proxy: bool = False  # 部署在 Nginx 等反代后面时开启，按 X-Forwarded-For 取真实 IP
     extra: dict = field(default_factory=dict)
 
@@ -107,5 +108,6 @@ def load_settings() -> Settings:
         anon_daily_searches=_int("ANON_DAILY_SEARCHES", 10),
         invite_required=os.getenv("INVITE_REQUIRED", "false").strip().lower() in ("1", "true", "yes"),
         invite_codes=_list("INVITE_CODES"),
+        admin_token=os.getenv("ADMIN_TOKEN", "").strip(),
         trust_proxy=os.getenv("TRUST_PROXY", "false").strip().lower() in ("1", "true", "yes"),
     )
