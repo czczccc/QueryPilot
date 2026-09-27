@@ -5,6 +5,10 @@
   可用 `TG_PROXY` 配置代理。
 - 资源站：`EXTRA_SITES` 配置搜索页 URL 模板（`{q}` 占位），抓页面提取夸克链接，
   经过与深度抓取相同的公网 URL 校验（防 SSRF）。
+- PanSou：自建的 PanSou 聚合服务（https://github.com/fish2018/pansou，MIT），
+  `PANSOU_URL` 指向它（通常是 docker 内网 `http://pansou:8888`）；只取夸克链接，
+  验证、质量、相关性仍走本项目自己的流水线。这个地址由站长配置、不来自用户输入，
+  所以不做公网校验（内网地址本来就会被拦）。
 """
 
 import asyncio
@@ -125,3 +129,45 @@ async def search_sites(
 
     results = await asyncio.gather(*(one(t) for t in templates))
     return [link for found in results for link in found]
+
+
+# ---------------- PanSou ----------------
+
+PANSOU_LIMIT = 80  # 单次最多取多少条（后面验证还会再截到 MAX_VERIFY）
+
+
+async def search_pansou(
+    keyword: str, base_url: str, client: httpx.AsyncClient, timeout: float = 6.0,
+    token: str = "", limit: int = PANSOU_LIMIT, src: str = "plugin",
+) -> list[QuarkLink]:
+    """调用自建 PanSou 的 /api/search，只要夸克结果；出错直接抛出，由调用方标记该源失败。"""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    resp = await client.post(
+        base_url.rstrip("/") + "/api/search",
+        # src=plugin：只用白名单插件；TG 频道列表人工筛过后才建议改成 all
+        json={"kw": keyword, "cloud_types": ["quark"], "res": "merge", "src": src},
+        headers=headers, timeout=timeout,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    data = body.get("data") if isinstance(body.get("data"), dict) else body  # 兼容外层包一层 data
+    items = (data.get("merged_by_type") or {}).get("quark") or []
+    out: list[QuarkLink] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "")
+        for sid, pwd in extract_links_with_pwd(url):
+            if sid in seen:
+                continue
+            seen.add(sid)
+            source = str(item.get("source") or "").strip()
+            out.append(make_entry(
+                str(item.get("note") or keyword)[:200], sid,
+                f"PanSou·{source}" if source else "PanSou",
+                str(item.get("datetime") or "")[:10], str(item.get("password") or "") or pwd,
+            ))
+        if len(out) >= limit:
+            break
+    return out
