@@ -164,6 +164,7 @@ class FeedbackRequest(BaseModel):
 
 MediaType = Literal["movie", "tv"]
 Resolution = Literal["2160p", "1080p", "720p", "SD"]
+RESOLUTION_RANK = {"SD": 1, "720p": 2, "1080p": 3, "2160p": 4}
 
 
 class SubscribeRequest(BaseModel):
@@ -189,6 +190,9 @@ class SubscribeRequest(BaseModel):
     resolution: Resolution | None = None  # 清晰度要求（不低于）
     include: str | None = Field(default=None, max_length=100)  # 分享名须包含（空格分隔，全部满足）
     exclude: str | None = Field(default=None, max_length=100)  # 分享名含任一即排除
+    # 洗版（需同时开自动转存）：已存的集清晰度没达到 upgrade_to 前，出现更高清的就再存一份新版本
+    upgrade: bool = False
+    upgrade_to: Resolution | None = None  # 洗版目标，默认 2160p
 
 
 class Subscription(BaseModel):
@@ -222,6 +226,10 @@ class Subscription(BaseModel):
     saved_episodes: list[int] = Field(default_factory=list)  # 网盘里已有的集（按转存时的目录清点）
     # 第一次自动转存时确定并锁定的网盘目录（按条目：类型/地区/片名 (年份)/Season 01），之后不再重新分类
     folder: str | None = None
+    upgrade: bool = False
+    upgrade_to: Resolution | None = None
+    # 已存各集的清晰度（集号 → 2160p/1080p/720p/SD；电影用 0）；认不出清晰度的集不在里面
+    versions: dict[int, str] = Field(default_factory=dict)
 
     @property
     def wanted(self) -> list[int]:
@@ -239,6 +247,30 @@ class Subscription(BaseModel):
         have = set(self.saved_episodes)
         return [e for e in self.wanted if e not in have]
 
+    def upgradable(self, movie: bool) -> dict[int, int]:
+        """洗版时还能升级的集：{集号: 当前清晰度等级}（电影用 0）；没开洗版为空。
+
+        只看已经存进网盘的集；清晰度认不出的按最低（0）算。"""
+        if not self.upgrade:
+            return {}
+        target = RESOLUTION_RANK[self.upgrade_to or "2160p"]
+        if movie:
+            eps = [0]
+        else:
+            eps = [e for e in self.saved_episodes if not self.wanted or e in self.wanted]
+        ranks = {e: RESOLUTION_RANK.get(self.versions.get(e) or "", 0) for e in eps}
+        return {e: r for e, r in ranks.items() if r < target}
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def upgrade_done(self) -> bool | None:
+        """洗版是否已完成（范围内已存的都达到目标清晰度）；没开洗版为 None。"""
+        if not self.upgrade:
+            return None
+        if self.media == "movie":
+            return 0 in self.versions and not self.upgradable(True)
+        return bool(self.saved_episodes) and not self.upgradable(False)
+
 
 class SubscriptionUpdate(BaseModel):
     """修改订阅：只改给出的字段。"""
@@ -250,6 +282,8 @@ class SubscriptionUpdate(BaseModel):
     resolution: Resolution | Literal[""] | None = None  # "" 表示清除
     include: str | None = Field(default=None, max_length=100)
     exclude: str | None = Field(default=None, max_length=100)
+    upgrade: bool | None = None
+    upgrade_to: Resolution | Literal[""] | None = None  # "" 表示恢复默认（2160p）
 
 
 AutoSaveRequest = SubscriptionUpdate  # 兼容旧名

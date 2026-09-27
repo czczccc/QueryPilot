@@ -18,7 +18,7 @@ import httpx
 
 from app.models import ParsedResource, QuarkLink, SearchRequest, Subscription
 from app.services.memory import LinkStore, resource_key
-from app.services.quality import meets_requirement
+from app.services.quality import RESOLUTION_RANK, meets_requirement
 from app.services.relevance import build_target, judge
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,10 @@ def snapshot(links: list[QuarkLink]) -> tuple[int, int, str | None, QuarkLink | 
 
 
 _SEASON_SUFFIX = re.compile(r"\s*第[0-9一二三四五六七八九十]+季$")
+
+
+def _rank(link: QuarkLink) -> int:
+    return RESOLUTION_RANK.get((link.quality and link.quality.resolution) or "", 0)
 
 
 def strip_season(resource: str) -> str:
@@ -199,29 +203,52 @@ class SubscriptionWatcher:
         picks: list[QuarkLink] = []
         wanted: set[int] | None = None
         if movie:
-            # 电影：第一次出现满足要求的资源时存一次；之后更高清只提醒，不重复存
+            # 电影：第一次出现满足要求的资源时存一次；之后更高清只提醒（开了洗版才再存）
             if not await self._store.has_auto_saved(sub.id):
                 picks = [max(ok, key=lambda lk: lk.quality.score)]
         else:
             lack = sub.lack_episodes
-            if lack == []:  # 范围内都存齐了
-                return []
-            wanted = set(lack) if lack is not None else None
-            fullest = max(ok, key=lambda lk: (lk.quality.video_count, lk.quality.score))
-            by_share = {lk.share: lk for lk in ok}
-            picks = [by_share[n[2]] for n in notes if n[2] in by_share]
-            # 立即检查，或者分享的集数已经覆盖到缺的集：补齐
-            if sync_save or (lack and fullest.quality.video_count >= min(lack)):
-                picks.insert(0, fullest)
+            if lack != []:  # 范围内还没存齐
+                wanted = set(lack) if lack is not None else None
+                fullest = max(ok, key=lambda lk: (lk.quality.video_count, lk.quality.score))
+                by_share = {lk.share: lk for lk in ok}
+                picks = [by_share[n[2]] for n in notes if n[2] in by_share]
+                # 立即检查，或者分享的集数已经覆盖到缺的集：补齐
+                if sync_save or (lack and fullest.quality.video_count >= min(lack)):
+                    picks.insert(0, fullest)
         out: list[Note] = []
         for link in {lk.share: lk for lk in picks}.values():
-            try:
-                out += await self.auto_saver(client_id, sub, link, wanted)
-            except Exception:  # 自动转存出错不影响通知本身
-                logger.exception("订阅自动转存异常 id=%s", sub.id)
+            out += await self._save_one(client_id, sub, link, wanted)
             if wanted is not None and not sub.lack_episodes:
                 break
+        if not picks or not movie:
+            out += await self._upgrade(client_id, sub, movie, ok)
         return out
+
+    async def _save_one(
+        self, client_id: str, sub: Subscription, link: QuarkLink, wanted: set[int] | None,
+    ) -> list[Note]:
+        assert self.auto_saver is not None
+        try:
+            return await self.auto_saver(client_id, sub, link, wanted)
+        except Exception:  # 自动转存出错不影响通知本身
+            logger.exception("订阅自动转存异常 id=%s", sub.id)
+            return []
+
+    async def _upgrade(
+        self, client_id: str, sub: Subscription, movie: bool, ok: list[QuarkLink],
+    ) -> list[Note]:
+        """洗版：已存的集清晰度没到目标时，把清晰度比最差那集更高的最好分享再存一次
+        （只存能升级的集，旧版本不删，由用户在「整理」里确认删除）。每次检查最多一个分享。"""
+        better = sub.upgradable(movie)
+        if not better or (movie and not await self._store.has_auto_saved(sub.id)):
+            return []
+        worst = min(better.values())
+        up = [lk for lk in ok if _rank(lk) > worst]
+        if not up:
+            return []
+        link = max(up, key=lambda lk: (_rank(lk), lk.quality.video_count, lk.quality.score))
+        return await self._save_one(client_id, sub, link, None if movie else set(better))
 
     @staticmethod
     def _completed(sub: Subscription, movie: bool, ok: list[QuarkLink]) -> str | None:
@@ -230,10 +257,15 @@ class SubscriptionWatcher:
         开了自动转存：范围内每一集网盘里都有了才算完成；没开：出现一个集数覆盖整季的有效资源。
         电影不自动完成（之后出现更高清版本还会提醒），可以手动完成。
         """
+        if movie and sub.auto_save and sub.upgrade_done:
+            return f"已洗版到 {RES_TEXT.get(sub.upgrade_to or '2160p', sub.upgrade_to)}"
         if movie or sub.media != "tv" or not sub.wanted:
             return None
         if sub.auto_save:
-            return f"已集齐 {len(sub.wanted)} 集" if sub.lack_episodes == [] else None
+            if sub.lack_episodes != [] or sub.upgradable(False):
+                return None
+            label = RES_TEXT.get(sub.upgrade_to or "2160p", sub.upgrade_to)
+            return f"已集齐 {len(sub.wanted)} 集" + (f"，全部达到 {label}" if sub.upgrade else "")
         if any(lk.quality.video_count >= sub.wanted[-1] for lk in ok):
             return f"全 {sub.wanted[-1]} 集资源已出齐"
         return None

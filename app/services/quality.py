@@ -6,7 +6,7 @@
 
 import re
 
-from app.models import QualityInfo
+from app.models import RESOLUTION_RANK, QualityInfo
 
 VIDEO_EXTS = {
     "mkv", "mp4", "avi", "ts", "m2ts", "rmvb", "rm", "flv", "mov", "wmv", "iso", "webm", "mpg",
@@ -126,9 +126,6 @@ def quality_score(info: QualityInfo) -> int:
     if info.low_quality:
         score -= 40
     return max(score, 0)
-
-
-RESOLUTION_RANK = {"SD": 1, "720p": 2, "1080p": 3, "2160p": 4}
 
 
 def required_resolution(text: str | None) -> str | None:

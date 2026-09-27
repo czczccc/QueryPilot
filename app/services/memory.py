@@ -140,6 +140,10 @@ _MIGRATIONS = [
     ("subscriptions", "saved_episodes", "TEXT"),
     ("subscriptions", "meta_checked", "REAL"),
     ("subscriptions", "folder", "TEXT"),
+    # 洗版
+    ("subscriptions", "upgrade", "INTEGER NOT NULL DEFAULT 0"),
+    ("subscriptions", "upgrade_to", "TEXT"),
+    ("subscriptions", "versions", "TEXT"),
 ]
 
 # 订阅 v2 的可编辑字段：Subscription 属性名 → 列名
@@ -148,7 +152,8 @@ SUB_FIELDS = {
     "douban_id": "douban_id", "poster": "poster", "total_episodes": "total_episodes",
     "start_episode": "start_episode", "manual_total": "manual_total",
     "resolution": "resolution", "include": "include_words", "exclude": "exclude_words",
-    "auto_save": "auto_save", "folder": "folder",
+    "auto_save": "auto_save", "folder": "folder", "upgrade": "upgrade",
+    "upgrade_to": "upgrade_to",
 }
 
 _PUNCT_RE = re.compile(r"[\s\-_·:：,，.。!！?？'\"“”‘’()（）\[\]【】《》<>]+")
@@ -394,6 +399,8 @@ class LinkStore:
             manual_total=bool(row["manual_total"]), resolution=row["resolution"],
             include=row["include_words"], exclude=row["exclude_words"],
             saved_episodes=json.loads(row["saved_episodes"] or "[]"), folder=row["folder"],
+            upgrade=bool(row["upgrade"]), upgrade_to=row["upgrade_to"],
+            versions={int(k): v for k, v in json.loads(row["versions"] or "{}").items()},
         )
 
     def _list_subscriptions(self, client_id: str | None) -> list[tuple[str, Subscription]]:
@@ -427,10 +434,11 @@ class LinkStore:
         with self._lock:
             self._conn.execute(
                 "UPDATE subscriptions SET last_checked = ?, best_episodes = ?, best_score = ?, "
-                "best_resolution = ?, total_episodes = ?, saved_episodes = ?, "
+                "best_resolution = ?, total_episodes = ?, saved_episodes = ?, versions = ?, "
                 "state = CASE WHEN state = 'paused' THEN state ELSE 'active' END WHERE id = ?",
                 (now, sub.best_episodes, sub.best_score, sub.best_resolution,
-                 sub.total_episodes, json.dumps(sorted(set(sub.saved_episodes))), sub.id),
+                 sub.total_episodes, json.dumps(sorted(set(sub.saved_episodes))),
+                 json.dumps({str(k): v for k, v in sorted(sub.versions.items())}), sub.id),
             )
             for kind, message, share in notes:
                 self._conn.execute(
@@ -537,6 +545,7 @@ class LinkStore:
         data = sub.model_dump(include={
             "media", "season", "year", "tmdb_id", "douban_id", "poster", "total_episodes",
             "start_episode", "resolution", "include", "exclude", "auto_save", "folder",
+            "upgrade", "upgrade_to",
         })
         data["saved_count"] = len(set(sub.saved_episodes))
         with self._lock:
