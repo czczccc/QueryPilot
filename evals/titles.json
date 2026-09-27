@@ -1,0 +1,628 @@
+[
+ {
+  "id": "guichuideng",
+  "query": "鬼吹灯",
+  "title": "鬼吹灯",
+  "aliases": [
+   "鬼吹灯之精绝古城",
+   "鬼吹灯之云南虫谷",
+   "鬼吹灯之龙岭迷窟",
+   "鬼吹灯之怒晴湘西",
+   "鬼吹灯之昆仑神宫",
+   "鬼吹灯之南海归墟",
+   "寻龙诀",
+   "九层妖塔"
+  ],
+  "year": null,
+  "media": "tv",
+  "season": null,
+  "note": "系列名；GitHub 聚合页混入大量别的片"
+ },
+ {
+  "id": "jingyinglvshi",
+  "query": "靳东 精英律师",
+  "title": "精英律师",
+  "aliases": [],
+  "year": "2019",
+  "media": "tv",
+  "season": null,
+  "note": "搜索词带演员名"
+ },
+ {
+  "id": "jingyinglvshi2",
+  "query": "靳东的精英律师",
+  "title": "精英律师",
+  "aliases": [],
+  "year": "2019",
+  "media": "tv",
+  "season": null,
+  "note": "「的」连接演员名"
+ },
+ {
+  "id": "manchangdejijie",
+  "query": "漫长的季节",
+  "title": "漫长的季节",
+  "aliases": [
+   "The Long Season"
+  ],
+  "year": "2023",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "fanhua",
+  "query": "繁花",
+  "title": "繁花",
+  "aliases": [
+   "Blossoms Shanghai"
+  ],
+  "year": "2023",
+  "media": "tv",
+  "season": null,
+  "note": "两个字的片名，容易误配"
+ },
+ {
+  "id": "kuangbiao",
+  "query": "狂飙",
+  "title": "狂飙",
+  "aliases": [
+   "The Knockout"
+  ],
+  "year": "2023",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "qingyunian2",
+  "query": "庆余年 第二季",
+  "title": "庆余年",
+  "aliases": [
+   "庆余年2",
+   "Joy of Life"
+  ],
+  "year": "2024",
+  "media": "tv",
+  "season": 2,
+  "note": "指定季数"
+ },
+ {
+  "id": "santi",
+  "query": "三体",
+  "title": "三体",
+  "aliases": [
+   "Three-Body"
+  ],
+  "year": "2023",
+  "media": "tv",
+  "season": null,
+  "note": "与 Netflix 版《3 Body Problem》区分"
+ },
+ {
+  "id": "liulangdiqiu2",
+  "query": "流浪地球2",
+  "title": "流浪地球2",
+  "aliases": [
+   "The Wandering Earth 2",
+   "流浪地球 2"
+  ],
+  "year": "2023",
+  "media": "movie",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "manjianghong",
+  "query": "满江红",
+  "title": "满江红",
+  "aliases": [
+   "Full River Red"
+  ],
+  "year": "2023",
+  "media": "movie",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "relagundong",
+  "query": "热辣滚烫",
+  "title": "热辣滚烫",
+  "aliases": [
+   "YOLO"
+  ],
+  "year": "2024",
+  "media": "movie",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "feichirensheng2",
+  "query": "飞驰人生2",
+  "title": "飞驰人生2",
+  "aliases": [
+   "飞驰人生 2",
+   "Pegasus 2"
+  ],
+  "year": "2024",
+  "media": "movie",
+  "season": null,
+  "note": "续集，别配到第一部"
+ },
+ {
+  "id": "dierishitiao",
+  "query": "第二十条",
+  "title": "第二十条",
+  "aliases": [
+   "Article 20"
+  ],
+  "year": "2024",
+  "media": "movie",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "zhouchuchusanhai",
+  "query": "周处除三害",
+  "title": "周处除三害",
+  "aliases": [
+   "The Pig, the Snake and the Pigeon"
+  ],
+  "year": "2023",
+  "media": "movie",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "nianhuibunengting",
+  "query": "年会不能停",
+  "title": "年会不能停！",
+  "aliases": [
+   "年会不能停"
+  ],
+  "year": "2023",
+  "media": "movie",
+  "season": null,
+  "note": "片名带标点"
+ },
+ {
+  "id": "fengshen1",
+  "query": "封神第一部",
+  "title": "封神第一部",
+  "aliases": [
+   "封神第一部：朝歌风云",
+   "Creation of the Gods"
+  ],
+  "year": "2023",
+  "media": "movie",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "guzhuyizhi",
+  "query": "孤注一掷",
+  "title": "孤注一掷",
+  "aliases": [
+   "No More Bets"
+  ],
+  "year": "2023",
+  "media": "movie",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "xiaoshideta",
+  "query": "消失的她",
+  "title": "消失的她",
+  "aliases": [
+   "Lost in the Stars"
+  ],
+  "year": "2023",
+  "media": "movie",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "changansanwanli",
+  "query": "长安三万里",
+  "title": "长安三万里",
+  "aliases": [
+   "Chang An"
+  ],
+  "year": "2023",
+  "media": "movie",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "aobenhaimo",
+  "query": "奥本海默",
+  "title": "奥本海默",
+  "aliases": [
+   "Oppenheimer"
+  ],
+  "year": "2023",
+  "media": "movie",
+  "season": null,
+  "note": "外语片，英文文件名"
+ },
+ {
+  "id": "shaqiu2",
+  "query": "沙丘2",
+  "title": "沙丘2",
+  "aliases": [
+   "沙丘：第二部",
+   "Dune Part Two",
+   "Dune.Part.Two"
+  ],
+  "year": "2024",
+  "media": "movie",
+  "season": null,
+  "note": "续集"
+ },
+ {
+  "id": "zhenhuanzhuan",
+  "query": "甄嬛传",
+  "title": "甄嬛传",
+  "aliases": [
+   "后宫·甄嬛传",
+   "后宫甄嬛传"
+  ],
+  "year": "2011",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "langyabang",
+  "query": "琅琊榜",
+  "title": "琅琊榜",
+  "aliases": [
+   "Nirvana in Fire"
+  ],
+  "year": "2015",
+  "media": "tv",
+  "season": null,
+  "note": "有第二部《风起长林》，别配错"
+ },
+ {
+  "id": "renmindemingyi",
+  "query": "人民的名义",
+  "title": "人民的名义",
+  "aliases": [
+   "In the Name of People"
+  ],
+  "year": "2017",
+  "media": "tv",
+  "season": null,
+  "note": "片名含「的」"
+ },
+ {
+  "id": "wodeqianbansheng",
+  "query": "我的前半生",
+  "title": "我的前半生",
+  "aliases": [
+   "The First Half of My Life"
+  ],
+  "year": "2017",
+  "media": "tv",
+  "season": null,
+  "note": "片名含「的」"
+ },
+ {
+  "id": "fumuaiqing",
+  "query": "父母爱情",
+  "title": "父母爱情",
+  "aliases": [
+   "Romance of Our Parents"
+  ],
+  "year": "2014",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "dajiangdahe",
+  "query": "大江大河",
+  "title": "大江大河",
+  "aliases": [
+   "Like a Flowing River"
+  ],
+  "year": "2018",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "shanhaiqing",
+  "query": "山海情",
+  "title": "山海情",
+  "aliases": [
+   "Minning Town"
+  ],
+  "year": "2021",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "juexingniandai",
+  "query": "觉醒年代",
+  "title": "觉醒年代",
+  "aliases": [
+   "The Age of Awakening"
+  ],
+  "year": "2021",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "yinmidejiaoluo",
+  "query": "隐秘的角落",
+  "title": "隐秘的角落",
+  "aliases": [
+   "The Bad Kids"
+  ],
+  "year": "2020",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "chenmodezhenxiang",
+  "query": "沉默的真相",
+  "title": "沉默的真相",
+  "aliases": [
+   "The Long Night"
+  ],
+  "year": "2020",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "kaiduan",
+  "query": "开端",
+  "title": "开端",
+  "aliases": [
+   "Reset"
+  ],
+  "year": "2022",
+  "media": "tv",
+  "season": null,
+  "note": "两个字、很常见的词"
+ },
+ {
+  "id": "renshijian",
+  "query": "人世间",
+  "title": "人世间",
+  "aliases": [
+   "A Lifelong Journey"
+  ],
+  "year": "2022",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "quyoufengdedifang",
+  "query": "去有风的地方",
+  "title": "去有风的地方",
+  "aliases": [
+   "Meet Yourself"
+  ],
+  "year": "2023",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "changxiangsi",
+  "query": "长相思",
+  "title": "长相思",
+  "aliases": [
+   "Lost You Forever"
+  ],
+  "year": "2023",
+  "media": "tv",
+  "season": null,
+  "note": "第一季 2023、第二季 2024"
+ },
+ {
+  "id": "yufengxing",
+  "query": "与凤行",
+  "title": "与凤行",
+  "aliases": [
+   "The Legend of Shen Li"
+  ],
+  "year": "2024",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "moyuyunjian",
+  "query": "墨雨云间",
+  "title": "墨雨云间",
+  "aliases": [
+   "The Double"
+  ],
+  "year": "2024",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "meiguidegushi",
+  "query": "玫瑰的故事",
+  "title": "玫瑰的故事",
+  "aliases": [
+   "The Story of Rose"
+  ],
+  "year": "2024",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "baiyezhuixiong",
+  "query": "白夜追凶",
+  "title": "白夜追凶",
+  "aliases": [
+   "Day and Night"
+  ],
+  "year": "2017",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "wulinwaizhuan",
+  "query": "武林外传",
+  "title": "武林外传",
+  "aliases": [
+   "My Own Swordsman"
+  ],
+  "year": "2006",
+  "media": "tv",
+  "season": null,
+  "note": "老剧"
+ },
+ {
+  "id": "xianjian",
+  "query": "仙剑奇侠传",
+  "title": "仙剑奇侠传",
+  "aliases": [
+   "Chinese Paladin"
+  ],
+  "year": "2005",
+  "media": "tv",
+  "season": null,
+  "note": "2024 年有翻拍《仙剑奇侠传一》"
+ },
+ {
+  "id": "huanzhugege",
+  "query": "还珠格格",
+  "title": "还珠格格",
+  "aliases": [
+   "My Fair Princess"
+  ],
+  "year": "1998",
+  "media": "tv",
+  "season": null,
+  "note": "多部合集常见"
+ },
+ {
+  "id": "xiyouji",
+  "query": "西游记 1986",
+  "title": "西游记",
+  "aliases": [
+   "Journey to the West"
+  ],
+  "year": "1986",
+  "media": "tv",
+  "season": null,
+  "note": "版本很多，指定 86 版"
+ },
+ {
+  "id": "got8",
+  "query": "权力的游戏 第八季",
+  "title": "权力的游戏",
+  "aliases": [
+   "Game of Thrones",
+   "Game.of.Thrones"
+  ],
+  "year": "2019",
+  "media": "tv",
+  "season": 8,
+  "note": "美剧指定季"
+ },
+ {
+  "id": "breakingbad",
+  "query": "绝命毒师",
+  "title": "绝命毒师",
+  "aliases": [
+   "Breaking Bad",
+   "Breaking.Bad"
+  ],
+  "year": "2008",
+  "media": "tv",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "friends",
+  "query": "老友记",
+  "title": "老友记",
+  "aliases": [
+   "Friends",
+   "六人行"
+  ],
+  "year": "1994",
+  "media": "tv",
+  "season": null,
+  "note": "英文名是常见词"
+ },
+ {
+  "id": "interstellar",
+  "query": "星际穿越",
+  "title": "星际穿越",
+  "aliases": [
+   "Interstellar"
+  ],
+  "year": "2014",
+  "media": "movie",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "inception",
+  "query": "盗梦空间",
+  "title": "盗梦空间",
+  "aliases": [
+   "Inception"
+  ],
+  "year": "2010",
+  "media": "movie",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "nihaolihuanying",
+  "query": "你好李焕英",
+  "title": "你好，李焕英",
+  "aliases": [
+   "你好李焕英",
+   "Hi, Mom"
+  ],
+  "year": "2021",
+  "media": "movie",
+  "season": null,
+  "note": "片名带标点"
+ },
+ {
+  "id": "rangzidanfei",
+  "query": "让子弹飞",
+  "title": "让子弹飞",
+  "aliases": [
+   "Let the Bullets Fly"
+  ],
+  "year": "2010",
+  "media": "movie",
+  "season": null,
+  "note": ""
+ },
+ {
+  "id": "wobushiyaoshen",
+  "query": "我不是药神",
+  "title": "我不是药神",
+  "aliases": [
+   "Dying to Survive"
+  ],
+  "year": "2018",
+  "media": "movie",
+  "season": null,
+  "note": ""
+ }
+]

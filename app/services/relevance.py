@@ -78,6 +78,25 @@ def _key(text: str) -> str:
     return resource_key(SEASON_RE.sub("", YEAR_RE.sub("", text)))
 
 
+_YEAR_AT = re.compile(r"(?:19[5-9]\d|20[0-4]\d)")
+
+
+def contains_name(name: str, text: str) -> bool:
+    """归一化后的 `text` 里有没有片名 `name`。
+
+    片名以数字结尾（续集「飞驰人生2」）时，如果这个数字其实是年份的开头
+    （「飞驰人生 2019」归一化成「飞驰人生2019」），不算。
+    """
+    if not name[-1:].isdigit():
+        return name in text
+    start = text.find(name)
+    while start != -1:
+        if not _YEAR_AT.match(text, start + len(name) - 1):
+            return True
+        start = text.find(name, start + 1)
+    return False
+
+
 def query_tokens(*texts: str) -> tuple[str, ...]:
     out: list[str] = []
     for text in texts:
@@ -127,7 +146,7 @@ def _title_hits(title: str, target: RelevanceTarget) -> bool:
     """书名号里的作品名是不是要找的那部：互相包含（「鬼吹灯之精绝古城」含「鬼吹灯」，
     「精英律师」在「靳东精英律师」里）；只含演员名这类片段不算。"""
     for n in target.names:
-        if n in title or (len(title) >= 2 and title in n):
+        if contains_name(n, title) or (len(title) >= 2 and contains_name(title, n)):
             return True
     return any(len(t) >= 2 and (title == t or (len(t) >= 3 and t in title))
                for t in target.tokens)
@@ -168,7 +187,7 @@ def judge(link: QuarkLink, target: RelevanceTarget) -> None:
             link.relevance, link.relevance_note = "mismatch", f"分享是《{titles[0]}》"
         return
     normalized = [resource_key(t) for t in texts]
-    if any(n in t for n in target.names for t in normalized):
+    if any(contains_name(n, t) for n in target.names for t in normalized):
         if primary:
             link.relevance, link.relevance_note = "match", None
         else:

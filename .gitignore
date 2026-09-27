@@ -23,3 +23,6 @@ Thumbs.db
 # ---- Reasonix 内部工作文件 ----
 .reasonix/
 
+
+# ---- 评测报告（本地生成）----
+evals/reports/
