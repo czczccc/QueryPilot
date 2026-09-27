@@ -1822,3 +1822,24 @@ body.searched .hero .memory-stats { display: none; }
 .qr-more[open] summary { margin-bottom: 0.5rem; }
 .qr-album { margin: 0 0 0.6rem; font-size: 0.8rem; color: var(--muted); }
 .qr-img { width: 200px; height: 200px; border-radius: 8px; -webkit-touch-callout: default; user-select: auto; }
+
+/* ================= 洗版：每集清晰度格子 ================= */
+.badge.state-accent { color: var(--accent); background: var(--accent-soft); cursor: help; }
+.ep-strip { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.ep-chip {
+  display: inline-grid; justify-items: center; align-content: center; min-width: 2.3rem; padding: 0.15rem 0.3rem;
+  font-size: 0.66rem; line-height: 1.2; color: var(--muted); background: var(--surface-2);
+  border: 1px solid transparent; border-radius: 6px; cursor: default; font-variant-numeric: tabular-nums;
+}
+.ep-chip b { font-size: 0.74rem; font-weight: 650; color: var(--text); }
+.ep-chip.saved { color: var(--ok); background: var(--ok-soft); }
+.ep-chip.below { color: var(--warn); background: var(--warn-soft); }
+.ep-chip.missing { border-style: dashed; border-color: var(--border-strong); background: transparent; }
+.ep-chip.missing b { color: var(--muted); font-weight: 500; }
+.ep-chip.is-movie { padding: 0.2rem 0.55rem; font-size: 0.76rem; font-weight: 600; }
+.sub-edit-grid .field.is-disabled { opacity: 0.55; }
+.sub-edit-grid .field .switch { padding: 0.3rem 0; }
+.notif-list li.kind-upgraded::before { content: "⇧ "; color: var(--accent); font-weight: 700; }
+@media (max-width: 600px) {
+  .ep-chip { min-width: 2rem; padding: 0.1rem 0.2rem; }
+}
