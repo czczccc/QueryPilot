@@ -12,18 +12,18 @@ services:
       - querypilot-data:/app/data
     restart: unless-stopped
 
-  # PanSou 网盘搜索聚合（https://github.com/fish2018/pansou，MIT），可选：
-  #   docker compose --profile pansou up -d
-  # 并在 .env 写 PANSOU_URL=http://pansou:8888。不映射端口，只给 web 在内网调用。
+  # PanSou 网盘搜索聚合（https://github.com/fish2018/pansou，MIT）：给 QueryPilot 的 agent 当搜索工具。
+  # 和 web 在同一个 compose 网络，不映射任何端口，只有 web 能通过 http://pansou:8888 访问。
+  # .env 里不写 PANSOU_URL 时 QueryPilot 不会用它（容器照样起，但没人调用）。
   pansou:
-    profiles: ["pansou"]
-    image: ghcr.io/fish2018/pansou:latest  # 上线后建议固定到具体版本 tag
+    image: ghcr.io/fish2018/pansou:latest  # 上线稳定后建议固定到具体版本 tag
     restart: unless-stopped
     environment:
-      # 插件白名单：只开网盘/夸克影视类，排除成人与 BT 盗版站插件（不要改成全部启用）
-      - ENABLED_PLUGINS=pansearch,qupansou,hunhepan,quark4k,quarksoo,quarktv,quarkres,panlian,yunso,yunsou,sousou,haitunsou,xiaokupan,labi,zhizhen,shandian,muou,duoduo,wanou,ouge,huban,hdmoli,libvio,duanjuw,kkv
+      # 插件白名单：只开网盘/夸克影视类。PanSou 默认会开成人站和 BT 站插件
+      # （javdb、u3c3、nyaa、thepiratebay 等），所以这里必须显式列出，不要改成全部启用
+      - ENABLED_PLUGINS=${PANSOU_PLUGINS:-pansearch,qupansou,hunhepan,quark4k,quarksoo,quarktv,quarkres,panlian,yunso,yunsou,sousou,haitunsou,xiaokupan,labi,zhizhen,shandian,muou,duoduo,wanou,ouge,huban,hdmoli,libvio,duanjuw,kkv}
       # QueryPilot 默认只请求插件结果（PANSOU_SRC=plugin）；要用 TG 频道时，先人工筛好频道再填
-      - CHANNELS=
+      - CHANNELS=${PANSOU_CHANNELS:-}
       - CACHE_TTL=60
       - ASYNC_RESPONSE_TIMEOUT=4
       # - PROXY=socks5://host:port   # 国内服务器访问 TG 需要代理

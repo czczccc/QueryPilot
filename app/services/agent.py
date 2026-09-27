@@ -148,6 +148,31 @@ TOOLS = [
     },
 ]
 
+PANSOU_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "pansou_search",
+        "description": (
+            "用 PanSou 网盘聚合搜索（几十个网盘搜索站一起搜，只要夸克链接），结果加入候选池（未验证）。"
+            "只按资源名搜，不花通用搜索引擎的额度；第一次 search 之后通常也调一次，"
+            "换别名、英文名时也可以再用。同一个关键词不要重复搜。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "keyword": {"type": "string", "description": "简短资源名（可用别名、英文名）"},
+            },
+            "required": ["keyword"],
+        },
+    },
+}
+
+
+def tools_for(pansou: bool) -> list[dict]:
+    """没配 PanSou 时 LLM 看不到这个工具。"""
+    return [*TOOLS[:2], PANSOU_TOOL, *TOOLS[2:]] if pansou else TOOLS
+
+
 SYSTEM_PROMPT = (
     "你是夸克网盘资源搜索 agent。目标：找到至少 {target} 条【有效】且【满足清晰度要求】"
     "的分享链接。你只能通过工具行动，每次调用一个工具，并在 content 里用一句话说明理由。\n"
@@ -179,6 +204,8 @@ class AgentState:
     recalled: bool = False
     search_calls: int = 0
     verify_calls: int = 0
+    pansou: bool = False  # 配了 PanSou（有 pansou_search 工具）
+    pansou_keywords: list[str] = field(default_factory=list)
     raw_count: int = 0
     fresh_after: float = 0.0
 
@@ -240,6 +267,7 @@ class AgentState:
             "valid_by_resolution": resolutions,
             "used_queries": self.used_queries,
             "used_keywords": self.used_keywords,
+            **({"pansou_keywords": self.pansou_keywords} if self.pansou else {}),
         }
 
 
@@ -271,6 +299,8 @@ class RulePlanner:
                 "queries": state.parsed.search_suggestions,
                 "keyword": state.parsed.resource,
             })
+        if state.pansou and not state.pansou_keywords:  # 降级成规则时 PanSou 也照样用上
+            return Action("pansou_search", {"keyword": state.parsed.resource})
         if state.unverified() and state.verify_calls < 4:
             return Action("verify", {"limit": MAX_VERIFY_PER_CALL})
         if not state.satisfied() and state.search_calls == 1:
@@ -303,8 +333,9 @@ class DeepSeekPlanner:
 
     def __init__(
         self, api_key: str, client: httpx.AsyncClient, timeout: float = 20.0,
-        model: str | None = None,
+        model: str | None = None, tools: list[dict] | None = None,
     ) -> None:
+        self._tools = tools or TOOLS
         self._api_key = api_key
         self._client = client
         self._timeout = timeout
@@ -315,9 +346,12 @@ class DeepSeekPlanner:
 
     def _start(self, state: AgentState) -> None:
         p = state.parsed
+        prompt = SYSTEM_PROMPT.format(target=TARGET_MATCHES, steps=MAX_STEPS)
+        if state.pansou:
+            prompt += ("\n另有 pansou_search（网盘聚合搜索，只按资源名）：第一次 search 之后"
+                       "通常也调一次，结果和 search 一样要 verify。")
         self._messages = [
-            {"role": "system", "content": SYSTEM_PROMPT.format(
-                target=TARGET_MATCHES, steps=MAX_STEPS)},
+            {"role": "system", "content": prompt},
             {"role": "user", "content": json.dumps({
                 "resource": p.resource,
                 "aliases": p.aliases,
@@ -351,7 +385,7 @@ class DeepSeekPlanner:
             {
                 "model": self._model,
                 "messages": self._messages,
-                "tools": TOOLS,
+                "tools": self._tools,
                 "tool_choice": "required",
                 "temperature": 0.2,
             },
@@ -410,7 +444,8 @@ class SearchAgent:
 
     def _planner(self) -> Planner:
         if self._llm_on():
-            return DeepSeekPlanner(self._api_key, self._client)
+            return DeepSeekPlanner(self._api_key, self._client,
+                                   tools=tools_for(self._service.pansou_enabled))
         return RulePlanner()
 
     async def run(
@@ -485,6 +520,7 @@ class SearchAgent:
             if self.lookup is not None:
                 year = str(state.target.year) if state.target.year else None
                 add_aliases(state.target, await self.lookup(parsed.resource, year))
+        state.pansou = self._service.pansou_enabled
         providers = self._service.new_providers()
         key = resource_key(parsed.resource)
 
@@ -610,6 +646,8 @@ class SearchAgent:
                 return await self._recall(state, key)
             if action.tool == "search":
                 return await self._search(action.args, state, providers)
+            if action.tool == "pansou_search" and state.pansou:
+                return await self._pansou(action.args, state, providers)
             if action.tool == "verify":
                 return await self._verify(action.args, state)
             if action.tool == "finish":
@@ -649,6 +687,24 @@ class SearchAgent:
         found = await self._service.collect(
             queries, keyword, providers, keyword_engines=new_keyword
         )
+        return await self._add_found(found, state, providers)
+
+    async def _pansou(
+        self, args: dict, state: AgentState, providers: dict[str, ProviderStatus]
+    ) -> dict:
+        keyword = str(args.get("keyword") or state.parsed.resource).strip()[:50]
+        if keyword in state.pansou_keywords:
+            return {"error": "这个关键词已经用 PanSou 搜过了"}
+        state.pansou_keywords.append(keyword)
+        found = await self._service.collect(
+            [], keyword, providers, keyword_engines=False, pansou=True, tavily=False,
+        )
+        return await self._add_found(found, state, providers)
+
+    async def _add_found(
+        self, found: list[QuarkLink], state: AgentState, providers: dict[str, ProviderStatus]
+    ) -> dict:
+        """搜到的链接进候选池（同一分享码保留先到的），跳过记忆里已知失效的。"""
         state.raw_count += len(found)
         before = len(state.candidates)
         for link in found:
