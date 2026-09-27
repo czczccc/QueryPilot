@@ -114,7 +114,7 @@ def test_save_api_requires_token():
         r = client.post("/api/save", json=body, headers={"X-Save-Token": TOKEN})
         assert r.status_code == 200
         assert r.json() == {"ok": True, "message": "已转存《流浪地球2》到你的夸克网盘",
-                            "file_count": 2}
+                            "file_count": 2, "folder": None, "category": None}
         assert "SECRET" not in r.text
         # 参数校验：分享码/提取码格式
         assert client.post("/api/save", json={"share": "../etc"},

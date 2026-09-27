@@ -34,6 +34,8 @@ class Settings:
     quark_cookie: str = field(default="", repr=False)
     save_token: str = field(default="", repr=False)
     quark_save_dir_fid: str = "0"
+    save_classify: bool = True  # 转存时自动分类到 {根目录}/电影|电视剧/地区/片名；关闭则存到 QUARK_SAVE_DIR_FID
+    save_root_dir: str = "QueryPilot"  # 自动分类的网盘根目录名
     cookie_secret: str = field(default="", repr=False)  # 扫码登录凭证的加密密钥，空则自动生成密钥文件
     quark_login: bool = True  # 是否开放夸克扫码登录（多人各自转存到自己的网盘）  # 转存到的网盘目录 fid，0 为根目录
     extra: dict = field(default_factory=dict)
@@ -76,5 +78,7 @@ def load_settings() -> Settings:
         save_token=os.getenv("SAVE_TOKEN", "").strip(),
         cookie_secret=os.getenv("COOKIE_SECRET", "").strip(),
         quark_login=os.getenv("QUARK_LOGIN", "true").strip().lower() not in ("0", "false", "no"),
+        save_classify=os.getenv("SAVE_CLASSIFY", "true").strip().lower() not in ("0", "false", "no"),
+        save_root_dir=os.getenv("SAVE_ROOT_DIR", "QueryPilot").strip() or "QueryPilot",
         quark_save_dir_fid=os.getenv("QUARK_SAVE_DIR_FID", "0").strip() or "0",
     )

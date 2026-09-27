@@ -201,3 +201,5 @@ class SaveResponse(BaseModel):
     ok: bool
     message: str
     file_count: int = 0
+    folder: str | None = None  # 自动分类后存入的网盘目录
+    category: str | None = None  # 识别出的类别，如「国产剧」「欧美电影」

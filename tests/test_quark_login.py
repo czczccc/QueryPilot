@@ -159,7 +159,7 @@ def test_expired_user_cookie_is_cleared():
         _login(client)
         r = client.post("/api/save", json={"share": "abcdef123456"})
         assert r.json() == {"ok": False, "message": "夸克登录已过期，请重新扫码登录",
-                            "file_count": 0}
+                            "file_count": 0, "folder": None, "category": None}
         assert client.get("/api/save/status").json()["logged_in"] is False
 
 
