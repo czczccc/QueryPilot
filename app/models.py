@@ -188,3 +188,16 @@ class Notification(BaseModel):
     share: str | None = None  # 带来更新的那条链接
     ts: float
     read: bool = False
+
+
+class SaveRequest(BaseModel):
+    """一键转存某条分享链接到部署者的夸克网盘。"""
+
+    share: str = Field(min_length=6, max_length=32, pattern=r"^[0-9a-zA-Z]+$")
+    pwd: str | None = Field(default=None, pattern=r"^[0-9a-zA-Z]{4}$")
+
+
+class SaveResponse(BaseModel):
+    ok: bool
+    message: str
+    file_count: int = 0

@@ -20,6 +20,7 @@ let currentLinks = [];
 let hideDead = true;
 let minRes = "";
 let lastQuery = "";
+let saveEnabled = false; // 服务器配置了一键转存才显示「转存」按钮
 
 function getClientId() {
   try {
@@ -274,6 +275,7 @@ function renderLinks(links) {
       }).catch(() => {});
     });
     row.appendChild(copyOne);
+    if (saveEnabled && l.state === "valid") row.appendChild(saveButton(l));
     li.appendChild(row);
 
     resultList.appendChild(li);
@@ -643,3 +645,59 @@ subsPanel.addEventListener("toggle", async () => {
 
 loadSubs();
 setInterval(loadSubs, 5 * 60 * 1000);
+
+
+// ---- 一键转存（存到部署者自己的夸克网盘，需口令；夸克 cookie 只在服务器上） ----
+function getSaveToken(forceAsk) {
+  let token = null;
+  try { token = forceAsk ? null : localStorage.getItem("qp_save_token"); } catch (_) { /* 忽略 */ }
+  if (!token) {
+    token = window.prompt("请输入转存口令（服务器 .env 里的 SAVE_TOKEN，只保存在本浏览器）");
+    if (token) {
+      try { localStorage.setItem("qp_save_token", token); } catch (_) { /* 忽略 */ }
+    }
+  }
+  return token;
+}
+
+function saveButton(l) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "secondary-btn small";
+  setText(btn, "转存到网盘");
+  btn.addEventListener("click", async () => {
+    let token = getSaveToken(false);
+    if (!token) return;
+    btn.disabled = true;
+    setText(btn, "转存中…");
+    try {
+      let resp = await postSave(l, token);
+      if (resp.status === 401) { // 口令不对：清掉重新问一次
+        token = getSaveToken(true);
+        resp = token ? await postSave(l, token) : resp;
+      }
+      const body = await resp.json().catch(() => ({}));
+      const ok = resp.ok && body.ok;
+      setText(btn, ok ? "已转存" : "转存失败");
+      showStatus(body.message || body.detail || "转存失败", ok ? "info" : "error");
+      if (!ok) btn.disabled = false;
+    } catch (_) {
+      setText(btn, "转存失败");
+      btn.disabled = false;
+    }
+  });
+  return btn;
+}
+
+function postSave(l, token) {
+  return fetch("/api/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Save-Token": token },
+    body: JSON.stringify({ share: l.share, pwd: l.pwd || null }),
+  });
+}
+
+fetch("/api/save/status")
+  .then((r) => r.json())
+  .then((d) => { saveEnabled = !!d.enabled; })
+  .catch(() => {});

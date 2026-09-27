@@ -6,6 +6,7 @@
 
 import asyncio
 import contextlib
+import hmac
 import logging
 import time
 import uuid
@@ -13,7 +14,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -25,6 +26,8 @@ from app.models import (
     FeedbackRequest,
     Notification,
     QuarkSearchResponse,
+    SaveRequest,
+    SaveResponse,
     SearchRequest,
     SubscribeRequest,
     Subscription,
@@ -35,6 +38,7 @@ from app.security import RateLimiter, install_request_id_factory, set_request_id
 from app.services.agent import SearchAgent
 from app.services.intent import DeepSeekParser
 from app.services.memory import LinkStore
+from app.services.quark_save import QuarkSaver, SaveError
 from app.services.search import QuarkSearchService, SearchUnavailableError
 from app.services.subscriptions import SubscriptionWatcher
 
@@ -104,6 +108,8 @@ def create_app(
     reverify_interval_hours: float | None = None,
     agent: SearchAgent | None = None,
     subscribe_interval_hours: float | None = None,
+    saver: QuarkSaver | None = None,
+    save_token: str | None = None,
 ) -> FastAPI:
     """创建应用；传入 service / agent 便于测试注入假实现。"""
     resolved = service or build_default_service()
@@ -155,11 +161,18 @@ def create_app(
         lifespan=lifespan,
         title="QueryPilot",
         description="AI 搜索与链接验证引擎：自然语言输入，多引擎聚合检索，严格验证结果可用性。",
-        version="0.9.0",
+        version="0.10.0",
     )
     app.state.search_service = resolved
     app.state.agent = resolved_agent
     app.state.watcher = watcher
+    # 一键转存：cookie 与口令都配置了才开启（测试可注入）
+    if saver is None and service is None and _settings.quark_cookie and _settings.save_token:
+        saver = QuarkSaver(_settings.quark_cookie, _settings.quark_save_dir_fid)
+    resolved_token = save_token if save_token is not None else (
+        _settings.save_token if service is None else ""
+    )
+    app.state.saver = saver if resolved_token else None
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
     @app.middleware("http")
@@ -201,7 +214,7 @@ def create_app(
     @app.get("/health")
     async def health() -> dict:
         """健康检查：只证明应用进程可响应，不探测外部 API。"""
-        return {"status": "ok", "version": "0.9.0"}
+        return {"status": "ok", "version": "0.10.0"}
 
     @app.get("/api/memory/stats")
     async def memory_stats() -> dict:
@@ -269,6 +282,30 @@ def create_app(
     async def notifications_read(client_id: str = ClientId) -> dict:
         await _store_or_404().mark_read(client_id)
         return {"ok": True}
+
+    @app.get("/api/save/status")
+    async def save_status() -> dict:
+        """前端据此决定是否显示「转存」按钮（不透露任何配置内容）。"""
+        return {"enabled": app.state.saver is not None}
+
+    @app.post("/api/save", response_model=SaveResponse)
+    async def save_to_drive(
+        req: SaveRequest,
+        x_save_token: str = Header(default=""),
+        _: None = Depends(rate_limit_dep),
+    ) -> SaveResponse:
+        """把分享里的文件转存到部署者自己的夸克网盘（需口令）。"""
+        if app.state.saver is None:
+            raise HTTPException(status_code=404, detail="一键转存未开启")
+        if not hmac.compare_digest(x_save_token.encode(), resolved_token.encode()):
+            raise HTTPException(status_code=401, detail="转存口令不正确")
+        try:
+            result = await app.state.saver.save(req.share, req.pwd)
+        except SaveError as e:
+            return SaveResponse(ok=False, message=str(e))
+        name = f"《{result.title}》" if result.title else f"{result.file_count} 个文件"
+        message = f"已转存{name}到你的夸克网盘" if result.done else f"已提交转存{name}，夸克正在后台处理"
+        return SaveResponse(ok=True, message=message, file_count=result.file_count)
 
     @app.post("/api/search", response_model=QuarkSearchResponse)
     async def api_search(

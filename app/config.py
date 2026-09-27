@@ -27,6 +27,10 @@ class Settings:
     extra_sites: tuple[str, ...] = ()  # 资源站搜索 URL 模板，{q} 为关键词
     subscribe_interval_hours: float = 12.0  # 追剧订阅检查周期，0 关闭
     notify_webhook: str = ""  # 订阅有更新时额外推送到这个 webhook（可选）
+    # 一键转存：夸克登录 cookie 与接口口令只放本地 .env / 环境变量，不入库、不回显
+    quark_cookie: str = field(default="", repr=False)
+    save_token: str = field(default="", repr=False)
+    quark_save_dir_fid: str = "0"  # 转存到的网盘目录 fid，0 为根目录
     extra: dict = field(default_factory=dict)
 
 
@@ -60,4 +64,7 @@ def load_settings() -> Settings:
         extra_sites=_list("EXTRA_SITES"),
         subscribe_interval_hours=_float("SUBSCRIBE_INTERVAL_HOURS", 12.0),
         notify_webhook=os.getenv("NOTIFY_WEBHOOK", ""),
+        quark_cookie=os.getenv("QUARK_COOKIE", "").strip(),
+        save_token=os.getenv("SAVE_TOKEN", "").strip(),
+        quark_save_dir_fid=os.getenv("QUARK_SAVE_DIR_FID", "0").strip() or "0",
     )
