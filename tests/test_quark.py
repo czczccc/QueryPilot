@@ -15,6 +15,7 @@ from app.services.quark import (
     parse_qkyunso_search,
     search_bing,
     verify_quark,
+    verify_quark_files,
 )
 
 # ---------------- 正则提取 ----------------
@@ -212,3 +213,42 @@ async def test_verify_quark_network_error_unknown():
     code, state = await verify_quark("abc1234567", client, timeout=5)
     assert code is None
     assert state == "unknown"
+
+
+async def test_verify_quark_files_returns_list():
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_verify_ok_handler()))
+    code, state, files = await verify_quark_files("abc1234567", client, timeout=5)
+    assert (code, state) == (200, "valid")
+    assert files == [{"file_name": "电影.mkv"}]
+
+
+async def test_verify_quark_files_expands_single_folder():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/sharepage/token"):
+            return httpx.Response(200, json={"code": 0, "data": {"stoken": "t"}})
+        if request.url.params.get("pdir_fid") == "0":
+            top = [{"fid": "f1", "file_name": "流浪地球2", "dir": True}]
+        else:
+            assert request.url.params.get("pdir_fid") == "f1"
+            top = [{"file_name": "流浪地球2.2160p.mkv", "size": 30, "dir": False}]
+        return httpx.Response(200, json={"code": 0, "data": {"share": {"status": 1}, "list": top}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    _, state, files = await verify_quark_files("abc1234567", client, timeout=5)
+    assert state == "valid"
+    assert [f["file_name"] for f in files] == ["流浪地球2", "流浪地球2.2160p.mkv"]
+
+
+async def test_verify_quark_files_folder_expand_failure_still_valid():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/sharepage/token"):
+            return httpx.Response(200, json={"code": 0, "data": {"stoken": "t"}})
+        if request.url.params.get("pdir_fid") == "0":
+            top = [{"fid": "f1", "file_name": "合集", "dir": True}]
+            return httpx.Response(200, json={"code": 0, "data": {"share": {"status": 1}, "list": top}})
+        return httpx.Response(500)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    _, state, files = await verify_quark_files("abc1234567", client, timeout=5)
+    assert state == "valid"
+    assert len(files) == 1

@@ -196,6 +196,8 @@ header h1 {
 .badge-ok { color: #166534; border-color: #86efac; background: #f0fdf4; }
 .badge-dead { color: #7f1d1d; border-color: #fca5a5; background: #fef2f2; }
 .badge-unknown { color: #4b5563; border-color: #d1d5db; background: #f9fafb; }
+.badge-res { color: #1e3a8a; border-color: #93c5fd; background: #eff6ff; }
+.badge-tag { color: #4b5563; border-color: #d1d5db; background: #ffffff; }
 
 .result-dead {
   opacity: 0.55;

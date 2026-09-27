@@ -106,12 +106,52 @@ async def deep_fetch_links(
 async def verify_quark(
     share_id: str, client: httpx.AsyncClient, timeout: float = 8.0, pwd: str | None = None
 ) -> tuple[int | None, str]:
-    """严格验证夸克分享链接，返回 `(壳页状态码, 状态)`。
+    """严格验证夸克分享链接，返回 `(壳页状态码, 状态)`（兼容旧接口）。"""
+    code, state, _ = await verify_quark_files(share_id, client, timeout, pwd)
+    return code, state
+
+
+async def _fetch_detail(
+    share_id: str,
+    stoken: str,
+    pdir_fid: str,
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    timeout: float,
+) -> dict:
+    resp = await client.get(
+        DETAIL_URL,
+        params={
+            "ver": 2,
+            "pwd_id": share_id,
+            "stoken": stoken,
+            "pdir_fid": pdir_fid,
+            "force": 0,
+            "_page": 1,
+            "_size": 50,
+            "_fetch_banner": 1,
+            "_fetch_share": 1,
+            "fetch_relate_conversation": 1,
+        },
+        headers=headers,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def verify_quark_files(
+    share_id: str, client: httpx.AsyncClient, timeout: float = 8.0, pwd: str | None = None
+) -> tuple[int | None, str, list[dict]]:
+    """严格验证夸克分享链接，返回 `(壳页状态码, 状态, 文件列表)`。
 
     状态：
     - `valid`   分享存在且有文件列表（可正常访问）
     - `invalid` 分享不存在（404/41006）或文件已被删空（detail 无文件）
     - `unknown` 网络异常或无法判定
+
+    文件列表仅在 `valid` 时非空：顶层文件；若顶层只有文件夹，
+    再展开第一个文件夹一层（多数分享是「片名/视频文件」结构），用于质量识别。
     """
     headers = {
         "User-Agent": UA,
@@ -132,44 +172,37 @@ async def verify_quark(
             timeout=timeout,
         )
         if resp.status_code == 404:
-            return 404, "invalid"
+            return 404, "invalid", []
         resp.raise_for_status()
         data = resp.json()
     except (httpx.HTTPError, ValueError):
-        return None, "unknown"
+        return None, "unknown", []
     stoken = (data.get("data") or {}).get("stoken")
     if not stoken:
-        return 200, "invalid" if data.get("code") == 41006 else "unknown"
+        return 200, "invalid" if data.get("code") == 41006 else "unknown", []
 
     # 2) 分享详情：有效分享返回文件列表
     try:
-        detail_resp = await client.get(
-            DETAIL_URL,
-            params={
-                "ver": 2,
-                "pwd_id": share_id,
-                "stoken": stoken,
-                "pdir_fid": "0",
-                "force": 0,
-                "_page": 1,
-                "_size": 50,
-                "_fetch_banner": 1,
-                "_fetch_share": 1,
-                "fetch_relate_conversation": 1,
-            },
-            headers=headers,
-            timeout=timeout,
-        )
-        detail_resp.raise_for_status()
-        detail = detail_resp.json()
+        detail = await _fetch_detail(share_id, stoken, "0", client, headers, timeout)
     except (httpx.HTTPError, ValueError):
-        return 200, "unknown"
+        return 200, "unknown", []
 
     lst = (detail.get("data") or {}).get("list") or []
     share_status = (detail.get("data") or {}).get("share", {}).get("status")
-    if lst and share_status == 1:
-        return 200, "valid"
-    return 200, "invalid"
+    if not (lst and share_status == 1):
+        return 200, "invalid", []
+
+    files = [f for f in lst if isinstance(f, dict)]
+    # 3) 顶层全是文件夹时展开第一个（失败不影响有效性判定）
+    if files and all(f.get("dir") for f in files) and files[0].get("fid"):
+        try:
+            sub = await _fetch_detail(
+                share_id, stoken, str(files[0]["fid"]), client, headers, timeout
+            )
+            files += [f for f in (sub.get("data") or {}).get("list") or [] if isinstance(f, dict)]
+        except (httpx.HTTPError, ValueError):
+            pass
+    return 200, "valid", files
 
 
 # ---------------- 引擎：夸克云搜（始终启用） ----------------

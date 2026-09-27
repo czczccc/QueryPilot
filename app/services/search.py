@@ -1,13 +1,14 @@
 """夸克网盘链接搜索编排。
 
-链路：解析资源名 → 引擎并发（Tavily 多查询 + 深度抓取 / 夸克云搜）
-→ 按分享码去重 → 并发验证可达性 → 指标汇总。
+链路：解析资源名 → 引擎并发（Tavily 多查询 + 深度抓取 / 夸克云搜 / Bing）
+→ 按分享码去重 → 并发验证可达性并识别质量 → 排序 → 指标汇总。
 """
 
 import asyncio
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 
 import httpx
 
@@ -22,6 +23,7 @@ from app.models import (
 from app.providers.base import ProviderError, SearchProvider
 from app.services.douban import extract_douban_id, fetch_douban_meta
 from app.services.intent import IntentParser
+from app.services.quality import parse_quality
 from app.services.quark import (
     BLOCKED_DOMAINS,
     UA,
@@ -30,7 +32,7 @@ from app.services.quark import (
     make_entry,
     search_bing,
     search_qkyunso,
-    verify_quark,
+    verify_quark_files,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,40 +99,41 @@ class QuarkSearchService:
         if self._use_bing:
             providers["bing"] = ProviderStatus(name="bing")
 
-        links: list[QuarkLink] = []
+        async def run_tavily() -> list[QuarkLink]:
+            return await self._tavily_pipeline(parsed.search_suggestions, providers["tavily"])
 
-        # 引擎 1：Tavily 多查询 + 深度抓取
-        try:
-            t0 = time.monotonic()
-            links += await self._tavily_pipeline(parsed.search_suggestions, providers["tavily"])
-            providers["tavily"].duration_ms += int((time.monotonic() - t0) * 1000)
-        except Exception:
-            logger.exception("Tavily 流水线异常")
-            providers["tavily"].error_type = "pipeline_error"
+        async def run_qkyunso() -> list[QuarkLink]:
+            return await search_qkyunso(parsed.resource, self._client, self._timeout)
 
-        # 引擎 2：夸克云搜（规则清洗后的资源名）
+        async def run_bing() -> list[QuarkLink]:
+            return await search_bing(parsed.resource, self._client, self._timeout)
+
+        # 引擎并发执行；tavily 自行累计 result_count，其余引擎按返回链接数计
+        engines: list[tuple[str, Callable[[], Awaitable[list[QuarkLink]]]]] = [("tavily", run_tavily)]
         if self._use_qkyunso:
-            try:
-                t0 = time.monotonic()
-                qk_links = await search_qkyunso(parsed.resource, self._client, self._timeout)
-                providers["qkyunso"].result_count = len(qk_links)
-                links += qk_links
-                providers["qkyunso"].duration_ms += int((time.monotonic() - t0) * 1000)
-            except Exception:
-                logger.exception("夸克云搜异常")
-                providers["qkyunso"].error_type = "pipeline_error"
-
-        # 引擎 3：Bing 中文（免费）
+            engines.append(("qkyunso", run_qkyunso))
         if self._use_bing:
+            engines.append(("bing", run_bing))
+
+        async def guarded(
+            name: str, fn: Callable[[], Awaitable[list[QuarkLink]]]
+        ) -> list[QuarkLink]:
+            t0 = time.monotonic()
             try:
-                t0 = time.monotonic()
-                bing_links = await search_bing(parsed.resource, self._client, self._timeout)
-                providers["bing"].result_count = len(bing_links)
-                links += bing_links
-                providers["bing"].duration_ms += int((time.monotonic() - t0) * 1000)
+                found = await fn()
+                if name != "tavily":
+                    providers[name].result_count = len(found)
+                return found
             except Exception:  # 单引擎兜底，不中断整体
-                logger.exception("Bing 引擎异常")
-                providers["bing"].error_type = "pipeline_error"
+                logger.exception("%s 引擎异常", name)
+                providers[name].error_type = "pipeline_error"
+                return []
+            finally:
+                providers[name].duration_ms += int((time.monotonic() - t0) * 1000)
+
+        per_engine = await asyncio.gather(*(guarded(n, fn) for n, fn in engines))
+        # 按固定引擎顺序拼接，保证去重结果确定
+        links: list[QuarkLink] = [link for found in per_engine for link in found]
 
         for status in providers.values():
             if status.error_type:
@@ -152,20 +155,23 @@ class QuarkSearchService:
 
         async def check(link: QuarkLink) -> None:
             async with verify_sem:
-                link.http, link.state = await verify_quark(
+                link.http, link.state, files = await verify_quark_files(
                     link.share, self._client, timeout=8.0, pwd=link.pwd
                 )
+                if link.state == "valid":
+                    link.quality = parse_quality(files, link.name)
 
         await asyncio.gather(*(check(link) for link in final))
 
-        # 排序：有效优先，未知居中，失效最后；同状态按置信度
+        # 排序：有效优先，未知居中，失效最后；同状态按质量分（高→低），再按置信度
         state_rank = {"valid": 0, "unknown": 1, "invalid": 2}
         conf_rank = {"高": 0, "中": 1, "低": 2}
         final.sort(
-            key=lambda l: (
-                state_rank.get(l.state, 1),
-                conf_rank.get(l.conf, 1),
-                l.share,
+            key=lambda link: (
+                state_rank.get(link.state, 1),
+                -(link.quality.score if link.quality else 0),
+                conf_rank.get(link.conf, 1),
+                link.share,
             )
         )
 

@@ -3,6 +3,7 @@
 import logging
 import socket
 
+import httpx
 from fastapi.testclient import TestClient
 
 from app.main import create_app
@@ -26,8 +27,14 @@ class FakeProvider:
 
 
 def _make_client(rate_limit: int | None = None) -> TestClient:
+    # 注入 MockTransport：不访问真实网络。TestClient 每个请求用新的事件循环，
+    # 真实 httpx 连接池跨请求复用会触发 "Event loop is closed"（CI 有网络时出现）
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     svc = QuarkSearchService(parser=FakeParser(), tavily=FakeProvider(),
-                             use_qkyunso=False, use_bing=False)
+                             use_qkyunso=False, use_bing=False, client=client)
     return TestClient(create_app(service=svc, rate_limit_per_minute=rate_limit))
 
 
