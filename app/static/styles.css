@@ -1884,3 +1884,23 @@ body.searched .hero .memory-stats { display: none; }
   .cal-day { grid-template-columns: 2.6rem 1fr; gap: 0.45rem; }
   .cal-eps { grid-template-columns: 1fr; }
 }
+
+/* ================= 首页热门片名 ================= */
+.examples-list { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.5rem; min-width: 0; }
+.example.has-meta { display: inline-flex; align-items: center; gap: 0.4rem; padding-left: 0.35rem; animation: fade-up 0.4s var(--ease) both; animation-delay: calc(var(--i, 0) * 50ms); }
+.example-poster { width: 20px; height: 28px; object-fit: cover; border-radius: 4px; background: var(--surface-2); }
+.example-tag { font-size: 0.68rem; color: var(--muted); }
+.example.has-meta:not(:has(.example-poster)) { padding-left: 0.85rem; }
+#query.ph-swap::placeholder { opacity: 0; }
+#query::placeholder { transition: opacity 0.18s ease; }
+@media (max-width: 600px) {
+  .examples { flex-wrap: nowrap; justify-content: flex-start; }
+  .examples-label { flex: none; }
+  .examples-list {
+    flex-wrap: nowrap; justify-content: flex-start; overflow-x: auto; scroll-snap-type: x proximity;
+    scrollbar-width: none; -webkit-overflow-scrolling: touch; padding: 2px 1rem 4px 2px; margin-right: -1rem;
+    mask-image: linear-gradient(90deg, #000 85%, transparent);
+  }
+  .examples-list::-webkit-scrollbar { display: none; }
+  .examples-list .example { flex: none; scroll-snap-align: start; }
+}

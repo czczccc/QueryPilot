@@ -709,12 +709,89 @@ form.addEventListener("submit", (e) => {
   doSearch(q);
 });
 
-document.querySelectorAll(".example").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    input.value = btn.dataset.query;
-    doSearch(btn.dataset.query);
-  });
+const examplesList = document.getElementById("examples-list");
+const examplesLabel = document.getElementById("examples-label");
+examplesList.addEventListener("click", (e) => {
+  const btn = e.target.closest(".example");
+  if (!btn) return;
+  input.value = btn.dataset.query;
+  doSearch(btn.dataset.query);
 });
+
+// ---- 热门片名：搜索框占位文字轮换 + 「试试」换成 TMDB / 豆瓣最近热门 ----
+// 接口失败或没数据时保留页面里写死的示例
+const TRENDING_KEY = "qp_trending";
+const TRENDING_TTL = 6 * 3600 * 1000;
+let placeholderTimer = null;
+
+function trendingItems(data) {
+  const list = Array.isArray(data) ? data : (data && (data.items || data.trending)) || [];
+  const seen = new Set();
+  return list.filter((x) => x && x.title && !seen.has(x.title) && seen.add(x.title)).slice(0, 6);
+}
+
+function renderTrending(items) {
+  if (!items.length) return;
+  examplesList.innerHTML = "";
+  items.forEach((x, i) => {
+    const btn = el("button", "example has-meta");
+    btn.type = "button";
+    btn.dataset.query = x.title;
+    btn.style.setProperty("--i", String(i));
+    btn.title = [x.title, x.year, x.media === "movie" ? "电影" : x.media === "tv" ? "剧集" : ""].filter(Boolean).join(" · ");
+    if (x.poster) {
+      const img = el("img", "example-poster");
+      img.alt = "";
+      img.loading = "lazy";
+      img.referrerPolicy = "no-referrer";
+      img.addEventListener("error", () => img.remove(), { once: true });
+      img.src = x.poster;
+      btn.appendChild(img);
+    }
+    btn.appendChild(el("span", "", x.title));
+    if (x.media) btn.appendChild(el("span", "example-tag", x.media === "movie" ? "电影" : "剧集"));
+    examplesList.appendChild(btn);
+  });
+  setText(examplesLabel, "正在热播");
+  examplesList.scrollLeft = 0;
+  rotatePlaceholder(items.map((x) => x.title));
+}
+
+// 占位文字在几部热门片名之间轮换；输入框有焦点或有内容时不动
+function rotatePlaceholder(titles) {
+  clearInterval(placeholderTimer);
+  if (!titles.length) return;
+  let i = 0;
+  const narrow = window.matchMedia("(max-width: 600px)");
+  const show = () => {
+    const two = titles.length > 1 && !narrow.matches; // 手机上只放一个，免得被截断
+    input.placeholder = "例如：" + titles[i % titles.length] + (two ? " / " + titles[(i + 1) % titles.length] : "");
+  };
+  show();
+  placeholderTimer = setInterval(() => {
+    if (document.activeElement === input || input.value || document.hidden) return;
+    i += 1;
+    input.classList.add("ph-swap");
+    setTimeout(() => { show(); input.classList.remove("ph-swap"); }, 180);
+  }, 4000);
+}
+
+async function loadTrending() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(TRENDING_KEY) || "null");
+    if (cached && Date.now() - cached.at < TRENDING_TTL) { renderTrending(cached.items); return; }
+  } catch (_) { /* 无痕模式等：直接请求 */ }
+  try {
+    const resp = await fetch("/api/trending");
+    if (!resp.ok) return;
+    const items = trendingItems(await resp.json());
+    renderTrending(items);
+    if (items.length) {
+      try { localStorage.setItem(TRENDING_KEY, JSON.stringify({ at: Date.now(), items })); } catch (_) { /* 忽略 */ }
+    }
+  } catch (_) { /* 网络问题：保留写死的示例 */ }
+}
+loadTrending();
 
 
 // ---- 偏好设置 ----
