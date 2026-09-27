@@ -1813,3 +1813,12 @@ body.searched .hero .memory-stats { display: none; }
 }
 .sd-foot[hidden] { display: none; }
 .sd-foot button { white-space: nowrap; }
+
+/* ================= 手机上登录夸克：打开 App ================= */
+.qr-app-btn { display: flex; justify-content: center; width: 100%; margin: 0.2rem 0 0.4rem; text-decoration: none; }
+.qr-app-btn[hidden], .qr-more[hidden] { display: none; }
+.qr-more { margin: 0.4rem 0 0.6rem; text-align: center; }
+.qr-more summary { font-size: 0.82rem; color: var(--accent); cursor: pointer; }
+.qr-more[open] summary { margin-bottom: 0.5rem; }
+.qr-album { margin: 0 0 0.6rem; font-size: 0.8rem; color: var(--muted); }
+.qr-img { width: 200px; height: 200px; border-radius: 8px; -webkit-touch-callout: default; user-select: auto; }

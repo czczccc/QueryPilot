@@ -1854,10 +1854,42 @@ function getSaveToken(forceAsk) {
 // 扫码登录弹窗：显示二维码并轮询，成功返回 true，关闭或失败返回 false。
 // reason：为什么要登录（例如免费次数用完），显示在标题下面。
 // 开启邀请制时，新用户先填邀请码再扫码；扫码后提示邀请码无效时可以改了重试。
+function isMobileDevice() {
+  const ua = navigator.userAgent || "";
+  return /Android|iPhone|iPad|iPod|HarmonyOS|Mobile/i.test(ua) ||
+    (navigator.maxTouchPoints > 1 && /Macintosh/.test(ua)); // iPadOS 伪装成 Mac
+}
+
+// 把二维码 SVG 画成 PNG 图片（手机相册存不了 SVG）；失败时保留原来的 SVG
+function qrToImage(box, svg) {
+  if (!svg) return;
+  const src = new Image();
+  src.onload = () => {
+    try {
+      const size = 600;
+      const c = document.createElement("canvas");
+      c.width = size;
+      c.height = size;
+      const g = c.getContext("2d");
+      g.fillStyle = "#fff";
+      g.fillRect(0, 0, size, size);
+      g.drawImage(src, 0, 0, size, size);
+      const img = el("img", "qr-img");
+      img.alt = "夸克登录二维码";
+      img.src = c.toDataURL("image/png");
+      box.innerHTML = "";
+      box.appendChild(img);
+    } catch (_) { /* 画布被污染等：继续用 SVG */ }
+  };
+  let sized = /<svg[^>]*\swidth=/.test(svg) ? svg : svg.replace("<svg", '<svg width="600" height="600"');
+  if (!/<svg[^>]*\sxmlns=/.test(sized)) sized = sized.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"');
+  src.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(sized);
+}
+
 function quarkLogin(reason) {
   return new Promise((resolve) => {
     const dlg = el("dialog", "qr-dialog");
-    const title = el("p", "qr-title", "用夸克 App 扫码登录");
+    const title = el("p", "qr-title", isMobileDevice() ? "登录夸克网盘" : "用夸克 App 扫码登录");
     const sub = el("p", "qr-sub", reason || "登录后搜索次数更多，转存会保存到你自己的网盘");
     const invite = el("div", "qr-invite");
     const inviteInput = el("input");
@@ -1879,15 +1911,34 @@ function quarkLogin(reason) {
     const close = el("button", "secondary-btn small", "取消");
     close.type = "button";
     actions.append(retry, close);
-    dlg.append(title, sub, invite, box, tip, actions);
+    // 手机上扫不了自己屏幕上的码：主推「打开夸克 App」，二维码收进备选里
+    const mobile = isMobileDevice();
+    const appBtn = el("a", "primary-btn small qr-app-btn", "打开夸克 App 登录");
+    appBtn.target = "_blank";
+    appBtn.rel = "noopener";
+    appBtn.hidden = true;
+    const qrMore = el("details", "qr-more");
+    qrMore.hidden = true;
+    qrMore.append(el("summary", "", "打不开 App？用二维码登录"),
+      el("p", "qr-album", "长按二维码保存到相册，在夸克 App 的「扫一扫」里从相册选这张图"));
+    if (mobile) {
+      qrMore.appendChild(box);
+      dlg.append(title, sub, invite, appBtn, tip, qrMore, actions);
+    } else {
+      dlg.append(title, sub, invite, box, tip, actions);
+    }
     document.body.appendChild(dlg);
 
     let timer = null;
     let closed = false;
+    let pollNow = null; // 从夸克 App 切回来时立即查一次，不用等下一轮
+    const onVisible = () => { if (document.visibilityState === "visible" && pollNow) pollNow(); };
+    document.addEventListener("visibilitychange", onVisible);
     const finish = (ok) => {
       if (closed) return;
       closed = true;
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
       dlg.close();
       dlg.remove();
       resolve(ok);
@@ -1897,6 +1948,9 @@ function quarkLogin(reason) {
 
     const stopWith = (text, kind) => {
       clearInterval(timer);
+      pollNow = null;
+      appBtn.hidden = true;
+      qrMore.hidden = true;
       box.innerHTML = "";
       box.classList.add("empty-qr");
       setText(tip, text);
@@ -1906,10 +1960,12 @@ function quarkLogin(reason) {
     async function start() {
       clearInterval(timer);
       retry.hidden = true;
+      appBtn.hidden = true;
+      qrMore.hidden = true;
       box.classList.remove("empty-qr");
       box.innerHTML = '<span class="qr-loading" aria-hidden="true"></span>';
       tip.className = "qr-tip";
-      setText(tip, "正在获取二维码…");
+      setText(tip, mobile ? "正在准备登录…" : "正在获取二维码…");
       try {
         const code = inviteInput.value.trim();
         const resp = await fetch("/api/quark/login", {
@@ -1925,8 +1981,19 @@ function quarkLogin(reason) {
           return;
         }
         box.innerHTML = data.qr_svg || ""; // 服务器生成的二维码 SVG
-        setText(tip, "扫码后在手机上确认登录");
-        timer = setInterval(async () => {
+        if (mobile) {
+          qrToImage(box, data.qr_svg); // 转成图片才能长按保存到相册
+          if (data.qr_url) {
+            appBtn.href = data.qr_url;
+            appBtn.hidden = false;
+          }
+          qrMore.hidden = false;
+          qrMore.open = !data.qr_url;
+          setText(tip, "在夸克 App 里点「确认登录」后，回到这个页面就行，会自动登录");
+        } else {
+          setText(tip, "扫码后在手机上确认登录");
+        }
+        const poll = async () => {
           try {
             const r = await (await fetch("/api/quark/login/" + encodeURIComponent(data.login_id))).json();
             if (closed) return;
@@ -1951,10 +2018,12 @@ function quarkLogin(reason) {
               stopWith(r.message || "二维码已过期", "error");
               retry.hidden = false;
             } else if (r.status === "scanned") {
-              setText(tip, "已扫码，请在手机上确认登录");
+              setText(tip, mobile ? "请在夸克 App 里点「确认登录」，然后回到这里" : "已扫码，请在手机上确认登录");
             }
           } catch (_) { /* 网络抖动：下次再试 */ }
-        }, 2000);
+        };
+        pollNow = poll;
+        timer = setInterval(poll, 2000);
       } catch (_) {
         if (!closed) {
           stopWith("获取二维码失败，请稍后重试", "error");
