@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from app.services.classify import decide_folder
+from app.services.classify import decide_folder, episode_key
 from app.services.quark import DETAIL_URL, TOKEN_URL, UA
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,7 @@ SAVE_URL = "https://drive-pc.quark.cn/1/clouddrive/share/sharepage/save"
 TASK_URL = "https://drive-pc.quark.cn/1/clouddrive/task"
 PATH_LIST_URL = "https://drive-pc.quark.cn/1/clouddrive/file/info/path_list"
 MKDIR_URL = "https://drive-pc.quark.cn/1/clouddrive/file"
+LIST_URL = "https://drive-pc.quark.cn/1/clouddrive/file/sort"
 COMMON_PARAMS = {"pr": "ucpro", "fr": "pc", "uc_param_str": ""}
 
 # 夸克返回的常见错误码 → 给用户看的说明
@@ -56,6 +57,7 @@ class SaveResult:
     folder: str | None = None  # 自动分类后存入的目录（如 /QueryPilot/电视剧/国产剧/漫长的季节 (2023)）
     category: str | None = None  # 如「国产剧」「欧美电影」
     basis: str | None = None  # 分类依据，如「TMDB + 豆瓣 + LLM」
+    skipped: int = 0  # only_new 时因为网盘里已有同一集而跳过的文件数
 
 
 class QuarkSaver:
@@ -103,12 +105,17 @@ class QuarkSaver:
         return body.get("data") or {}
 
     async def save(
-        self, share_id: str, pwd: str | None = None, to_path: str | None = None
+        self, share_id: str, pwd: str | None = None, to_path: str | None = None,
+        only_new: bool = False,
     ) -> SaveResult:
-        """`to_path`：指定网盘目标目录路径（不存在就创建），给出时跳过自动分类。"""
+        """`to_path`：指定网盘目标目录路径（不存在就创建），给出时跳过自动分类。
+
+        `only_new`：只存目标目录里还没有的集（按「季x集」比对，认不出集数的按文件名），
+        用于订阅自动转存，避免同一集存两遍；读不到目标目录时报错而不是盲存。
+        """
         headers = self._headers(share_id)
         try:
-            return await self._save(share_id, pwd, headers, to_path)
+            return await self._save(share_id, pwd, headers, to_path, only_new)
         except httpx.HTTPError as e:
             # 只记录异常类型，不记录请求（请求头里有 cookie）
             logger.warning("转存请求失败 share=%s error=%s", share_id, type(e).__name__)
@@ -117,7 +124,8 @@ class QuarkSaver:
             raise SaveError("夸克返回了无法解析的内容") from None
 
     async def _save(
-        self, share_id: str, pwd: str | None, headers: dict, to_path: str | None = None
+        self, share_id: str, pwd: str | None, headers: dict, to_path: str | None = None,
+        only_new: bool = False,
     ) -> SaveResult:
         # 1) 分享页 token
         resp = await self._client.post(
@@ -167,6 +175,23 @@ class QuarkSaver:
         except (SaveError, httpx.HTTPError, ValueError, KeyError) as e:
             logger.warning("目标目录准备失败（%s），存到默认目录", type(e).__name__)
 
+        # 3.5) 只存新的集：顶层是单个文件夹时展开一层逐个比对，直接存进目标目录
+        pdir, skipped = "0", 0
+        if only_new:
+            if len(items) == 1 and items[0].get("dir"):
+                pdir = str(items[0]["fid"])
+                items = await self._sub_items(share_id, stoken, pdir, headers)
+            have_names, have_eps = await self._existing(to_fid, headers)
+            fresh = [
+                f for f in items
+                if str(f.get("file_name") or "") not in have_names
+                and (episode_key(str(f.get("file_name") or "")) or "") not in have_eps
+            ]
+            skipped = len(items) - len(fresh)
+            items = fresh
+            if not items:
+                return SaveResult("", 0, title, True, folder, category, basis, skipped)
+
         # 4) 提交转存任务
         resp = await self._client.post(
             SAVE_URL,
@@ -177,7 +202,7 @@ class QuarkSaver:
                 "to_pdir_fid": to_fid,
                 "pwd_id": share_id,
                 "stoken": stoken,
-                "pdir_fid": "0",
+                "pdir_fid": pdir,
                 "scene": "link",
             },
             headers=headers, timeout=self._timeout,
@@ -195,9 +220,47 @@ class QuarkSaver:
             )
             task = self._check(resp.json(), "转存失败")
             if task.get("status") == 2:
-                return SaveResult(task_id, len(items), title, True, folder, category, basis)
+                return SaveResult(task_id, len(items), title, True, folder, category, basis,
+                                  skipped)
             await asyncio.sleep(self._poll_interval)
-        return SaveResult(task_id, len(items), title, False, folder, category, basis)
+        return SaveResult(task_id, len(items), title, False, folder, category, basis, skipped)
+
+    async def _sub_items(
+        self, share_id: str, stoken: str, dir_fid: str, headers: dict
+    ) -> list[dict]:
+        """分享里某个文件夹下的文件（带转存需要的 share_fid_token）。"""
+        resp = await self._client.get(
+            DETAIL_URL,
+            params={"pwd_id": share_id, "stoken": stoken, "pdir_fid": dir_fid, "force": 0,
+                    "_page": 1, "_size": 200},
+            headers=headers, timeout=self._timeout,
+        )
+        data = self._check(resp.json(), "读取分享内容失败")
+        return [f for f in data.get("list") or []
+                if isinstance(f, dict) and f.get("fid") and f.get("share_fid_token")]
+
+    async def _list_dir(self, fid: str, headers: dict) -> list[dict]:
+        resp = await self._client.get(
+            LIST_URL,
+            params={**COMMON_PARAMS, "pdir_fid": fid, "_page": 1, "_size": 200,
+                    "_fetch_total": 1, "_sort": "file_type:asc,updated_at:desc"},
+            headers=headers, timeout=self._timeout,
+        )
+        data = self._check(resp.json(), "读取网盘目录失败")
+        return [f for f in data.get("list") or [] if isinstance(f, dict)]
+
+    async def _existing(self, fid: str, headers: dict) -> tuple[set[str], set[str]]:
+        """目标目录（含下一层子目录）里已有的文件名与「季x集」。"""
+        names: set[str] = set()
+        for f in await self._list_dir(fid, headers):
+            if f.get("dir") or f.get("file_type") == 0:
+                if f.get("fid"):
+                    names |= {str(g.get("file_name") or "")
+                              for g in await self._list_dir(str(f["fid"]), headers)}
+            else:
+                names.add(str(f.get("file_name") or ""))
+        names.discard("")
+        return names, {k for k in map(episode_key, names) if k}
 
     async def _file_names(
         self, share_id: str, stoken: str, items: list[dict], headers: dict

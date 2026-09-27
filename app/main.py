@@ -28,8 +28,10 @@ from app.config import load_settings
 from app.models import (
     AgentSearchResponse,
     AgentStep,
+    AutoSaveRequest,
     FeedbackRequest,
     Notification,
+    QuarkLink,
     QuarkSearchResponse,
     SaveRequest,
     SaveResponse,
@@ -371,6 +373,79 @@ def create_app(
         owner = await _owner(request, client_id)
         return [sub for _, sub in await _store_or_404().list_subscriptions(owner)]
 
+    @app.patch("/api/subscriptions/{sub_id}", response_model=Subscription)
+    async def set_auto_save(
+        sub_id: int, req: AutoSaveRequest, request: Request, client_id: str = ClientId,
+    ) -> Subscription:
+        """打开 / 关闭订阅的自动转存：发现新集时直接存进自己的夸克网盘（需要扫码登录）。"""
+        store = _store_or_404()
+        user = await _user_cookie(request)
+        if req.auto_save and user is None:
+            raise HTTPException(status_code=401, detail="自动转存需要先扫码登录夸克")
+        sub = await store.set_auto_save(await _owner(request, client_id), sub_id, req.auto_save)
+        if sub is None:
+            raise HTTPException(status_code=404, detail="订阅不存在")
+        return sub
+
+    @app.get("/api/subscriptions/{sub_id}/saves")
+    async def auto_save_log(sub_id: int, request: Request, client_id: str = ClientId) -> list[dict]:
+        """这个订阅最近的自动转存记录。"""
+        return await _store_or_404().auto_save_log(await _owner(request, client_id), sub_id)
+
+    async def auto_save(owner: str, sub: Subscription, link: QuarkLink) -> list[tuple]:
+        """订阅检查发现新集时调用：用订阅者扫码登录的凭证只转存网盘里还没有的集。"""
+        store = resolved.store
+        if not (login_enabled and owner.startswith("u:")):
+            return []
+        name = f"《{sub.resource}》"
+
+        async def pause(status: str, message: str) -> list[tuple]:
+            if sub.auto_save_status == status:  # 已经提醒过，不重复打扰
+                return []
+            sub.auto_save_status = status
+            await store.set_auto_save_status(sub.id, status)
+            await store.log_auto_save(sub.id, link.share, False, 0, None, message)
+            return [("auto_save_paused", message, link.share)]
+
+        expired = f"{name}有更新，但你的夸克登录已失效，自动转存已暂停，重新扫码登录后自动恢复"
+        account = await store.latest_account(owner[2:])
+        cookie = cookie_box.decrypt(account[1], account[0].encode()) if account else None
+        if cookie is None:
+            return await pause("login_expired", expired)
+        saver = QuarkSaver(cookie, "0", client=quark_http, classifier=classifier,
+                           root_dir=root_dir)
+        allowed = True
+        if quota is not None:
+            allowed = (await quota.check(SYSTEM, SYSTEM, True)).reason != "site_budget"
+        try:
+            with llm.scope(allowed=allowed) as meter:
+                result = await saver.save(link.share, link.pwd, only_new=True)
+        except LoginExpiredError:
+            await store.delete_account(account[0])
+            return await pause("login_expired", expired)
+        except SaveError as e:
+            message = f"{name}自动转存失败：{e}"
+            await store.log_auto_save(sub.id, link.share, False, 0, None, message)
+            return [("auto_save_failed", message, link.share)]
+        finally:
+            if quota is not None:
+                await quota.record(f"user:{owner[2:]}", SYSTEM, meter, searched=False)
+        if sub.auto_save_status:
+            sub.auto_save_status = None
+            await store.set_auto_save_status(sub.id, None)
+        where = f"「{result.folder}」" if result.folder else "你的夸克网盘"
+        if result.file_count == 0:
+            message = f"{name}的新内容网盘里都已经有了，没有重复转存"
+        else:
+            skipped = f"，跳过已有的 {result.skipped} 个" if result.skipped else ""
+            message = f"已自动转存{name}的 {result.file_count} 个新文件到{where}{skipped}"
+        await store.log_auto_save(sub.id, link.share, True, result.file_count, result.folder,
+                                  message)
+        return [("auto_saved", message, link.share)] if result.file_count else []
+
+    if watcher is not None:
+        watcher.auto_saver = auto_save
+
     @app.delete("/api/subscriptions/{sub_id}")
     async def unsubscribe(request: Request, sub_id: int, client_id: str = ClientId) -> dict:
         if not await _store_or_404().delete_subscription(await _owner(request, client_id), sub_id):
@@ -554,6 +629,7 @@ def create_app(
             sh, cookie_box.encrypt(result.cookie or "", sh.encode()), result.nickname, user_id
         )
         await users.touch_user(user_id, result.nickname, code or None)
+        await resolved.store.clear_auto_save_status(f"u:{user_id}", "login_expired")
         response.set_cookie(
             SESSION_COOKIE, token, max_age=30 * 86400, httponly=True, samesite="lax",
             secure=request.url.scheme == "https",

@@ -94,6 +94,28 @@ class Category:
         return KINDS[self.kind]
 
 
+EP_PATTERNS = [
+    re.compile(r"S(\d{1,2})[ ._-]?E(\d{1,3})", re.IGNORECASE),
+    re.compile(r"第\s*(\d{1,3})\s*[集话話]"),
+    re.compile(r"(?<![A-Za-z0-9])E[Pp]?(\d{1,3})(?!\d)"),
+    re.compile(r"^(\d{1,3})(?!\d)"),
+]
+
+
+def episode_key(name: str) -> str | None:
+    """文件名里的「季x集」（如 1x05），认不出返回 None；用于自动转存时跳过已存过的集。"""
+    if not VIDEO_EXT.search(name):
+        return None
+    base = name.rsplit("/", 1)[-1]
+    for i, pat in enumerate(EP_PATTERNS):
+        m = pat.search(base)
+        if m:
+            if i == 0:
+                return f"{int(m.group(1))}x{int(m.group(2))}"
+            return f"1x{int(m.group(1))}"
+    return None
+
+
 def safe_name(name: str) -> str:
     """网盘目录名：去掉非法字符，限长。"""
     return BAD_CHARS.sub(" ", name).strip(" .")[:60]

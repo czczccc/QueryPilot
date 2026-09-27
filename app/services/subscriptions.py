@@ -5,10 +5,13 @@
 - 只看验证有效、且没被判为「片名不符」的链接；
 - 最多集数（分享里的视频文件数）超过之前见过的 → 「更新到 N 集」；
 - 最高质量分超过之前见过的 → 「出现更高清的版本」；
-- 通知写进记忆库，页面轮询读取；配置了 NOTIFY_WEBHOOK 时再推送一份。
+- 通知写进记忆库，页面轮询读取；配置了 NOTIFY_WEBHOOK 时再推送一份；
+- 订阅打开了自动转存时，把带来新集 / 更高清的分享交给 `auto_saver` 存进网盘，
+  它返回的结果（已转存 / 失败 / 登录失效）也作为通知写进去。
 """
 
 import logging
+from collections.abc import Awaitable, Callable
 
 import httpx
 
@@ -16,6 +19,10 @@ from app.models import QuarkLink, SearchRequest, Subscription
 from app.services.memory import LinkStore, resource_key
 
 logger = logging.getLogger(__name__)
+
+Note = tuple[str, str, str | None]
+# (订阅归属, 订阅, 链接) → 要追加的通知
+AutoSaver = Callable[[str, Subscription, QuarkLink], Awaitable[list[Note]]]
 
 RES_TEXT = {"2160p": "4K", "1080p": "1080p", "720p": "720p", "SD": "标清"}
 
@@ -49,8 +56,10 @@ class SubscriptionWatcher:
         store: LinkStore,
         webhook: str = "",
         client: httpx.AsyncClient | None = None,
+        auto_saver: AutoSaver | None = None,
     ) -> None:
         self._agent = agent
+        self.auto_saver = auto_saver
         self._store = store
         self._webhook = webhook
         self._client = client
@@ -86,6 +95,13 @@ class SubscriptionWatcher:
                 ))
             sub.best_score = score
             sub.best_resolution = res
+        if notes and sub.auto_save and self.auto_saver is not None:
+            links = {lk.share: lk for lk in (most, best) if lk is not None}
+            for share in dict.fromkeys(n[2] for n in list(notes) if n[2] in links):
+                try:
+                    notes += await self.auto_saver(client_id, sub, links[share])
+                except Exception:  # 自动转存出错不影响通知本身
+                    logger.exception("订阅自动转存异常 id=%s", sub.id)
         await self._store.update_subscription(client_id, sub, notes)
         if notes:
             await self._push(notes)
