@@ -1843,3 +1843,44 @@ body.searched .hero .memory-stats { display: none; }
 @media (max-width: 600px) {
   .ep-chip { min-width: 2rem; padding: 0.1rem 0.2rem; }
 }
+
+/* ================= 追剧日历 ================= */
+.subs-list li.cal-wrap { display: grid; gap: 0.6rem; justify-content: stretch; padding: 0.6rem 0 0.2rem; border: none; }
+.cal-nav { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.cal-center { display: flex; align-items: baseline; gap: 0.6rem; }
+.cal-range { font-weight: 650; font-variant-numeric: tabular-nums; }
+.cal-legend { display: flex; flex-wrap: wrap; gap: 0.35rem 0.8rem; font-size: 0.74rem; color: var(--muted); }
+.cal-key { display: inline-flex; align-items: center; gap: 0.3rem; }
+.cal-key::before { content: ""; width: 9px; height: 9px; border-radius: 3px; background: var(--tone); }
+.tone-ok { --tone: var(--ok); --tone-soft: var(--ok-soft); }
+.tone-info { --tone: var(--info); --tone-soft: var(--info-soft); }
+.tone-danger { --tone: var(--danger); --tone-soft: var(--danger-soft); }
+.tone-neutral { --tone: var(--muted); --tone-soft: var(--neutral-soft); }
+.cal-grid { display: grid; gap: 0.35rem; }
+.cal-day { display: grid; grid-template-columns: 3rem 1fr; align-items: center; gap: 0.6rem; padding: 0.45rem 0.55rem; background: var(--surface-2); border: 1px solid transparent; border-radius: 12px; animation: fade-up 0.3s var(--ease) both; }
+.cal-day.is-today { border-color: var(--accent); background: var(--accent-soft); }
+.cal-day.is-past .cal-day-head { opacity: 0.7; }
+.cal-day.is-blank { padding-top: 0.25rem; padding-bottom: 0.25rem; }
+.cal-day-head { display: grid; gap: 0.05rem; font-size: 0.74rem; color: var(--muted); }
+.cal-day.is-today .cal-wd { color: var(--accent); font-weight: 700; }
+.cal-date { font-variant-numeric: tabular-nums; }
+.cal-eps { display: grid; grid-template-columns: repeat(auto-fill, minmax(12.5rem, 1fr)); gap: 0.35rem; min-width: 0; }
+.cal-none { font-size: 0.76rem; color: var(--muted); opacity: 0.6; }
+.cal-ep {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 0.5rem; align-items: center; width: 100%; min-width: 0;
+  padding: 0.35rem 0.5rem; font: inherit; color: var(--text); text-align: left; cursor: pointer;
+  background: var(--surface-solid); border: none; border-left: 3px solid var(--tone); border-radius: 8px;
+  box-shadow: var(--shadow-sm); transition: transform 0.2s var(--ease), box-shadow 0.2s ease;
+}
+.cal-ep:hover { transform: translateY(-1px); box-shadow: var(--shadow); }
+.cal-ep .poster.tiny { width: 26px; font-size: 0.7rem; border-radius: 5px; }
+.cal-ep-text { display: grid; min-width: 0; }
+.cal-ep-title { overflow: hidden; font-size: 0.8rem; text-overflow: ellipsis; white-space: nowrap; }
+.cal-ep-no { overflow: hidden; font-size: 0.7rem; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cal-ep-state { padding: 0.05rem 0.4rem; font-size: 0.68rem; font-weight: 600; white-space: nowrap; color: var(--tone); background: var(--tone-soft); border-radius: 4px; }
+.cal-loading, .cal-empty { margin: 0; padding: 0.6rem 0; font-size: 0.84rem; color: var(--muted); text-align: center; }
+.subs-list li.sub-item.flash { animation: pop 0.45s var(--ease); background: var(--accent-soft); border-radius: 12px; }
+@media (max-width: 600px) {
+  .cal-day { grid-template-columns: 2.6rem 1fr; gap: 0.45rem; }
+  .cal-eps { grid-template-columns: 1fr; }
+}
