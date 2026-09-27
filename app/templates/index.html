@@ -129,8 +129,16 @@
         </summary>
         <div class="panel-body">
           <ul id="notif-list" class="notif-list"></ul>
+          <div class="subs-toolbar">
+            <div id="subs-tabs" class="seg" role="tablist" aria-label="订阅分类">
+              <button type="button" role="tab" data-tab="tv" aria-selected="true">剧集 <span class="seg-n"></span></button>
+              <button type="button" role="tab" data-tab="movie" aria-selected="false">电影 <span class="seg-n"></span></button>
+              <button type="button" role="tab" data-tab="history" aria-selected="false">历史 <span class="seg-n"></span></button>
+            </div>
+            <button id="new-sub-btn" type="button" class="secondary-btn small">＋ 新订阅</button>
+          </div>
           <ul id="subs-list" class="subs-list"></ul>
-          <p class="panel-hint">订阅后服务器会定期替你重搜，有新集数或更高清的版本时在这里提醒。在搜索结果上点「订阅更新」即可添加。</p>
+          <p class="panel-hint">订阅以影视条目为单位：剧集按季追踪缺的集，集齐后自动完成并移入历史；电影出现合适的资源时提醒或转存一次。服务器会定期替你重搜。</p>
         </div>
       </details>
     </div>
