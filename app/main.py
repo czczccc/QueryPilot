@@ -6,6 +6,7 @@
 
 import asyncio
 import contextlib
+import hashlib
 import hmac
 import json
 import logging
@@ -16,7 +17,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -131,6 +132,8 @@ def create_app(
     quark_client: httpx.AsyncClient | None = None,
     classifier=None,
     quota: QuotaGuard | None = None,
+    invite_required: bool | None = None,
+    invite_codes: tuple[str, ...] | None = None,
 ) -> FastAPI:
     """创建应用；传入 service / agent 便于测试注入假实现。"""
     resolved = service or build_default_service()
@@ -153,6 +156,7 @@ def create_app(
                 user_daily_ai=_settings.user_daily_ai,
                 site_daily_tokens=_settings.site_daily_tokens,
                 ip_daily_searches=_settings.ip_daily_searches,
+                anon_daily_searches=_settings.anon_daily_searches if _settings.quark_login else 0,
             ),
         )
     trust_proxy = _settings.trust_proxy if service is None else False
@@ -228,6 +232,17 @@ def create_app(
             _settings.cookie_secret, Path(_settings.memory_db_path).parent / ".cookie_secret"
         )
     login_enabled = qr_login is not None and cookie_box is not None and resolved.store is not None
+    # 账号表与额度表放在一起（未开额度时用内存库，主要给测试）
+    users = quota.store if quota is not None else UsageStore(":memory:")
+    need_invite = (
+        invite_required if invite_required is not None
+        else (_settings.invite_required if service is None else False)
+    )
+    env_invites = set(
+        invite_codes if invite_codes is not None
+        else (_settings.invite_codes if service is None else ())
+    )
+    pending_invites: dict[str, str] = {}  # login_id → 用户填的邀请码（扫码成功后才校验）
     quark_http = quark_client or httpx.AsyncClient(timeout=10.0)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
@@ -315,41 +330,51 @@ def create_app(
 
     ClientId = Query(min_length=8, max_length=64)
 
+    async def _owner(request: Request, client_id: str) -> str:
+        """订阅与通知的归属：登录用户按账号（换浏览器也在），否则按浏览器标识。"""
+        user = await _user_cookie(request)
+        return f"u:{user[3]}" if user else client_id
+
     @app.post("/api/subscriptions", response_model=Subscription)
     async def subscribe(
-        req: SubscribeRequest, _: None = Depends(rate_limit_dep)
+        req: SubscribeRequest, request: Request, _: None = Depends(rate_limit_dep)
     ) -> Subscription:
-        """订阅：之后定期重搜，有新集数或更高清版本时产生通知。"""
+        """订阅：之后定期重搜，有新集数或更高清版本时产生通知。开放扫码登录时需要先登录。"""
         store = _store_or_404()
+        user = await _user_cookie(request)
+        if login_enabled and user is None:
+            raise HTTPException(status_code=401, detail="订阅追剧需要先扫码登录夸克")
+        owner = f"u:{user[3]}" if user else req.client_id
         baseline = await app.state.watcher.baseline(req.resource)
-        sub = await store.add_subscription(req.client_id, req.query, req.resource, baseline)
+        sub = await store.add_subscription(owner, req.query, req.resource, baseline)
         if sub is None:
             raise HTTPException(status_code=409, detail="订阅数已达上限（20 个）")
         return sub
 
     @app.get("/api/subscriptions", response_model=list[Subscription])
-    async def list_subscriptions(client_id: str = ClientId) -> list[Subscription]:
-        return [sub for _, sub in await _store_or_404().list_subscriptions(client_id)]
+    async def list_subscriptions(request: Request, client_id: str = ClientId) -> list[Subscription]:
+        owner = await _owner(request, client_id)
+        return [sub for _, sub in await _store_or_404().list_subscriptions(owner)]
 
     @app.delete("/api/subscriptions/{sub_id}")
-    async def unsubscribe(sub_id: int, client_id: str = ClientId) -> dict:
-        if not await _store_or_404().delete_subscription(client_id, sub_id):
+    async def unsubscribe(request: Request, sub_id: int, client_id: str = ClientId) -> dict:
+        if not await _store_or_404().delete_subscription(await _owner(request, client_id), sub_id):
             raise HTTPException(status_code=404, detail="订阅不存在")
         return {"deleted": True}
 
     @app.get("/api/notifications", response_model=list[Notification])
-    async def notifications(client_id: str = ClientId) -> list[Notification]:
-        return await _store_or_404().notifications(client_id)
+    async def notifications(request: Request, client_id: str = ClientId) -> list[Notification]:
+        return await _store_or_404().notifications(await _owner(request, client_id))
 
     @app.post("/api/notifications/read")
-    async def notifications_read(client_id: str = ClientId) -> dict:
-        await _store_or_404().mark_read(client_id)
+    async def notifications_read(request: Request, client_id: str = ClientId) -> dict:
+        await _store_or_404().mark_read(await _owner(request, client_id))
         return {"ok": True}
 
     SESSION_COOKIE = "qp_quark"
 
-    async def _user_cookie(request: Request) -> tuple[str, str, str | None] | None:
-        """当前浏览器扫码登录过的夸克账号：(会话哈希, cookie, 昵称)。"""
+    async def _user_cookie(request: Request) -> tuple[str, str, str | None, str] | None:
+        """当前浏览器扫码登录过的夸克账号：(会话哈希, cookie, 昵称, 账号 id)。"""
         token = request.cookies.get(SESSION_COOKIE)
         if not login_enabled or not token:
             return None
@@ -361,14 +386,14 @@ def create_app(
         if cookie is None:  # 密钥换了：当作未登录
             await resolved.store.delete_account(sh)
             return None
-        return sh, cookie, row[1]
+        return sh, cookie, row[1], row[2] or f"session:{sh[:16]}"
 
     async def _identity(request: Request) -> tuple[str, str, bool]:
         """(额度身份, IP 身份, 是否登录)：登录用户按账号，匿名按 IP（client_id 可随意伪造，不作依据）。"""
         ip_subject = f"ip:{client_ip(request)}"
         user = await _user_cookie(request)
         if user is not None:
-            return f"user:{user[0]}", ip_subject, True
+            return f"user:{user[3]}", ip_subject, True
         return ip_subject, ip_subject, False
 
     async def _quota_start(request: Request):
@@ -379,6 +404,8 @@ def create_app(
         decision = await quota.check(subject, ip_subject, logged_in)
         if decision.blocked:
             raise HTTPException(status_code=429, detail=decision.message())
+        if decision.login_required:
+            raise HTTPException(status_code=401, detail=decision.message())
         return subject, ip_subject, decision
 
     async def _quota_end(ctx, meter: llm.Meter, result=None) -> None:
@@ -396,6 +423,22 @@ def create_app(
         subject, ip_subject, logged_in = await _identity(request)
         decision = await quota.check(subject, ip_subject, logged_in)
         return {"enabled": True, **decision.to_dict()}
+
+    @app.get("/api/me")
+    async def me(request: Request) -> dict:
+        """当前访客：是否登录、昵称、今天的额度，以及登录/邀请制开关（前端据此显示引导）。"""
+        user = await _user_cookie(request)
+        info = {
+            "login": login_enabled,
+            "invite_required": login_enabled and need_invite,
+            "logged_in": user is not None,
+            "nickname": user[2] if user else None,
+            "quota": None,
+        }
+        if quota is not None:
+            subject, ip_subject, logged_in = await _identity(request)
+            info["quota"] = (await quota.check(subject, ip_subject, logged_in)).to_dict()
+        return info
 
     @app.get("/api/save/status")
     async def save_status(request: Request) -> dict:
@@ -415,14 +458,24 @@ def create_app(
         }
 
     @app.post("/api/quark/login")
-    async def quark_login_start(_: None = Depends(rate_limit_dep)) -> dict:
-        """开始扫码登录：返回二维码（SVG 与原始内容），前端轮询状态。"""
+    async def quark_login_start(
+        invite_code: str = Body(default="", embed=True, max_length=64),
+        _: None = Depends(rate_limit_dep),
+    ) -> dict:
+        """开始扫码登录：返回二维码（SVG 与原始内容），前端轮询状态。
+
+        开启邀请制时，新账号要在这里带上邀请码（老账号不用）；扫码成功后才校验。
+        """
         if not login_enabled:
             raise HTTPException(status_code=404, detail="扫码登录未开启")
         try:
             login_id, content = await qr_login.start()
         except LoginError as e:
             raise HTTPException(status_code=502, detail=str(e))
+        if invite_code.strip():
+            pending_invites[login_id] = invite_code.strip()
+            while len(pending_invites) > 500:
+                pending_invites.pop(next(iter(pending_invites)))
         return {"login_id": login_id, "qr_url": content, "qr_svg": qr_svg(content),
                 "expires_in": 300}
 
@@ -436,15 +489,32 @@ def create_app(
         except LoginError as e:
             return {"status": "error", "message": str(e)}
         if result.status != "success":
+            if result.status == "expired":
+                pending_invites.pop(login_id[:64], None)
             return {"status": result.status}
+        code = pending_invites.pop(login_id[:64], "")
+        user_id = result.user_id or (
+            "nick:" + hashlib.sha256(result.nickname.encode()).hexdigest()[:24]
+            if result.nickname else None
+        )
+        known = await users.get_user(user_id) if user_id else None
+        if known is None and need_invite:
+            ok = bool(code) and (code in env_invites or await users.use_invite(code))
+            if not ok:  # 丢弃这次拿到的凭证，不建会话
+                return {"status": "invite_required",
+                        "message": "邀请码无效或已用完" if code else "新用户需要邀请码"}
+        if known is not None and known.get("banned"):
+            return {"status": "banned", "message": "该账号已被停用"}
         old = await _user_cookie(request)
         if old:
             await resolved.store.delete_account(old[0])
         token = secrets.token_urlsafe(32)
         sh = session_hash(token)
+        user_id = user_id or f"session:{sh[:16]}"
         await resolved.store.put_account(
-            sh, cookie_box.encrypt(result.cookie or "", sh.encode()), result.nickname
+            sh, cookie_box.encrypt(result.cookie or "", sh.encode()), result.nickname, user_id
         )
+        await users.touch_user(user_id, result.nickname, code or None)
         response.set_cookie(
             SESSION_COOKIE, token, max_age=30 * 86400, httponly=True, samesite="lax",
             secure=request.url.scheme == "https",

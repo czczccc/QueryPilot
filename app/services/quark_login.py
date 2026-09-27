@@ -50,6 +50,7 @@ class LoginResult:
     status: str  # waiting / expired / success
     cookie: str | None = None
     nickname: str | None = None
+    user_id: str | None = None  # 夸克账号的稳定标识（取不到时为 None，由调用方兜底）
 
 
 def qr_content(token: str) -> str:
@@ -140,10 +141,10 @@ class QuarkQrLogin:
             return LoginResult("expired")
 
         self._pending.pop(login_id, None)
-        cookie, nickname = await self._exchange(ticket)
-        return LoginResult("success", cookie, nickname)
+        cookie, nickname, user_id = await self._exchange(ticket)
+        return LoginResult("success", cookie, nickname, user_id)
 
-    async def _exchange(self, ticket: str) -> tuple[str, str | None]:
+    async def _exchange(self, ticket: str) -> tuple[str, str | None, str | None]:
         """用 service_ticket 换登录 cookie（响应 Set-Cookie 里的全部 cookie）。"""
         try:
             resp = await self._get(ACCOUNT_URL, {"st": ticket, "lw": "scan"})
@@ -154,10 +155,15 @@ class QuarkQrLogin:
         pairs = {c.name: c.value for c in jar.jar}
         if not pairs:
             raise LoginError("夸克没有返回登录凭证，请重新扫码")
-        nickname = None
+        nickname, user_id = None, None
         try:
             data = resp.json().get("data") or {}
             nickname = data.get("nickname") if isinstance(data.get("nickname"), str) else None
-        except ValueError:
+            # 账号信息里的用户标识（字段名来自网页版，未公开文档；取不到就交给调用方兜底）
+            for key in ("uid", "user_id", "userId", "member_id"):
+                if isinstance(data.get(key), str | int) and str(data[key]).strip():
+                    user_id = f"{key}:{data[key]}"
+                    break
+        except (ValueError, AttributeError):
             pass
-        return "; ".join(f"{k}={v}" for k, v in pairs.items()), nickname
+        return "; ".join(f"{k}={v}" for k, v in pairs.items()), nickname, user_id

@@ -30,6 +30,23 @@ CREATE TABLE IF NOT EXISTS usage_daily (
     tokens       INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, subject)
 );
+CREATE TABLE IF NOT EXISTS users (
+    user_id     TEXT PRIMARY KEY,
+    nickname    TEXT,
+    created     REAL NOT NULL,
+    last_seen   REAL NOT NULL,
+    invite_code TEXT,
+    banned      INTEGER NOT NULL DEFAULT 0,
+    ban_reason  TEXT,
+    ai_limit    INTEGER
+);
+CREATE TABLE IF NOT EXISTS invites (
+    code     TEXT PRIMARY KEY,
+    note     TEXT,
+    max_uses INTEGER NOT NULL DEFAULT 1,
+    uses     INTEGER NOT NULL DEFAULT 0,
+    created  REAL NOT NULL
+);
 """
 
 SITE = "*"
@@ -77,6 +94,46 @@ class UsageStore:
             ).fetchone()
         return {f: (row[f] if row else 0) for f in FIELDS}
 
+    # ---------------- 账号（夸克扫码登录即账号） ----------------
+
+    def _get_user(self, user_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return dict(row) if row else None
+
+    def _touch_user(self, user_id: str, nickname: str | None, invite: str | None, now: float) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO users (user_id, nickname, created, last_seen, invite_code)"
+                " VALUES (?, ?, ?, ?, ?) ON CONFLICT (user_id) DO UPDATE SET"
+                " nickname = COALESCE(excluded.nickname, users.nickname),"
+                " last_seen = excluded.last_seen",
+                (user_id, nickname, now, now, invite),
+            )
+            self._conn.commit()
+
+    def _use_invite(self, code: str) -> bool:
+        """库里的邀请码：还有剩余次数（max_uses=0 不限）就占用一次。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE invites SET uses = uses + 1 WHERE code = ? AND (max_uses = 0 OR uses < max_uses)",
+                (code,),
+            )
+            self._conn.commit()
+        return cur.rowcount == 1
+
+    async def get_user(self, user_id: str) -> dict | None:
+        return await asyncio.to_thread(self._get_user, user_id)
+
+    async def touch_user(
+        self, user_id: str, nickname: str | None, invite: str | None = None
+    ) -> None:
+        """登录时创建账号或更新昵称 / 最近登录时间。"""
+        await asyncio.to_thread(self._touch_user, user_id, nickname, invite, time.time())
+
+    async def use_invite(self, code: str) -> bool:
+        return await asyncio.to_thread(self._use_invite, code)
+
     async def add(self, day: str, rows: list[tuple[str, dict[str, int]]]) -> None:
         await asyncio.to_thread(self._add, day, rows)
 
@@ -92,6 +149,7 @@ class QuotaConfig:
     user_daily_ai: int = 30  # 登录用户每天 AI 搜索次数
     site_daily_tokens: int = 1_000_000  # 全站每天 token 预算
     ip_daily_searches: int = 100  # 同一 IP 每天搜索总次数（含规则模式）
+    anon_daily_searches: int = 0  # 未登录每天搜索总次数，用完要求扫码登录（未开放登录时应为 0）
 
 
 @dataclass
@@ -102,10 +160,15 @@ class Decision:
     limit: int  # 0 = 不限
     logged_in: bool
     blocked: bool = False  # IP 当天搜索次数超限：拒绝
+    login_required: bool = False  # 未登录的免费搜索次数用完：要求扫码登录
+    searches: int = 0  # 这个身份今天的搜索总次数
+    search_limit: int = 0  # 未登录的搜索总次数上限（0 = 不限）
 
     def message(self) -> str | None:
         if self.blocked:
             return "今天的搜索次数太多了，请明天再来"
+        if self.login_required:
+            return f"今天的 {self.search_limit} 次免费搜索已用完，扫码登录夸克后继续搜索"
         if self.reason == "site_budget":
             return "今日全站 AI 额度已用完，已自动切换为基础搜索"
         if self.reason == "user_quota":
@@ -122,6 +185,10 @@ class Decision:
             "limit": self.limit,
             "remaining": max(0, self.limit - self.used) if self.limit else None,
             "logged_in": self.logged_in,
+            "login_required": self.login_required,
+            "searches_remaining": (
+                max(0, self.search_limit - self.searches) if self.search_limit else None
+            ),
         }
 
 
@@ -130,14 +197,24 @@ class QuotaGuard:
         self.store = store
         self.config = config or QuotaConfig()
 
-    async def check(self, subject: str, ip_subject: str, logged_in: bool) -> Decision:
+    async def check(
+        self, subject: str, ip_subject: str, logged_in: bool, ai_limit: int | None = None
+    ) -> Decision:
+        """`ai_limit`：站长给这个账号单独设的每日 AI 次数（None 用默认）。"""
         cfg, day = self.config, today()
         me = await self.store.get(day, subject)
-        limit = cfg.user_daily_ai if logged_in else cfg.anon_daily_ai
-        decision = Decision(True, None, me["llm_searches"], limit, logged_in)
+        limit = ai_limit if ai_limit is not None else (
+            cfg.user_daily_ai if logged_in else cfg.anon_daily_ai
+        )
+        decision = Decision(True, None, me["llm_searches"], limit, logged_in,
+                            searches=me["searches"],
+                            search_limit=0 if logged_in else cfg.anon_daily_searches)
         ip = me if ip_subject == subject else await self.store.get(day, ip_subject)
         if cfg.ip_daily_searches and ip["searches"] >= cfg.ip_daily_searches:
             decision.ai, decision.blocked = False, True
+            return decision
+        if decision.search_limit and me["searches"] >= decision.search_limit:
+            decision.ai, decision.login_required = False, True
             return decision
         site = await self.store.get(day, SITE)
         if cfg.site_daily_tokens and site["tokens"] >= cfg.site_daily_tokens:
@@ -160,3 +237,4 @@ class QuotaGuard:
         await self.store.add(today(), rows)
         if decision is not None:
             decision.used += used_ai
+            decision.searches += int(searched)
