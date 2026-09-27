@@ -15,6 +15,53 @@ const emptyState = document.getElementById("empty-state");
 
 let currentLinks = [];
 let hideDead = true;
+let minRes = "";
+
+const RES_RANK = { SD: 1, "720p": 2, "1080p": 3, "2160p": 4 };
+const RES_LABEL = { SD: "标清", "720p": "720p", "1080p": "1080p", "2160p": "4K" };
+
+function visibleLinks(links) {
+  return links.filter((l) => {
+    if (hideDead && l.state === "invalid") return false;
+    if (minRes) {
+      const res = l.quality && l.quality.resolution;
+      // 未识别出分辨率的有效链接保留（可能是好资源，只是文件名没写）
+      if (res && RES_RANK[res] < RES_RANK[minRes]) return false;
+      if (!res && l.state !== "valid") return false;
+    }
+    return true;
+  });
+}
+
+function formatSize(bytes) {
+  if (!bytes) return "";
+  const gb = bytes / 1024 ** 3;
+  return gb >= 1 ? gb.toFixed(1) + "GB" : Math.round(bytes / 1024 ** 2) + "MB";
+}
+
+function qualityBadges(q) {
+  const out = [];
+  const add = (text, cls, title) => {
+    const b = document.createElement("span");
+    b.className = "badge " + cls;
+    setText(b, text);
+    if (title) b.title = title;
+    out.push(b);
+  };
+  if (!q) return out;
+  if (q.resolution) {
+    add(RES_LABEL[q.resolution] + (q.resolution_guessed ? "?" : ""), "badge-res",
+      q.resolution_guessed ? "由文件体积推断" : "");
+  }
+  if (q.hdr) add("HDR", "badge-res");
+  if (q.source) add(q.source, "badge-tag");
+  if (q.low_quality) add("疑似枪版", "badge-dead");
+  if (q.has_subtitle) add("字幕", "badge-tag");
+  if (q.video_count > 1) add(q.video_count + " 个视频", "badge-tag");
+  const size = formatSize(q.size_bytes);
+  if (size) add(size, "badge-tag");
+  return out;
+}
 
 function setText(el, text) {
   el.textContent = text;
@@ -87,7 +134,7 @@ function renderMetrics(metrics, providers) {
 
 function renderLinks(links) {
   currentLinks = links;
-  const visible = hideDead ? links.filter((l) => l.state !== "invalid") : links;
+  const visible = visibleLinks(links);
   resultList.innerHTML = "";
   for (const l of visible) {
     const li = document.createElement("li");
@@ -115,6 +162,7 @@ function renderLinks(links) {
     stateBadge.className = "badge badge-" + stateCls;
     setText(stateBadge, stateText);
     head.appendChild(stateBadge);
+    for (const b of qualityBadges(l.quality)) head.appendChild(b);
     li.appendChild(head);
 
     const url = document.createElement("a");
@@ -156,7 +204,7 @@ function renderLinks(links) {
 }
 
 copyBtn.addEventListener("click", () => {
-  const visible = hideDead ? currentLinks.filter((l) => l.state !== "invalid") : currentLinks;
+  const visible = visibleLinks(currentLinks);
   const lines = visible.map((l) => {
     const link = "https://pan.quark.cn/s/" + l.share + (l.pwd ? "?pwd=" + l.pwd : "");
     return [l.name, link, l.pwd || "-", l.time, l.conf, l.state === "valid" ? "有效" : "失效"].join("\t");
@@ -169,6 +217,11 @@ copyBtn.addEventListener("click", () => {
 
 document.getElementById("hide-dead").addEventListener("change", (e) => {
   hideDead = e.target.checked;
+  if (currentLinks.length) renderLinks(currentLinks);
+});
+
+document.getElementById("min-res").addEventListener("change", (e) => {
+  minRes = e.target.value;
   if (currentLinks.length) renderLinks(currentLinks);
 });
 

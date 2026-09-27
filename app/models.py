@@ -37,6 +37,21 @@ class ParsedResource(BaseModel):
     search_suggestions: list[str] = Field(min_length=1, max_length=6)
 
 
+class QualityInfo(BaseModel):
+    """从分享文件列表推断出的资源质量（规则识别，见 services/quality.py）。"""
+
+    resolution: Literal["2160p", "1080p", "720p", "SD"] | None = None
+    resolution_guessed: bool = False  # True 表示由单文件体积推断，而非文件名
+    hdr: bool = False
+    codec: str | None = None
+    source: str | None = None  # REMUX / BluRay / WEB-DL / HDTV
+    low_quality: bool = False  # 枪版/TC/CAM
+    video_count: int = 0
+    size_bytes: int | None = None
+    has_subtitle: bool = False
+    score: int = 0
+
+
 class QuarkLink(BaseModel):
     """一条夸克网盘分享链接（含提取码与可达性验证）。"""
 
@@ -48,6 +63,7 @@ class QuarkLink(BaseModel):
     conf: str = "中"  # 置信度：高/中/低
     http: int | None = None  # 壳页状态码
     state: str = "unknown"  # 严格验证状态：valid / invalid / unknown
+    quality: QualityInfo | None = None  # 仅验证有效时填充
 
 
 class ProviderStatus(BaseModel):

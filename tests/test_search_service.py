@@ -87,7 +87,7 @@ async def test_dedupe_by_share_id():
     svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False, use_bing=False,
                              client=_ok_client())
     resp = await svc.search(_req())
-    shares = [l.share for l in resp.links]
+    shares = [link.share for link in resp.links]
     assert shares == ["abc1234567"]
 
 
@@ -99,7 +99,7 @@ async def test_deep_fetch_adds_links():
     provider = FakeTavily(results=[_quark_result("https://example.com/page")])
     svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False, use_bing=False, client=client)
     resp = await svc.search(_req())
-    shares = {l.share for l in resp.links}
+    shares = {link.share for link in resp.links}
     assert "xyz9876543" in shares
 
 
@@ -180,3 +180,31 @@ async def test_douban_link_resolves_to_title():
     assert resp.douban.title == "漫长的季节"
     assert resp.douban.year == "2023"
     assert resp.douban.kind == "电视剧"
+
+
+async def test_valid_links_get_quality_and_sort_by_score():
+    provider = FakeTavily(results=[
+        _quark_result("https://pan.quark.cn/s/low1234567"),
+        _quark_result("https://pan.quark.cn/s/uhd1234567"),
+    ])
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/sharepage/token"):
+            return httpx.Response(200, json={"code": 0, "data": {"stoken": "t"}})
+        if request.url.path.endswith("/sharepage/detail"):
+            sid = request.url.params.get("pwd_id")
+            name = "电影.720p.mp4" if sid == "low1234567" else "电影.2160p.HDR.mkv"
+            return httpx.Response(200, json={
+                "code": 0,
+                "data": {"share": {"status": 1}, "list": [{"file_name": name, "size": 10}]},
+            })
+        return httpx.Response(200, json={})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    svc = QuarkSearchService(parser=FakeParser(), tavily=provider, use_qkyunso=False,
+                             use_bing=False, client=client)
+    resp = await svc.search(_req())
+    assert [link.share for link in resp.links] == ["uhd1234567", "low1234567"]
+    assert resp.links[0].quality.resolution == "2160p"
+    assert resp.links[0].quality.hdr is True
+    assert resp.links[1].quality.resolution == "720p"

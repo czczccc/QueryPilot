@@ -41,6 +41,15 @@
         <label class="filter-label">
           <input type="checkbox" id="hide-dead" checked> 只看有效链接
         </label>
+        <label class="filter-label">
+          最低清晰度
+          <select id="min-res">
+            <option value="">不限</option>
+            <option value="720p">720p</option>
+            <option value="1080p">1080p</option>
+            <option value="2160p">4K</option>
+          </select>
+        </label>
         <button id="copy-btn" type="button" class="secondary-btn">复制全部链接</button>
       </div>
       <ol id="result-list" class="result-list"></ol>
