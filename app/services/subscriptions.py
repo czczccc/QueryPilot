@@ -69,8 +69,14 @@ class SubscriptionWatcher:
         episodes, score, res, _, _ = snapshot(await self._store.recall(resource_key(resource)))
         return episodes, score, res
 
-    async def check(self, client_id: str, sub: Subscription) -> list[tuple[str, str, str | None]]:
-        """检查一个订阅，返回新产生的通知 (kind, message, share)。"""
+    async def check(
+        self, client_id: str, sub: Subscription, sync_save: bool = False
+    ) -> list[tuple[str, str, str | None]]:
+        """检查一个订阅，返回新产生的通知 (kind, message, share)。
+
+        `sync_save`：刚打开自动转存或手动「立即检查」时为 True——即使没有新集，
+        也把目前集数最多的分享里网盘缺的集补齐（已有的跳过）。
+        """
         # 强制全网搜索，且记忆里的链接也全部重新验证（集数可能已经变了）
         resp = await self._agent.run(
             SearchRequest(query=sub.query, refresh=True, client_id=client_id), fresh_hours=0
@@ -95,9 +101,12 @@ class SubscriptionWatcher:
                 ))
             sub.best_score = score
             sub.best_resolution = res
-        if notes and sub.auto_save and self.auto_saver is not None:
+        if sub.auto_save and self.auto_saver is not None:
             links = {lk.share: lk for lk in (most, best) if lk is not None}
-            for share in dict.fromkeys(n[2] for n in list(notes) if n[2] in links):
+            shares = [n[2] for n in notes if n[2] in links]
+            if sync_save and (most or best):
+                shares.insert(0, (most or best).share)
+            for share in dict.fromkeys(shares):
                 try:
                     notes += await self.auto_saver(client_id, sub, links[share])
                 except Exception:  # 自动转存出错不影响通知本身

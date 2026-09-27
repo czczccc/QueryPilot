@@ -92,8 +92,9 @@ def test_auto_save_only_new_episodes_then_pause_and_resume():
         login(client)
         sub = client.post("/api/subscriptions", json=BODY).json()
         assert sub["auto_save"] is False
-        r = client.patch(f"/api/subscriptions/{sub['id']}", params=CID, json={"auto_save": True})
-        assert r.json()["auto_save"] is True
+        # 直接改库打开开关（不走 PATCH，避免它触发的后台立即检查干扰这里的顺序）
+        import asyncio
+        asyncio.run(store.set_auto_save(OWNER, sub["id"], True))
 
         async def check():
             [(owner, obj)] = await store.list_subscriptions(OWNER)
@@ -157,3 +158,55 @@ def test_auto_save_needs_login_and_off_by_default():
         import asyncio
         notes = asyncio.run(check())
         assert [k for k, _, _ in notes] == ["episodes"] and drive.saved == []
+
+
+def test_turning_on_or_check_now_fills_existing_episodes():
+    """网盘是空的：打开开关或点「立即检查」就把现有的集补齐，不必等到出新集。"""
+    import time
+
+    drive = Drive(episodes=3)
+    drive.have = []
+    app, store, _, _ = make(drive)
+    with TestClient(app) as client:
+        login(client)
+        sub = client.post("/api/subscriptions", json=BODY).json()
+        # 先让订阅基线等于当前集数：之后的检查不会产生「新集」通知
+        import asyncio
+
+        async def baseline():
+            [(owner, obj)] = await store.list_subscriptions(OWNER)
+            await app.state.watcher.check(owner, obj)
+
+        asyncio.run(baseline())
+        assert drive.saved == []
+
+        r = client.patch(f"/api/subscriptions/{sub['id']}", params=CID, json={"auto_save": True})
+        assert r.json()["auto_save"] is True
+        # 打开开关时后台立即检查一次；这次检查受 2 分钟冷却保护
+        for _ in range(100):
+            if drive.saved:
+                break
+            time.sleep(0.02)
+        [req] = drive.saved
+        assert req["fid_list"] == ["f1", "f2", "f3"]
+        assert client.post(f"/api/subscriptions/{sub['id']}/check",
+                           params=CID).status_code == 429
+
+
+def test_check_now_saves_synchronously():
+    drive = Drive(episodes=3)
+    drive.have = ["流浪地球.E01.mkv"]
+    app, store, _, _ = make(drive)
+    with TestClient(app) as client:
+        login(client)
+        sub = client.post("/api/subscriptions", json=BODY).json()
+        import asyncio
+        asyncio.run(store.set_auto_save(OWNER, sub["id"], True))
+        r = client.post(f"/api/subscriptions/{sub['id']}/check", params=CID)
+        kinds = [n["kind"] for n in r.json()["notifications"]]
+        assert kinds == ["episodes", "auto_saved"]
+        assert drive.saved[0]["fid_list"] == ["f2", "f3"]
+        assert client.post("/api/subscriptions/999/check", params=CID).status_code == 404
+        client.post("/api/quark/logout")
+        assert client.post(f"/api/subscriptions/{sub['id']}/check",
+                           params=CID).status_code == 401
