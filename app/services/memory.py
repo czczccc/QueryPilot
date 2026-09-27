@@ -72,6 +72,13 @@ CREATE TABLE IF NOT EXISTS notifications (
     read            INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_client ON notifications(client_id, ts);
+CREATE TABLE IF NOT EXISTS quark_accounts (
+    session_hash TEXT PRIMARY KEY,
+    cookie_enc   BLOB NOT NULL,
+    nickname     TEXT,
+    created      REAL NOT NULL,
+    last_used    REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS prefs (
     client_id TEXT PRIMARY KEY,
     data      TEXT NOT NULL,
@@ -367,6 +374,35 @@ class LinkStore:
             )
             self._conn.commit()
 
+    def _put_account(self, sh: str, cookie_enc: bytes, nickname: str | None, now: float) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO quark_accounts (session_hash, cookie_enc, nickname, created, "
+                "last_used) VALUES (?, ?, ?, ?, ?) ON CONFLICT(session_hash) DO UPDATE SET "
+                "cookie_enc = excluded.cookie_enc, nickname = excluded.nickname, "
+                "last_used = excluded.last_used",
+                (sh, cookie_enc, nickname, now, now),
+            )
+            self._conn.commit()
+
+    def _get_account(self, sh: str, now: float) -> tuple[bytes, str | None] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT cookie_enc, nickname FROM quark_accounts WHERE session_hash = ?", (sh,)
+            ).fetchone()
+            if row is None:
+                return None
+            self._conn.execute(
+                "UPDATE quark_accounts SET last_used = ? WHERE session_hash = ?", (now, sh)
+            )
+            self._conn.commit()
+        return bytes(row["cookie_enc"]), row["nickname"]
+
+    def _delete_account(self, sh: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM quark_accounts WHERE session_hash = ?", (sh,))
+            self._conn.commit()
+
     # ---------------- 异步接口 ----------------
 
     async def recall(self, key: str) -> list[QuarkLink]:
@@ -438,3 +474,13 @@ class LinkStore:
 
     async def mark_read(self, client_id: str) -> None:
         await asyncio.to_thread(self._mark_read, client_id)
+
+    async def put_account(self, session_hash: str, cookie_enc: bytes, nickname: str | None) -> None:
+        """保存某个浏览器会话对应的夸克登录凭证（只存密文与会话哈希）。"""
+        await asyncio.to_thread(self._put_account, session_hash, cookie_enc, nickname, time.time())
+
+    async def get_account(self, session_hash: str) -> tuple[bytes, str | None] | None:
+        return await asyncio.to_thread(self._get_account, session_hash, time.time())
+
+    async def delete_account(self, session_hash: str) -> None:
+        await asyncio.to_thread(self._delete_account, session_hash)

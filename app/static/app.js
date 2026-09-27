@@ -759,7 +759,11 @@ loadSubs();
 setInterval(loadSubs, 5 * 60 * 1000);
 
 
-// ---- 一键转存（存到部署者自己的夸克网盘，需口令；夸克 cookie 只在服务器上） ----
+// ---- 一键转存 ----
+// 优先扫码登录自己的夸克（凭证加密存在服务器，浏览器只拿一个 HttpOnly 会话）；
+// 部署者在 .env 配了自己的 cookie 时，也可以凭口令存到部署者的网盘。
+let saveStatus = { enabled: false, login: false, logged_in: false, token_mode: false };
+
 function getSaveToken(forceAsk) {
   let token = null;
   try { token = forceAsk ? null : localStorage.getItem("qp_save_token"); } catch (_) { /* 忽略 */ }
@@ -772,22 +776,83 @@ function getSaveToken(forceAsk) {
   return token;
 }
 
+// 扫码登录弹窗：显示二维码并轮询，成功返回 true，关闭或过期返回 false
+function quarkLogin() {
+  return new Promise(async (resolve) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "qr-dialog";
+    const title = document.createElement("p");
+    setText(title, "用夸克 App 扫码登录，转存会保存到你自己的网盘");
+    const box = document.createElement("div");
+    box.className = "qr-box";
+    const tip = document.createElement("p");
+    tip.className = "qr-tip";
+    setText(tip, "正在获取二维码…");
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "secondary-btn small";
+    setText(close, "取消");
+    dlg.append(title, box, tip, close);
+    document.body.appendChild(dlg);
+    let timer = null;
+    const finish = (ok) => {
+      clearInterval(timer);
+      dlg.close();
+      dlg.remove();
+      resolve(ok);
+    };
+    close.addEventListener("click", () => finish(false));
+    dlg.addEventListener("cancel", () => finish(false));
+    dlg.showModal();
+    try {
+      const resp = await fetch("/api/quark/login", { method: "POST" });
+      const data = await resp.json();
+      if (!resp.ok) { setText(tip, data.detail || "获取二维码失败"); return; }
+      box.innerHTML = data.qr_svg || ""; // 服务器生成的二维码 SVG
+      setText(tip, "扫码后在手机上确认登录");
+      timer = setInterval(async () => {
+        try {
+          const r = await (await fetch("/api/quark/login/" + encodeURIComponent(data.login_id))).json();
+          if (r.status === "success") {
+            saveStatus.logged_in = true;
+            saveStatus.nickname = r.nickname;
+            finish(true);
+          } else if (r.status !== "waiting") {
+            clearInterval(timer);
+            setText(tip, r.message || "二维码已过期，请关闭后重试");
+          }
+        } catch (_) { /* 网络抖动：下次再试 */ }
+      }, 2000);
+    } catch (_) {
+      setText(tip, "获取二维码失败，请稍后重试");
+    }
+  });
+}
+
 function saveButton(l) {
   const btn = el("button", "secondary-btn small", "转存到网盘");
   btn.type = "button";
   btn.addEventListener("click", async () => {
-    let token = getSaveToken(false);
-    if (!token) return;
+    let token = null;
+    if (!saveStatus.logged_in) {
+      if (saveStatus.login) {
+        if (!(await quarkLogin())) return;
+      } else {
+        token = getSaveToken(false);
+        if (!token) return;
+      }
+    }
     btn.disabled = true;
     setText(btn, "转存中…");
     try {
       let resp = await postSave(l, token);
-      if (resp.status === 401) { // 口令不对：清掉重新问一次
+      if (resp.status === 401 && token) { // 口令不对：清掉重新问一次
         token = getSaveToken(true);
         resp = token ? await postSave(l, token) : resp;
       }
       const body = await resp.json().catch(() => ({}));
       const ok = resp.ok && body.ok;
+      if (!ok && /重新扫码|先扫码/.test(body.message || body.detail || "")) saveStatus.logged_in = false;
       setText(btn, ok ? "已转存 ✓" : "转存失败");
       btn.classList.toggle("done", ok);
       toast(body.message || body.detail || (ok ? "已转存" : "转存失败"), ok ? "ok" : "error");
@@ -801,16 +866,18 @@ function saveButton(l) {
 }
 
 function postSave(l, token) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers["X-Save-Token"] = token;
   return fetch("/api/save", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Save-Token": token },
+    headers,
     body: JSON.stringify({ share: l.share, pwd: l.pwd || null }),
   });
 }
 
 fetch("/api/save/status")
   .then((r) => r.json())
-  .then((d) => { saveEnabled = !!d.enabled; })
+  .then((d) => { saveStatus = d; saveEnabled = !!d.enabled; })
   .catch(() => {});
 
 

@@ -8,13 +8,14 @@ import asyncio
 import contextlib
 import hmac
 import logging
+import secrets
 import time
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -36,9 +37,11 @@ from app.models import (
 from app.providers.tavily import TavilyProvider
 from app.security import RateLimiter, install_request_id_factory, set_request_id
 from app.services.agent import SearchAgent
+from app.services.cookie_box import CookieBox, session_hash
 from app.services.intent import DeepSeekParser
 from app.services.memory import LinkStore
-from app.services.quark_save import QuarkSaver, SaveError
+from app.services.quark_login import LoginError, QuarkQrLogin, qr_svg
+from app.services.quark_save import LoginExpiredError, QuarkSaver, SaveError
 from app.services.search import QuarkSearchService, SearchUnavailableError
 from app.services.subscriptions import SubscriptionWatcher
 
@@ -110,6 +113,9 @@ def create_app(
     subscribe_interval_hours: float | None = None,
     saver: QuarkSaver | None = None,
     save_token: str | None = None,
+    qr_login: QuarkQrLogin | None = None,
+    cookie_box: CookieBox | None = None,
+    quark_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     """创建应用；传入 service / agent 便于测试注入假实现。"""
     resolved = service or build_default_service()
@@ -173,6 +179,14 @@ def create_app(
         _settings.save_token if service is None else ""
     )
     app.state.saver = saver if resolved_token else None
+    # 扫码登录（多人各自转存到自己的网盘）：凭证按浏览器会话 AES 加密存进记忆库
+    if service is None and _settings.quark_login and resolved.store is not None:
+        qr_login = qr_login or QuarkQrLogin()
+        cookie_box = cookie_box or CookieBox.load(
+            _settings.cookie_secret, Path(_settings.memory_db_path).parent / ".cookie_secret"
+        )
+    login_enabled = qr_login is not None and cookie_box is not None and resolved.store is not None
+    quark_http = quark_client or httpx.AsyncClient(timeout=10.0)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
     @app.middleware("http")
@@ -283,24 +297,117 @@ def create_app(
         await _store_or_404().mark_read(client_id)
         return {"ok": True}
 
+    SESSION_COOKIE = "qp_quark"
+
+    async def _user_cookie(request: Request) -> tuple[str, str, str | None] | None:
+        """当前浏览器扫码登录过的夸克账号：(会话哈希, cookie, 昵称)。"""
+        token = request.cookies.get(SESSION_COOKIE)
+        if not login_enabled or not token:
+            return None
+        sh = session_hash(token)
+        row = await resolved.store.get_account(sh)
+        if row is None:
+            return None
+        cookie = cookie_box.decrypt(row[0], sh.encode())
+        if cookie is None:  # 密钥换了：当作未登录
+            await resolved.store.delete_account(sh)
+            return None
+        return sh, cookie, row[1]
+
     @app.get("/api/save/status")
-    async def save_status() -> dict:
-        """前端据此决定是否显示「转存」按钮（不透露任何配置内容）。"""
-        return {"enabled": app.state.saver is not None}
+    async def save_status(request: Request) -> dict:
+        """前端据此决定转存按钮怎么走（不透露任何配置内容）。
+
+        - `login`：可以扫码登录自己的夸克；`logged_in` / `nickname`：当前浏览器是否已登录；
+        - `token_mode`：部署者在 .env 配置了自己的 cookie，凭口令转存到部署者网盘。
+        """
+        user = await _user_cookie(request)
+        token_mode = app.state.saver is not None
+        return {
+            "enabled": token_mode or login_enabled,
+            "login": login_enabled,
+            "logged_in": user is not None,
+            "nickname": user[2] if user else None,
+            "token_mode": token_mode,
+        }
+
+    @app.post("/api/quark/login")
+    async def quark_login_start(_: None = Depends(rate_limit_dep)) -> dict:
+        """开始扫码登录：返回二维码（SVG 与原始内容），前端轮询状态。"""
+        if not login_enabled:
+            raise HTTPException(status_code=404, detail="扫码登录未开启")
+        try:
+            login_id, content = await qr_login.start()
+        except LoginError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        return {"login_id": login_id, "qr_url": content, "qr_svg": qr_svg(content),
+                "expires_in": 300}
+
+    @app.get("/api/quark/login/{login_id}")
+    async def quark_login_poll(login_id: str, request: Request, response: Response) -> dict:
+        """轮询扫码状态；成功时把凭证加密入库，并给浏览器下发 HttpOnly 会话。"""
+        if not login_enabled:
+            raise HTTPException(status_code=404, detail="扫码登录未开启")
+        try:
+            result = await qr_login.poll(login_id[:64])
+        except LoginError as e:
+            return {"status": "error", "message": str(e)}
+        if result.status != "success":
+            return {"status": result.status}
+        old = await _user_cookie(request)
+        if old:
+            await resolved.store.delete_account(old[0])
+        token = secrets.token_urlsafe(32)
+        sh = session_hash(token)
+        await resolved.store.put_account(
+            sh, cookie_box.encrypt(result.cookie or "", sh.encode()), result.nickname
+        )
+        response.set_cookie(
+            SESSION_COOKIE, token, max_age=30 * 86400, httponly=True, samesite="lax",
+            secure=request.url.scheme == "https",
+        )
+        return {"status": "success", "nickname": result.nickname}
+
+    @app.post("/api/quark/logout")
+    async def quark_logout(request: Request, response: Response) -> dict:
+        """退出：删除服务器上保存的凭证并清掉浏览器会话。"""
+        user = await _user_cookie(request)
+        if user:
+            await resolved.store.delete_account(user[0])
+        response.delete_cookie(SESSION_COOKIE)
+        return {"ok": True}
 
     @app.post("/api/save", response_model=SaveResponse)
     async def save_to_drive(
         req: SaveRequest,
+        request: Request,
+        response: Response,
         x_save_token: str = Header(default=""),
         _: None = Depends(rate_limit_dep),
     ) -> SaveResponse:
-        """把分享里的文件转存到部署者自己的夸克网盘（需口令）。"""
-        if app.state.saver is None:
-            raise HTTPException(status_code=404, detail="一键转存未开启")
-        if not hmac.compare_digest(x_save_token.encode(), resolved_token.encode()):
+        """转存到夸克网盘：扫码登录过的存到自己的网盘；否则凭口令存到部署者的网盘。"""
+        user = await _user_cookie(request)
+        if user is not None:
+            saver_obj = QuarkSaver(user[1], _settings.quark_save_dir_fid if service is None
+                                   else "0", client=quark_http)
+        elif app.state.saver is not None and x_save_token:
+            if not hmac.compare_digest(x_save_token.encode(), resolved_token.encode()):
+                raise HTTPException(status_code=401, detail="转存口令不正确")
+            saver_obj = app.state.saver
+        elif login_enabled:
+            raise HTTPException(status_code=401, detail="请先扫码登录夸克")
+        elif app.state.saver is not None:
             raise HTTPException(status_code=401, detail="转存口令不正确")
+        else:
+            raise HTTPException(status_code=404, detail="一键转存未开启")
         try:
-            result = await app.state.saver.save(req.share, req.pwd)
+            result = await saver_obj.save(req.share, req.pwd)
+        except LoginExpiredError as e:
+            if user is None:
+                return SaveResponse(ok=False, message=str(e))
+            await resolved.store.delete_account(user[0])
+            response.delete_cookie(SESSION_COOKIE)
+            return SaveResponse(ok=False, message="夸克登录已过期，请重新扫码登录")
         except SaveError as e:
             return SaveResponse(ok=False, message=str(e))
         name = f"《{result.title}》" if result.title else f"{result.file_count} 个文件"

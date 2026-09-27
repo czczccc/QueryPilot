@@ -1286,3 +1286,13 @@ body.scrolled-far .to-top { opacity: 1; transform: none; pointer-events: auto; }
     scroll-behavior: auto !important;
   }
 }
+
+/* ================= 夸克扫码登录弹窗 ================= */
+.qr-dialog {
+  border: 1px solid var(--border); border-radius: 16px; padding: 1.25rem;
+  text-align: center; max-width: 320px; background: var(--surface-solid); color: var(--text);
+}
+.qr-dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+.qr-box { display: flex; justify-content: center; }
+.qr-box svg { width: 220px; height: 220px; background: #fff; border-radius: 8px; }
+.qr-tip { color: var(--muted); font-size: 0.85rem; }

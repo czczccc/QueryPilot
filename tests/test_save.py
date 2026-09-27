@@ -106,7 +106,7 @@ def _app(saver_obj, token=TOKEN):
 
 def test_save_api_requires_token():
     with TestClient(_app(saver())) as client:
-        assert client.get("/api/save/status").json() == {"enabled": True}
+        assert client.get("/api/save/status").json()["enabled"] is True
         body = {"share": "abcdef123456", "pwd": "ab12"}
         assert client.post("/api/save", json=body).status_code == 401
         assert client.post("/api/save", json=body,
@@ -131,6 +131,6 @@ def test_save_api_reports_quark_error():
 def test_save_disabled_without_cookie_or_token():
     for app in (_app(None), _app(saver(), token="")):
         with TestClient(app) as client:
-            assert client.get("/api/save/status").json() == {"enabled": False}
+            assert client.get("/api/save/status").json()["enabled"] is False
             assert client.post("/api/save", json={"share": "abcdef123456"},
                                headers={"X-Save-Token": ""}).status_code == 404
