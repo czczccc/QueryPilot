@@ -17,7 +17,12 @@ import time
 from pathlib import Path
 
 from app.models import (
-    Notification, QualityInfo, QuarkLink, Subscription, SubscriptionHistory, UserPrefs,
+    Notification,
+    QualityInfo,
+    QuarkLink,
+    Subscription,
+    SubscriptionHistory,
+    UserPrefs,
 )
 
 _SCHEMA = """
