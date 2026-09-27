@@ -16,7 +16,14 @@ import threading
 import time
 from pathlib import Path
 
-from app.models import Notification, QualityInfo, QuarkLink, Subscription, UserPrefs
+from app.models import (
+    Notification,
+    QualityInfo,
+    QuarkLink,
+    Subscription,
+    SubscriptionHistory,
+    UserPrefs,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS links (
@@ -90,6 +97,17 @@ CREATE TABLE IF NOT EXISTS auto_saves (
     ts              REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_auto_saves_sub ON auto_saves(subscription_id, ts);
+CREATE TABLE IF NOT EXISTS subscription_history (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id      TEXT NOT NULL,
+    query          TEXT NOT NULL,
+    resource       TEXT NOT NULL,
+    data           TEXT NOT NULL,
+    created        REAL NOT NULL,
+    completed      REAL NOT NULL,
+    reason         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sub_history_client ON subscription_history(client_id, completed);
 CREATE TABLE IF NOT EXISTS prefs (
     client_id TEXT PRIMARY KEY,
     data      TEXT NOT NULL,
@@ -105,7 +123,32 @@ _MIGRATIONS = [
     ("quark_accounts", "user_id", "TEXT"),
     ("subscriptions", "auto_save", "INTEGER NOT NULL DEFAULT 0"),
     ("subscriptions", "auto_save_status", "TEXT"),
+    # 订阅 v2：以影视条目为订阅对象
+    ("subscriptions", "state", "TEXT NOT NULL DEFAULT 'active'"),
+    ("subscriptions", "media", "TEXT"),
+    ("subscriptions", "season", "INTEGER"),
+    ("subscriptions", "year", "TEXT"),
+    ("subscriptions", "tmdb_id", "TEXT"),
+    ("subscriptions", "douban_id", "TEXT"),
+    ("subscriptions", "poster", "TEXT"),
+    ("subscriptions", "total_episodes", "INTEGER"),
+    ("subscriptions", "start_episode", "INTEGER NOT NULL DEFAULT 1"),
+    ("subscriptions", "manual_total", "INTEGER NOT NULL DEFAULT 0"),
+    ("subscriptions", "resolution", "TEXT"),
+    ("subscriptions", "include_words", "TEXT"),
+    ("subscriptions", "exclude_words", "TEXT"),
+    ("subscriptions", "saved_episodes", "TEXT"),
+    ("subscriptions", "meta_checked", "REAL"),
 ]
+
+# 订阅 v2 的可编辑字段：Subscription 属性名 → 列名
+SUB_FIELDS = {
+    "media": "media", "season": "season", "year": "year", "tmdb_id": "tmdb_id",
+    "douban_id": "douban_id", "poster": "poster", "total_episodes": "total_episodes",
+    "start_episode": "start_episode", "manual_total": "manual_total",
+    "resolution": "resolution", "include": "include_words", "exclude": "exclude_words",
+    "auto_save": "auto_save",
+}
 
 _PUNCT_RE = re.compile(r"[\s\-_·:：,，.。!！?？'\"“”‘’()（）\[\]【】《》<>]+")
 
@@ -115,6 +158,20 @@ HOUR = 3600.0
 def resource_key(name: str) -> str:
     """资源名归一化：小写、去空白与标点，作为记忆的主键。"""
     return _PUNCT_RE.sub("", name).lower()
+
+
+def _to_col(v: object) -> object:
+    return int(v) if isinstance(v, bool) else v
+
+
+def _state(row: sqlite3.Row) -> str:
+    """库里只存 new / active / paused；能搜但没法判断「完成」的订阅显示为 pending（待定）。"""
+    state = row["state"] or "active"
+    if state == "active" and (
+        row["media"] is None or (row["media"] == "tv" and not row["total_episodes"])
+    ):
+        return "pending"
+    return state
 
 
 class LinkStore:
@@ -291,7 +348,7 @@ class LinkStore:
 
     def _add_subscription(
         self, client_id: str, query: str, resource: str, baseline: tuple[int, int, str | None],
-        now: float, limit: int,
+        now: float, limit: int, fields: dict,
     ) -> Subscription | None:
         key = resource_key(resource)
         with self._lock:
@@ -310,6 +367,12 @@ class LinkStore:
                 "ON CONFLICT(client_id, resource_key) DO UPDATE SET query = excluded.query",
                 (client_id, query, resource, key, now, *baseline),
             )
+            if fields:
+                cols = ", ".join(f"{SUB_FIELDS[k]} = ?" for k in fields)
+                self._conn.execute(
+                    f"UPDATE subscriptions SET {cols} WHERE client_id = ? AND resource_key = ?",
+                    (*(_to_col(v) for v in fields.values()), client_id, key),
+                )
             self._conn.commit()
             row = self._conn.execute(
                 "SELECT * FROM subscriptions WHERE client_id = ? AND resource_key = ?",
@@ -324,6 +387,12 @@ class LinkStore:
             last_checked=row["last_checked"], best_episodes=row["best_episodes"],
             best_score=row["best_score"], best_resolution=row["best_resolution"],
             auto_save=bool(row["auto_save"]), auto_save_status=row["auto_save_status"],
+            state=_state(row), media=row["media"], season=row["season"], year=row["year"],
+            tmdb_id=row["tmdb_id"], douban_id=row["douban_id"], poster=row["poster"],
+            total_episodes=row["total_episodes"], start_episode=row["start_episode"] or 1,
+            manual_total=bool(row["manual_total"]), resolution=row["resolution"],
+            include=row["include_words"], exclude=row["exclude_words"],
+            saved_episodes=json.loads(row["saved_episodes"] or "[]"),
         )
 
     def _list_subscriptions(self, client_id: str | None) -> list[tuple[str, Subscription]]:
@@ -357,8 +426,10 @@ class LinkStore:
         with self._lock:
             self._conn.execute(
                 "UPDATE subscriptions SET last_checked = ?, best_episodes = ?, best_score = ?, "
-                "best_resolution = ? WHERE id = ?",
-                (now, sub.best_episodes, sub.best_score, sub.best_resolution, sub.id),
+                "best_resolution = ?, total_episodes = ?, saved_episodes = ?, "
+                "state = CASE WHEN state = 'paused' THEN state ELSE 'active' END WHERE id = ?",
+                (now, sub.best_episodes, sub.best_score, sub.best_resolution,
+                 sub.total_episodes, json.dumps(sorted(set(sub.saved_episodes))), sub.id),
             )
             for kind, message, share in notes:
                 self._conn.execute(
@@ -444,6 +515,71 @@ class LinkStore:
             self._conn.execute("DELETE FROM quark_accounts WHERE session_hash = ?", (sh,))
             self._conn.commit()
 
+    def _edit_subscription(
+        self, client_id: str, sub_id: int, fields: dict, state: str | None
+    ) -> Subscription | None:
+        sets = [f"{SUB_FIELDS[k]} = ?" for k in fields]
+        args = [_to_col(v) for v in fields.values()]
+        if state is not None:
+            sets.append("state = ?")
+            args.append(state)
+        if "auto_save" in fields:
+            sets.append("auto_save_status = NULL")
+        if sets:
+            self._exec(
+                f"UPDATE subscriptions SET {', '.join(sets)} WHERE id = ? AND client_id = ?",
+                (*args, sub_id, client_id),
+            )
+        return self._get_subscription(client_id, sub_id)
+
+    def _archive(self, client_id: str, sub: Subscription, reason: str, now: float) -> int:
+        data = sub.model_dump(include={
+            "media", "season", "year", "tmdb_id", "douban_id", "poster", "total_episodes",
+            "start_episode", "resolution", "include", "exclude", "auto_save",
+        })
+        data["saved_count"] = len(set(sub.saved_episodes))
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO subscription_history (client_id, query, resource, data, created, "
+                "completed, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (client_id, sub.query, sub.resource, json.dumps(data, ensure_ascii=False),
+                 sub.created, now, reason),
+            )
+            # 通知和转存记录留着（历史里还能看到），只删订阅本身
+            self._conn.execute(
+                "DELETE FROM subscriptions WHERE id = ? AND client_id = ?", (sub.id, client_id)
+            )
+            self._conn.commit()
+        return int(cur.lastrowid or 0)
+
+    @staticmethod
+    def _row_to_history(row: sqlite3.Row) -> tuple[SubscriptionHistory, dict]:
+        data = json.loads(row["data"] or "{}")
+        hist = SubscriptionHistory(
+            id=row["id"], query=row["query"], resource=row["resource"], created=row["created"],
+            completed=row["completed"], reason=row["reason"],
+            **{k: data.get(k) for k in ("media", "season", "year", "tmdb_id", "douban_id",
+                                        "poster", "total_episodes")},
+            saved_count=data.get("saved_count") or 0,
+        )
+        return hist, data
+
+    def _history(self, client_id: str, limit: int) -> list[SubscriptionHistory]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM subscription_history WHERE client_id = ? "
+                "ORDER BY completed DESC, id DESC LIMIT ?", (client_id, limit),
+            ).fetchall()
+        return [self._row_to_history(r)[0] for r in rows]
+
+    def _get_history(self, client_id: str, hid: int) -> tuple[SubscriptionHistory, dict] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM subscription_history WHERE id = ? AND client_id = ?",
+                (hid, client_id),
+            ).fetchone()
+        return self._row_to_history(row) if row else None
+
     # ---------------- 异步接口 ----------------
 
     async def recall(self, key: str) -> list[QuarkLink]:
@@ -486,14 +622,57 @@ class LinkStore:
     async def add_subscription(
         self, client_id: str, query: str, resource: str,
         baseline: tuple[int, int, str | None] = (0, 0, None), limit: int = 20,
+        **fields: object,
     ) -> Subscription | None:
         """新增订阅（同一资源重复订阅只更新搜索词）；超过每人上限返回 None。
 
         baseline = (集数, 质量分, 清晰度)：订阅时已有的最好情况，之后只有超过它才通知。
         """
         return await asyncio.to_thread(
-            self._add_subscription, client_id, query, resource, baseline, time.time(), limit
+            self._add_subscription, client_id, query, resource, baseline, time.time(), limit,
+            {k: v for k, v in fields.items() if k in SUB_FIELDS},
         )
+
+    async def get_subscription(self, client_id: str, sub_id: int) -> Subscription | None:
+        return await asyncio.to_thread(self._get_subscription, client_id, sub_id)
+
+    async def edit_subscription(
+        self, client_id: str, sub_id: int, state: str | None = None, **fields: object
+    ) -> Subscription | None:
+        """改订阅的设置字段（见 SUB_FIELDS）和状态（new/active/paused）；不存在返回 None。"""
+        bad = set(fields) - set(SUB_FIELDS)
+        if bad:
+            raise ValueError(f"不能修改的字段：{bad}")
+        return await asyncio.to_thread(self._edit_subscription, client_id, sub_id, fields, state)
+
+    async def meta_due(self, sub_id: int, hours: float) -> bool:
+        """距上次刷新元数据超过 `hours` 就返回 True 并记下这次刷新时间。"""
+        now = time.time()
+        n = await asyncio.to_thread(
+            self._exec,
+            "UPDATE subscriptions SET meta_checked = ? WHERE id = ? "
+            "AND (meta_checked IS NULL OR meta_checked < ?)", (now, sub_id, now - hours * HOUR),
+        )
+        return n > 0
+
+    async def archive_subscription(self, client_id: str, sub: Subscription, reason: str) -> int:
+        """订阅完成：移入订阅历史（可重新订阅），返回历史记录 id。"""
+        return await asyncio.to_thread(self._archive, client_id, sub, reason, time.time())
+
+    async def subscription_history(
+        self, client_id: str, limit: int = 50
+    ) -> list[SubscriptionHistory]:
+        return await asyncio.to_thread(self._history, client_id, limit)
+
+    async def get_history(self, client_id: str, hid: int) -> tuple[SubscriptionHistory, dict] | None:
+        """(历史记录, 当时的订阅设置)。"""
+        return await asyncio.to_thread(self._get_history, client_id, hid)
+
+    async def delete_history(self, client_id: str, hid: int) -> bool:
+        return await asyncio.to_thread(
+            self._exec, "DELETE FROM subscription_history WHERE id = ? AND client_id = ?",
+            (hid, client_id),
+        ) > 0
 
     async def list_subscriptions(
         self, client_id: str | None = None

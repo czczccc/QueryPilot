@@ -14,7 +14,8 @@
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -58,6 +59,8 @@ class SaveResult:
     category: str | None = None  # 如「国产剧」「欧美电影」
     basis: str | None = None  # 分类依据，如「TMDB + 豆瓣 + LLM」
     skipped: int = 0  # only_new 时因为网盘里已有同一集而跳过的文件数
+    # only_new 时：转存后目标目录里应有的文件名（原有的 + 这次存的），用来清点已有哪些集
+    present: list[str] = field(default_factory=list)
 
 
 class QuarkSaver:
@@ -106,16 +109,17 @@ class QuarkSaver:
 
     async def save(
         self, share_id: str, pwd: str | None = None, to_path: str | None = None,
-        only_new: bool = False,
+        only_new: bool = False, keep: Callable[[str], bool] | None = None,
     ) -> SaveResult:
         """`to_path`：指定网盘目标目录路径（不存在就创建），给出时跳过自动分类。
 
         `only_new`：只存目标目录里还没有的集（按「季x集」比对，认不出集数的按文件名），
         用于订阅自动转存，避免同一集存两遍；读不到目标目录时报错而不是盲存。
+        `keep`：only_new 时再按文件名筛一遍（如只要订阅范围内缺的集）。
         """
         headers = self._headers(share_id)
         try:
-            return await self._save(share_id, pwd, headers, to_path, only_new)
+            return await self._save(share_id, pwd, headers, to_path, only_new, keep)
         except httpx.HTTPError as e:
             # 只记录异常类型，不记录请求（请求头里有 cookie）
             logger.warning("转存请求失败 share=%s error=%s", share_id, type(e).__name__)
@@ -125,7 +129,7 @@ class QuarkSaver:
 
     async def _save(
         self, share_id: str, pwd: str | None, headers: dict, to_path: str | None = None,
-        only_new: bool = False,
+        only_new: bool = False, keep: Callable[[str], bool] | None = None,
     ) -> SaveResult:
         # 1) 分享页 token
         resp = await self._client.post(
@@ -176,7 +180,7 @@ class QuarkSaver:
             logger.warning("目标目录准备失败（%s），存到默认目录", type(e).__name__)
 
         # 3.5) 只存新的集：顶层是单个文件夹时展开一层逐个比对，直接存进目标目录
-        pdir, skipped = "0", 0
+        pdir, skipped, present = "0", 0, []
         if only_new:
             if len(items) == 1 and items[0].get("dir"):
                 pdir = str(items[0]["fid"])
@@ -188,9 +192,12 @@ class QuarkSaver:
                 and (episode_key(str(f.get("file_name") or "")) or "") not in have_eps
             ]
             skipped = len(items) - len(fresh)
+            if keep is not None:
+                fresh = [f for f in fresh if keep(str(f.get("file_name") or ""))]
             items = fresh
+            present = sorted(have_names | {str(f.get("file_name") or "") for f in items})
             if not items:
-                return SaveResult("", 0, title, True, folder, category, basis, skipped)
+                return SaveResult("", 0, title, True, folder, category, basis, skipped, present)
 
         # 4) 提交转存任务
         resp = await self._client.post(
@@ -221,9 +228,10 @@ class QuarkSaver:
             task = self._check(resp.json(), "转存失败")
             if task.get("status") == 2:
                 return SaveResult(task_id, len(items), title, True, folder, category, basis,
-                                  skipped)
+                                  skipped, present)
             await asyncio.sleep(self._poll_interval)
-        return SaveResult(task_id, len(items), title, False, folder, category, basis, skipped)
+        return SaveResult(task_id, len(items), title, False, folder, category, basis, skipped,
+                          present)
 
     async def _sub_items(
         self, share_id: str, stoken: str, dir_fid: str, headers: dict

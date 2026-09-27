@@ -11,6 +11,7 @@
 """
 
 import logging
+import re
 from collections.abc import Awaitable, Callable
 
 import httpx
@@ -22,8 +23,9 @@ from app.services.quality import meets_requirement
 logger = logging.getLogger(__name__)
 
 Note = tuple[str, str, str | None]
-# (订阅归属, 订阅, 链接) → 要追加的通知
-AutoSaver = Callable[[str, Subscription, QuarkLink], Awaitable[list[Note]]]
+# (订阅归属, 订阅, 链接, 要的集号 / None 表示不限) → 要追加的通知；
+# 实现方负责把网盘里已有的集写回 `sub.saved_episodes`
+AutoSaver = Callable[[str, Subscription, QuarkLink, set[int] | None], Awaitable[list[Note]]]
 
 RES_TEXT = {"2160p": "4K", "1080p": "1080p", "720p": "720p", "SD": "标清"}
 
@@ -41,6 +43,22 @@ def snapshot(links: list[QuarkLink]) -> tuple[int, int, str | None, QuarkLink | 
     return (
         most.quality.video_count, best.quality.score, best.quality.resolution, most, best,
     )
+
+
+_SEASON_SUFFIX = re.compile(r"\s*第[0-9一二三四五六七八九十]+季$")
+
+
+def strip_season(resource: str) -> str:
+    """「漫长的季节 第2季」→「漫长的季节」。"""
+    return _SEASON_SUFFIX.sub("", resource)
+
+
+def passes_filters(link: QuarkLink, include: str | None, exclude: str | None) -> bool:
+    """订阅的包含 / 排除关键词（空格分隔，不区分大小写），对分享名和文件名生效。"""
+    text = " ".join([link.name, link.share_title or "", *link.files_preview]).lower()
+    if include and not all(w in text for w in include.lower().split()):
+        return False
+    return not (exclude and any(w in text for w in exclude.lower().split()))
 
 
 def _link_text(link: QuarkLink) -> str:
@@ -61,6 +79,7 @@ class SubscriptionWatcher:
     ) -> None:
         self._agent = agent
         self.auto_saver = auto_saver
+        self.lookup = None  # MetadataLookup：刷新剧集总集数（main 注入）
         self._store = store
         self._webhook = webhook
         self._client = client
@@ -78,12 +97,20 @@ class SubscriptionWatcher:
         `sync_save`：刚打开自动转存或手动「立即检查」时为 True——即使没有新集，
         也把目前集数最多的分享里网盘缺的集补齐（已有的跳过）。
         """
+        if sub.state == "paused":
+            return []
+        await self._refresh_meta(sub)
         # 强制全网搜索，且记忆里的链接也全部重新验证（集数可能已经变了）
         resp = await self._agent.run(
             SearchRequest(query=sub.query, refresh=True, client_id=client_id), fresh_hours=0
         )
-        episodes, score, res, most, best = snapshot(resp.links)
-        movie = most is not None and most.quality.video_count <= 1  # 单个视频文件按电影处理
+        required = sub.resolution or resp.required_resolution
+        links = [lk for lk in resp.links if passes_filters(lk, sub.include, sub.exclude)]
+        episodes, score, res, most, best = snapshot(links)
+        if sub.media:
+            movie = sub.media == "movie"
+        else:  # 没识别出条目：单个视频文件按电影处理
+            movie = most is not None and most.quality.video_count <= 1
         notes: list[tuple[str, str, str | None]] = []
         if most and episodes > sub.best_episodes:
             if sub.best_episodes == 0:  # 订阅时还没有资源（或只搜到过无效的）
@@ -111,38 +138,91 @@ class SubscriptionWatcher:
                 ))
             sub.best_score = score
             sub.best_resolution = res
+        ok = [lk for lk in links if lk.state == "valid" and lk.quality
+              and lk.relevance != "mismatch" and meets_requirement(lk.quality, required)]
         if sub.auto_save and self.auto_saver is not None:
-            links = {lk.share: lk for lk in (most, best) if lk is not None}
-            if movie:
-                # 电影：第一次出现满足清晰度要求的有效资源时存一次；之后更高清只提醒，不重复存
-                shares: list[str] = []
-                if not await self._store.has_auto_saved(sub.id):
-                    ok = [lk for lk in resp.links if lk.state == "valid" and lk.quality
-                          and lk.relevance != "mismatch"
-                          and meets_requirement(lk.quality, resp.required_resolution)]
-                    if ok:
-                        pick = max(ok, key=lambda lk: lk.quality.score)
-                        links[pick.share] = pick
-                        shares = [pick.share]
-            else:
-                # 剧集：新集 / 更高清 / 立即检查时，把网盘缺的集补齐（已有的跳过）
-                shares = [n[2] for n in notes if n[2] in links]
-                if sync_save and most:
-                    shares.insert(0, most.share)
-            for share in dict.fromkeys(shares):
-                try:
-                    notes += await self.auto_saver(client_id, sub, links[share])
-                except Exception:  # 自动转存出错不影响通知本身
-                    logger.exception("订阅自动转存异常 id=%s", sub.id)
+            notes += await self._auto_save(client_id, sub, movie, ok, notes, sync_save)
+        done = self._completed(sub, movie, ok)
+        if done:
+            notes.append(("completed", f"《{sub.resource}》{done}，订阅已完成，移入订阅历史", None))
         await self._store.update_subscription(client_id, sub, notes)
+        if done:
+            await self._store.archive_subscription(client_id, sub, done)
         if notes:
             await self._push(notes)
         return notes
 
+    async def _auto_save(
+        self, client_id: str, sub: Subscription, movie: bool, ok: list[QuarkLink],
+        notes: list[Note], sync_save: bool,
+    ) -> list[Note]:
+        """挑要转存的分享交给 auto_saver；只用满足清晰度要求与过滤条件的有效链接。"""
+        assert self.auto_saver is not None
+        if not ok:
+            return []
+        picks: list[QuarkLink] = []
+        wanted: set[int] | None = None
+        if movie:
+            # 电影：第一次出现满足要求的资源时存一次；之后更高清只提醒，不重复存
+            if not await self._store.has_auto_saved(sub.id):
+                picks = [max(ok, key=lambda lk: lk.quality.score)]
+        else:
+            lack = sub.lack_episodes
+            if lack == []:  # 范围内都存齐了
+                return []
+            wanted = set(lack) if lack is not None else None
+            fullest = max(ok, key=lambda lk: (lk.quality.video_count, lk.quality.score))
+            by_share = {lk.share: lk for lk in ok}
+            picks = [by_share[n[2]] for n in notes if n[2] in by_share]
+            # 立即检查，或者分享的集数已经覆盖到缺的集：补齐
+            if sync_save or (lack and fullest.quality.video_count >= min(lack)):
+                picks.insert(0, fullest)
+        out: list[Note] = []
+        for link in {lk.share: lk for lk in picks}.values():
+            try:
+                out += await self.auto_saver(client_id, sub, link, wanted)
+            except Exception:  # 自动转存出错不影响通知本身
+                logger.exception("订阅自动转存异常 id=%s", sub.id)
+            if wanted is not None and not sub.lack_episodes:
+                break
+        return out
+
+    @staticmethod
+    def _completed(sub: Subscription, movie: bool, ok: list[QuarkLink]) -> str | None:
+        """剧集这一季完成了就返回原因（写进订阅历史），否则 None。
+
+        开了自动转存：范围内每一集网盘里都有了才算完成；没开：出现一个集数覆盖整季的有效资源。
+        电影不自动完成（之后出现更高清版本还会提醒），可以手动完成。
+        """
+        if movie or sub.media != "tv" or not sub.wanted:
+            return None
+        if sub.auto_save:
+            return f"已集齐 {len(sub.wanted)} 集" if sub.lack_episodes == [] else None
+        if any(lk.quality.video_count >= sub.wanted[-1] for lk in ok):
+            return f"全 {sub.wanted[-1]} 集资源已出齐"
+        return None
+
+    async def _refresh_meta(self, sub: Subscription) -> None:
+        """剧集总集数随 TMDB / 豆瓣更新（每天最多一次；手动改过总集数的不动）。"""
+        if (self.lookup is None or sub.media != "tv" or sub.manual_total
+                or not (sub.tmdb_id or sub.douban_id)):
+            return
+        if not await self._store.meta_due(sub.id, 24):
+            return
+        # 查询失败时 lookup 自己返回空列表，不影响检查
+        infos = await self.lookup(strip_season(sub.resource), sub.year, fresh=True)
+        for info in infos:
+            if info.id in (sub.tmdb_id, sub.douban_id):
+                total = info.episodes.get(sub.season or 1)
+                if total and total > (sub.total_episodes or 0):
+                    sub.total_episodes = total
+                return
+
     async def run_once(self, limit: int = 20) -> int:
-        """检查最久没检查的一批订阅；单个失败只记日志。返回产生的通知数。"""
+        """检查最久没检查的一批订阅（暂停的跳过）；单个失败只记日志。返回产生的通知数。"""
         total = 0
-        for client_id, sub in (await self._store.list_subscriptions())[:limit]:
+        subs = [x for x in await self._store.list_subscriptions() if x[1].state != "paused"]
+        for client_id, sub in subs[:limit]:
             try:
                 total += len(await self.check(client_id, sub))
             except Exception:  # 单个订阅失败不影响其余

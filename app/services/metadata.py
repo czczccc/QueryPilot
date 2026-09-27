@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass, field
 
 import httpx
 
+from app.services.relevance import seasons_in
+
 logger = logging.getLogger(__name__)
 
 TMDB_BASE = "https://api.themoviedb.org/3"
@@ -35,6 +37,9 @@ class MediaInfo:
     countries: list[str] = field(default_factory=list)  # ISO 代码或中文地区名
     language: str | None = None
     seasons: int | None = None
+    id: str | None = None  # TMDB id 或豆瓣 id（看 source）
+    poster: str | None = None  # 海报图地址
+    episodes: dict[int, int] = field(default_factory=dict)  # 季 → 总集数（剧集）
 
     def brief(self) -> dict:
         return {k: v for k, v in asdict(self).items() if v not in (None, [], "")}
@@ -46,6 +51,12 @@ def _year(date: str | None) -> str | None:
 
 
 # ---------------- TMDB ----------------
+
+TMDB_IMAGE = "https://image.tmdb.org/t/p/w342"
+
+
+def _tmdb_poster(path: object) -> str | None:
+    return f"{TMDB_IMAGE}{path}" if isinstance(path, str) and path.startswith("/") else None
 
 def _tmdb_auth(api_key: str) -> tuple[dict, dict]:
     """v4 读访问令牌（eyJ 开头的 JWT）走 Bearer，v3 key 走查询参数。"""
@@ -94,6 +105,14 @@ async def search_tmdb(
             countries=[c for c in countries if c],
             language=d.get("original_language"),
             seasons=d.get("number_of_seasons"),
+            id=str(d.get("id") or hit.get("id") or "") or None,
+            poster=_tmdb_poster(d.get("poster_path") or hit.get("poster_path")),
+            episodes={
+                int(x["season_number"]): int(x.get("episode_count") or 0)
+                for x in d.get("seasons") or []
+                if isinstance(x, dict) and isinstance(x.get("season_number"), int)
+                and x["season_number"] > 0 and x.get("episode_count")
+            },
         )
 
     found = await asyncio.gather(*(detail(h) for h in hits[:limit]))
@@ -118,7 +137,8 @@ async def search_douban(
         info = MediaInfo(
             source="douban", title=item.get("title") or "",
             original_title=item.get("sub_title") or None, year=str(item.get("year") or "") or None,
-            media="tv" if item.get("episode") else None,
+            media="tv" if item.get("episode") else None, id=str(item["id"]),
+            poster=item.get("img") if isinstance(item.get("img"), str) else None,
         )
         for kind in ("tv", "movie") if info.media == "tv" else ("movie", "tv"):
             try:
@@ -133,6 +153,13 @@ async def search_douban(
             info.genres = [g for g in d.get("genres") or [] if isinstance(g, str)]
             info.media = "tv" if d.get("is_tv") or kind == "tv" else "movie"
             info.year = str(d.get("year") or "") or info.year
+            pic = d.get("pic") if isinstance(d.get("pic"), dict) else {}
+            info.poster = pic.get("normal") or pic.get("large") or info.poster
+            count = d.get("episodes_count")
+            if info.media == "tv" and isinstance(count, int) and count > 0:
+                # 豆瓣每季是单独的条目：季号从标题里认（「第二季」），认不出按第 1 季
+                seasons = seasons_in(info.title)
+                info.episodes = {min(seasons) if seasons else 1: count}
             break
         return info
 
@@ -159,9 +186,12 @@ class MetadataLookup:
     def enabled(self) -> bool:
         return bool(self._tmdb_key) or self._douban
 
-    async def __call__(self, name: str, year: str | None) -> list[MediaInfo]:
+    async def __call__(
+        self, name: str, year: str | None, fresh: bool = False
+    ) -> list[MediaInfo]:
+        """`fresh`：跳过缓存重新查（订阅定期刷新总集数时用）。"""
         key = (name, year)
-        if key in self._cache:
+        if key in self._cache and not fresh:
             return self._cache[key]
         client = self._client or httpx.AsyncClient(timeout=10.0, follow_redirects=True)
         try:

@@ -5,7 +5,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 ResourceType = Literal["game", "movie", "music", "software", "other"]
 
@@ -162,14 +162,33 @@ class FeedbackRequest(BaseModel):
     share: str = Field(min_length=6, max_length=32, pattern=r"^[0-9a-zA-Z]+$")
 
 
+MediaType = Literal["movie", "tv"]
+Resolution = Literal["2160p", "1080p", "720p", "SD"]
+
+
 class SubscribeRequest(BaseModel):
-    """订阅某部剧/电影：有新集数或更高清版本时通知。"""
+    """订阅一部电影 / 一季剧集。
+
+    推荐先用 `GET /api/media/search` 选中条目，把它的 media/tmdb_id/douban_id/season 等带上；
+    只给 resource 时后端自己识别（TMDB → 豆瓣），识别不到就按关键词订阅。
+    """
 
     client_id: str = Field(min_length=8, max_length=64)
     query: str = Field(min_length=2, max_length=200)  # 定期检查时用的搜索词
     resource: str = Field(min_length=1, max_length=100)  # 资源名（记忆库主键来源）
     # 订阅同时打开自动转存（需要登录）；没搜到资源也能订阅，等有资源时自动存
     auto_save: bool = False
+    media: MediaType | None = None
+    season: int | None = Field(default=None, ge=1, le=100)
+    year: str | None = Field(default=None, max_length=4)
+    tmdb_id: str | None = Field(default=None, max_length=20)
+    douban_id: str | None = Field(default=None, max_length=20)
+    poster: str | None = Field(default=None, max_length=500)
+    total_episodes: int | None = Field(default=None, ge=1, le=5000)  # 手动指定总集数
+    start_episode: int = Field(default=1, ge=1, le=5000)
+    resolution: Resolution | None = None  # 清晰度要求（不低于）
+    include: str | None = Field(default=None, max_length=100)  # 分享名须包含（空格分隔，全部满足）
+    exclude: str | None = Field(default=None, max_length=100)  # 分享名含任一即排除
 
 
 class Subscription(BaseModel):
@@ -184,17 +203,96 @@ class Subscription(BaseModel):
     auto_save: bool = False  # 发现新集时自动转存到自己的夸克网盘（需要扫码登录）
     # 自动转存暂停的原因：login_expired（夸克登录失效，重新扫码后自动恢复）/ no_login；正常为 None
     auto_save_status: str | None = None
+    # ---- v2：以影视条目为订阅对象（借鉴 MoviePilot 的设计思路）----
+    # new 新建（等第一次搜索）/ active 订阅中 / pending 待定（没识别出条目或总集数，能搜不能自动完成）
+    # / paused 暂停（不检查）
+    state: Literal["new", "active", "pending", "paused"] = "active"
+    media: MediaType | None = None
+    season: int | None = None
+    year: str | None = None
+    tmdb_id: str | None = None
+    douban_id: str | None = None
+    poster: str | None = None
+    total_episodes: int | None = None  # 这一季总集数（TMDB/豆瓣，或手动设定）
+    start_episode: int = 1
+    manual_total: bool = False  # 手动改过总集数：之后不再被元数据自动覆盖
+    resolution: Resolution | None = None
+    include: str | None = None
+    exclude: str | None = None
+    saved_episodes: list[int] = Field(default_factory=list)  # 网盘里已有的集（按转存时的目录清点）
+
+    @property
+    def wanted(self) -> list[int]:
+        """订阅范围内的集号；不知道总集数时为空。"""
+        if self.media != "tv" or not self.total_episodes:
+            return []
+        return list(range(self.start_episode, self.total_episodes + 1))
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def lack_episodes(self) -> list[int] | None:
+        """范围内网盘还缺的集；不知道总集数时为 None。"""
+        if not self.wanted:
+            return None
+        have = set(self.saved_episodes)
+        return [e for e in self.wanted if e not in have]
 
 
-class AutoSaveRequest(BaseModel):
-    auto_save: bool
+class SubscriptionUpdate(BaseModel):
+    """修改订阅：只改给出的字段。"""
+
+    auto_save: bool | None = None
+    paused: bool | None = None
+    total_episodes: int | None = Field(default=None, ge=1, le=5000)
+    start_episode: int | None = Field(default=None, ge=1, le=5000)
+    resolution: Resolution | Literal[""] | None = None  # "" 表示清除
+    include: str | None = Field(default=None, max_length=100)
+    exclude: str | None = Field(default=None, max_length=100)
+
+
+AutoSaveRequest = SubscriptionUpdate  # 兼容旧名
+
+
+class SubscriptionHistory(BaseModel):
+    """已完成（或手动结束）的订阅，可重新订阅。"""
+
+    id: int
+    query: str
+    resource: str
+    media: MediaType | None = None
+    season: int | None = None
+    year: str | None = None
+    tmdb_id: str | None = None
+    douban_id: str | None = None
+    poster: str | None = None
+    total_episodes: int | None = None
+    saved_count: int = 0
+    created: float
+    completed: float
+    reason: str  # 如「已集齐 12 集」「手动完成」
+
+
+class MediaCandidate(BaseModel):
+    """订阅前让用户选的影视条目。"""
+
+    source: str  # tmdb / douban
+    id: str | None = None
+    title: str
+    original_title: str | None = None
+    year: str | None = None
+    media: MediaType | None = None
+    poster: str | None = None
+    seasons: int | None = None
+    episodes: dict[int, int] = Field(default_factory=dict)  # 季 → 总集数
 
 
 class Notification(BaseModel):
     id: int
     subscription_id: int
     resource: str
-    kind: Literal["episodes", "quality"]
+    # episodes 新集 / found 有资源了 / quality 更高清 / completed 订阅完成 /
+    # auto_saved / auto_save_failed / auto_save_paused 自动转存结果
+    kind: str
     message: str
     share: str | None = None  # 带来更新的那条链接
     ts: float
