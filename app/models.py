@@ -167,6 +167,14 @@ Resolution = Literal["2160p", "1080p", "720p", "SD"]
 RESOLUTION_RANK = {"SD": 1, "720p": 2, "1080p": 3, "2160p": 4}
 
 
+class AirEpisode(BaseModel):
+    """一集的播出信息（TMDB）。"""
+
+    episode: int
+    air_date: str | None = None  # YYYY-MM-DD；TMDB 还没定的为 None
+    name: str | None = None
+
+
 class SubscribeRequest(BaseModel):
     """订阅一部电影 / 一季剧集。
 
@@ -230,6 +238,8 @@ class Subscription(BaseModel):
     upgrade_to: Resolution | None = None
     # 已存各集的清晰度（集号 → 2160p/1080p/720p/SD；电影用 0）；认不出清晰度的集不在里面
     versions: dict[int, str] = Field(default_factory=dict)
+    # 这一季的播出日历（TMDB，每天随元数据刷新）；不在订阅接口里返回，见 /api/calendar
+    schedule: list[AirEpisode] = Field(default_factory=list, exclude=True)
 
     @property
     def wanted(self) -> list[int]:
