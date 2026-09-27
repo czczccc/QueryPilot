@@ -143,6 +143,7 @@ async def test_memory_satisfies_without_search():
     store = LinkStore(":memory:")
     remembered = [
         QuarkLink(name="流浪地球2", share=s, source="x", time="未知", state="valid",
+                  share_title="流浪地球2 1080p",
                   quality=QualityInfo(resolution="1080p", score=30))
         for s in shares("mem", TARGET_MATCHES)
     ]

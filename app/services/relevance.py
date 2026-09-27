@@ -61,11 +61,36 @@ def years_in(text: str) -> set[int]:
     return {int(y) for y in YEAR_RE.findall(text)}
 
 
+BOOK_TITLE_RE = re.compile(r"《([^《》]{1,60})》")
+# 搜索词里片名以外的部分（演员名、「的」连接）按这些切开，只作「部分关键词」
+_TOKEN_SPLIT = re.compile(r"[\s,，、/|｜的]+")
+
+
 @dataclass
 class RelevanceTarget:
     names: list[str]  # 归一化后的片名/别名/英文名（已去掉季数）
     year: int | None
     season: int | None
+    tokens: tuple[str, ...] = ()  # 搜索词按空格 / 「的」切开的片段（如「靳东」「精英律师」）
+
+
+def _key(text: str) -> str:
+    return resource_key(SEASON_RE.sub("", YEAR_RE.sub("", text)))
+
+
+def query_tokens(*texts: str) -> tuple[str, ...]:
+    out: list[str] = []
+    for text in texts:
+        parts = [_key(p) for p in _TOKEN_SPLIT.split(text)]
+        if len([p for p in parts if p]) < 2:  # 只有一段就是整个片名，不算片段
+            continue
+        out += [p for p in parts if len(p) >= 2 and p not in out]
+    return tuple(out)
+
+
+def share_titles(text: str) -> list[str]:
+    """分享标题里用书名号标出的作品名（归一化）；很多分享 / 聚合页都这样写。"""
+    return [k for k in (_key(m) for m in BOOK_TITLE_RE.findall(text)) if len(k) >= 2]
 
 
 def build_target(parsed: ParsedResource, query: str, douban_year: str | None = None) -> RelevanceTarget:
@@ -81,11 +106,28 @@ def build_target(parsed: ParsedResource, query: str, douban_year: str | None = N
         names=names,
         year=min(year_set) if len(year_set) == 1 else None,
         season=min(season_set) if len(season_set) == 1 else None,
+        tokens=tuple(t for t in query_tokens(parsed.resource, query) if t not in names),
     )
 
 
+def _title_hits(title: str, target: RelevanceTarget) -> bool:
+    """书名号里的作品名是不是要找的那部：互相包含（「鬼吹灯之精绝古城」含「鬼吹灯」，
+    「精英律师」在「靳东精英律师」里）；只含演员名这类片段不算。"""
+    for n in target.names:
+        if n in title or (len(title) >= 2 and title in n):
+            return True
+    return any(len(t) >= 2 and (title == t or (len(t) >= 3 and t in title))
+               for t in target.tokens)
+
+
 def judge(link: QuarkLink, target: RelevanceTarget) -> None:
-    """规则判定并写回 `link.relevance` / `link.relevance_note`。"""
+    """规则判定并写回 `link.relevance` / `link.relevance_note`。
+
+    以夸克分享页上的真实标题和文件名为准（`share_title` / `files_preview`）；
+    搜索结果页的标题（`link.name`，可能是 GitHub 聚合页这类一页上百个链接的页面）
+    只在拿不到分享信息时参考，而且那时最多算「待核对」。
+    只有 `match` 才算相关；`uncertain` 不进「只看相关」、不触发订阅通知和自动转存。
+    """
     primary = [t for t in [link.share_title, *link.files_preview] if t]
     texts = primary or [link.name]
     joined = " ".join(texts)
@@ -101,10 +143,28 @@ def judge(link: QuarkLink, target: RelevanceTarget) -> None:
             link.relevance = "mismatch"
             link.relevance_note = f"季数不符：第{min(seasons)}季"
             return
+    if not target.names:
+        link.relevance, link.relevance_note = "uncertain", "没能确认是不是这部作品"
+        return
+    # 分享标题用书名号写明了作品名：以它为准，不是要找的就判不符
+    titles = share_titles(link.share_title or "")
+    if titles:
+        if any(_title_hits(t, target) for t in titles):
+            link.relevance, link.relevance_note = "match", None
+        else:
+            link.relevance, link.relevance_note = "mismatch", f"分享是《{titles[0]}》"
+        return
     normalized = [resource_key(t) for t in texts]
     if any(n in t for n in target.names for t in normalized):
+        if primary:
+            link.relevance, link.relevance_note = "match", None
+        else:
+            link.relevance, link.relevance_note = "uncertain", "只有搜索页标题，没读到分享内容"
+        return
+    hits = [t for t in target.tokens if len(t) >= 3 and any(t in x for x in normalized)]
+    if primary and hits:
         link.relevance, link.relevance_note = "match", None
-    else:
+    else:  # 可能是别名 / 英文名：留给 LLM 核对，核对前不算相关
         link.relevance, link.relevance_note = "uncertain", "标题里没找到片名"
 
 

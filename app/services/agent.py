@@ -192,7 +192,7 @@ class AgentState:
             c for c in self.candidates.values()
             if self.confirmed(c)
             and c.state == "valid"
-            and c.relevance != "mismatch"
+            and c.relevance == "match"  # 待核对的不算
             and meets_requirement(c.quality, self.required)
             and self.passes_filters(c)
         ]
