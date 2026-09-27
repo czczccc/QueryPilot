@@ -327,3 +327,9 @@ footer {
 .notif-list li.unread-item { color: inherit; font-weight: 600; }
 .subs-list li { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; padding: 0.35rem 0; }
 .subs-list li.muted { color: var(--muted); }
+
+.qr-dialog { border: none; border-radius: 12px; padding: 1.25rem; text-align: center; max-width: 320px; }
+.qr-dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
+.qr-box { display: flex; justify-content: center; }
+.qr-box svg { width: 220px; height: 220px; }
+.qr-tip { color: var(--muted); font-size: 0.85rem; }

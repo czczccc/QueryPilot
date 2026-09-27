@@ -40,6 +40,10 @@ class SaveError(Exception):
     """转存失败，`str(e)` 可直接展示给用户（不含任何凭证）。"""
 
 
+class LoginExpiredError(SaveError):
+    """cookie 已失效（夸克错误码 31001）。"""
+
+
 @dataclass
 class SaveResult:
     task_id: str
@@ -80,6 +84,8 @@ class QuarkSaver:
     @staticmethod
     def _check(body: dict, default: str) -> dict:
         code = body.get("code")
+        if code == 31001:
+            raise LoginExpiredError(ERROR_TEXT[31001])
         if code not in (0, None):
             raise SaveError(ERROR_TEXT.get(code, f"{default}（夸克错误码 {code}）"))
         return body.get("data") or {}
