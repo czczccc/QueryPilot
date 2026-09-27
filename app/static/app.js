@@ -21,12 +21,26 @@ let hideDead = true;
 let minRes = "";
 let lastQuery = "";
 
+function getClientId() {
+  try {
+    let id = localStorage.getItem("qp_client_id");
+    if (!id) {
+      id = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/[^0-9a-z]/gi, "");
+      localStorage.setItem("qp_client_id", id);
+    }
+    return id;
+  } catch (_) {
+    return null; // 存储不可用：不带偏好
+  }
+}
+const clientId = getClientId();
+
 const RES_RANK = { SD: 1, "720p": 2, "1080p": 3, "2160p": 4 };
 const RES_LABEL = { SD: "标清", "720p": "720p", "1080p": "1080p", "2160p": "4K" };
 
 function visibleLinks(links) {
   return links.filter((l) => {
-    if (hideDead && l.state === "invalid") return false;
+    if (hideDead && (l.state === "invalid" || l.relevance === "mismatch")) return false;
     if (minRes) {
       const res = l.quality && l.quality.resolution;
       // 未识别出分辨率的有效链接保留（可能是好资源，只是文件名没写）
@@ -182,6 +196,25 @@ function renderLinks(links) {
     setText(stateBadge, stateText);
     head.appendChild(stateBadge);
     for (const b of qualityBadges(l.quality)) head.appendChild(b);
+    if (l.state === "valid" && l.relevance === "mismatch") {
+      const rel = document.createElement("span");
+      rel.className = "badge badge-dead";
+      setText(rel, "片名不符");
+      if (l.relevance_note) rel.title = l.relevance_note;
+      head.appendChild(rel);
+    } else if (l.state === "valid" && l.relevance === "uncertain") {
+      const rel = document.createElement("span");
+      rel.className = "badge badge-unknown";
+      setText(rel, "待核对");
+      rel.title = l.relevance_note || "没能确认是不是这部作品";
+      head.appendChild(rel);
+    }
+    if (l.copy_count) {
+      const cc = document.createElement("span");
+      cc.className = "badge badge-tag";
+      setText(cc, l.copy_count + " 次复制");
+      head.appendChild(cc);
+    }
     if (l.from_memory) {
       const mem = document.createElement("span");
       mem.className = "badge badge-tag";
@@ -207,6 +240,16 @@ function renderLinks(links) {
     setText(meta, pwdTxt + "　|　" + l.time + "　|　来源: " + l.source);
     li.appendChild(meta);
 
+    if (l.share_title || (l.files_preview && l.files_preview.length)) {
+      const fp = document.createElement("div");
+      fp.className = "files-preview";
+      const parts = [];
+      if (l.share_title) parts.push("分享标题：" + l.share_title);
+      if (l.files_preview && l.files_preview.length) parts.push("内容：" + l.files_preview.join("、"));
+      setText(fp, parts.join("　|　"));
+      li.appendChild(fp);
+    }
+
     if (l.state === "invalid") {
       li.classList.add("result-dead");
     }
@@ -223,6 +266,12 @@ function renderLinks(links) {
         showStatus("已复制: " + link, "info");
         setTimeout(hideStatus, 2000);
       });
+      // 反馈：被复制过的链接下次排序更靠前（失败不影响使用）
+      fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ share: l.share }),
+      }).catch(() => {});
     });
     row.appendChild(copyOne);
     li.appendChild(row);
@@ -264,8 +313,12 @@ const TOOL_TEXT = {
     (o.known_invalid_skipped ? "，其中已知失效 " + o.known_invalid_skipped + " 条" : ""),
   verify: (a, o) =>
     "验证 " + (o.verified || 0) + " 条 → 有效 " + (o.valid || 0) + "、失效 " +
-    (o.invalid || 0) + "、待确认 " + (o.unknown || 0) + "；满足要求累计 " +
+    (o.invalid || 0) + "、待确认 " + (o.unknown || 0) +
+    (o.wrong_title ? "、片名不符 " + o.wrong_title : "") + "；满足要求累计 " +
     (o.matching_total || 0) + " 条",
+  judge_relevance: (a, o) =>
+    "AI 核对 " + (a.count || 0) + " 条标题不明确的链接 → 相关 " + (o.match || 0) +
+    "、不相关 " + (o.mismatch || 0) + "；满足要求累计 " + (o.matching_total || 0) + " 条",
   finish: (a) => "结束：" + (a.reason || ""),
 };
 
@@ -335,7 +388,9 @@ function doSearch(query, refresh = false) {
   showStatus("agent 正在搜索并验证链接，通常需要 20~90 秒，过程会实时显示在下方", "loading");
   submitBtn.disabled = true;
 
-  const url = "/api/agent/stream?query=" + encodeURIComponent(query) + (refresh ? "&refresh=true" : "");
+  const url = "/api/agent/stream?query=" + encodeURIComponent(query) +
+    (refresh ? "&refresh=true" : "") +
+    (clientId ? "&client_id=" + encodeURIComponent(clientId) : "");
   const source = new EventSource(url);
   currentSource = source;
   let finished = false;
@@ -386,3 +441,53 @@ document.querySelectorAll(".example").forEach((btn) => {
     doSearch(btn.dataset.query);
   });
 });
+
+
+// ---- 偏好设置 ----
+const prefsPanel = document.getElementById("prefs-panel");
+const prefMinRes = document.getElementById("pref-min-res");
+const prefSub = document.getElementById("pref-sub");
+const prefHdr = document.getElementById("pref-hdr");
+const prefsSaved = document.getElementById("prefs-saved");
+
+function applyDefaultFilter(value) {
+  minRes = value || "";
+  document.getElementById("min-res").value = minRes;
+}
+
+async function loadPrefs() {
+  if (!clientId) return;
+  try {
+    const resp = await fetch("/api/prefs?client_id=" + encodeURIComponent(clientId));
+    if (!resp.ok) return; // 记忆未开启：不显示偏好设置
+    const p = await resp.json();
+    prefMinRes.value = p.min_resolution || "";
+    prefSub.checked = !!p.prefer_subtitle;
+    prefHdr.checked = !!p.prefer_hdr;
+    applyDefaultFilter(p.min_resolution);
+    prefsPanel.hidden = false;
+  } catch (_) { /* 网络问题：保持默认 */ }
+}
+
+async function savePrefs() {
+  const body = {
+    min_resolution: prefMinRes.value || null,
+    prefer_subtitle: prefSub.checked,
+    prefer_hdr: prefHdr.checked,
+  };
+  try {
+    const resp = await fetch("/api/prefs?client_id=" + encodeURIComponent(clientId), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    setText(prefsSaved, resp.ok ? "已保存" : "保存失败");
+    if (resp.ok) applyDefaultFilter(body.min_resolution);
+  } catch (_) {
+    setText(prefsSaved, "保存失败");
+  }
+  setTimeout(() => setText(prefsSaved, ""), 2000);
+}
+
+[prefMinRes, prefSub, prefHdr].forEach((el) => el.addEventListener("change", savePrefs));
+loadPrefs();

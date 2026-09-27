@@ -107,7 +107,7 @@ async def verify_quark(
     share_id: str, client: httpx.AsyncClient, timeout: float = 8.0, pwd: str | None = None
 ) -> tuple[int | None, str]:
     """严格验证夸克分享链接，返回 `(壳页状态码, 状态)`（兼容旧接口）。"""
-    code, state, _ = await verify_quark_files(share_id, client, timeout, pwd)
+    code, state, _, _ = await verify_quark_files(share_id, client, timeout, pwd)
     return code, state
 
 
@@ -142,8 +142,8 @@ async def _fetch_detail(
 
 async def verify_quark_files(
     share_id: str, client: httpx.AsyncClient, timeout: float = 8.0, pwd: str | None = None
-) -> tuple[int | None, str, list[dict]]:
-    """严格验证夸克分享链接，返回 `(壳页状态码, 状态, 文件列表)`。
+) -> tuple[int | None, str, list[dict], str | None]:
+    """严格验证夸克分享链接，返回 `(壳页状态码, 状态, 文件列表, 分享标题)`。
 
     状态：
     - `valid`   分享存在且有文件列表（可正常访问）
@@ -172,25 +172,26 @@ async def verify_quark_files(
             timeout=timeout,
         )
         if resp.status_code == 404:
-            return 404, "invalid", []
+            return 404, "invalid", [], None
         resp.raise_for_status()
         data = resp.json()
     except (httpx.HTTPError, ValueError):
-        return None, "unknown", []
+        return None, "unknown", [], None
     stoken = (data.get("data") or {}).get("stoken")
     if not stoken:
-        return 200, "invalid" if data.get("code") == 41006 else "unknown", []
+        return 200, "invalid" if data.get("code") == 41006 else "unknown", [], None
 
     # 2) 分享详情：有效分享返回文件列表
     try:
         detail = await _fetch_detail(share_id, stoken, "0", client, headers, timeout)
     except (httpx.HTTPError, ValueError):
-        return 200, "unknown", []
+        return 200, "unknown", [], None
 
     lst = (detail.get("data") or {}).get("list") or []
-    share_status = (detail.get("data") or {}).get("share", {}).get("status")
-    if not (lst and share_status == 1):
-        return 200, "invalid", []
+    share = (detail.get("data") or {}).get("share") or {}
+    if not (lst and share.get("status") == 1):
+        return 200, "invalid", [], None
+    title = share.get("title") if isinstance(share.get("title"), str) else None
 
     files = [f for f in lst if isinstance(f, dict)]
     # 3) 顶层全是文件夹时展开第一个（失败不影响有效性判定）
@@ -202,7 +203,7 @@ async def verify_quark_files(
             files += [f for f in (sub.get("data") or {}).get("list") or [] if isinstance(f, dict)]
         except (httpx.HTTPError, ValueError):
             pass
-    return 200, "valid", files
+    return 200, "valid", files, title
 
 
 # ---------------- 引擎：夸克云搜（始终启用） ----------------

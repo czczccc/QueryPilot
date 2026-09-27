@@ -120,6 +120,14 @@ header h1 {
 .status[data-kind="error"] { color: var(--error); border-color: var(--error); }
 .status[data-kind="warn"] { background: var(--warn-bg); border-color: #f59e0b; }
 
+/* ---- 偏好 ---- */
+.prefs { margin: 0.75rem 0 0; font-size: 0.9rem; }
+.prefs summary { cursor: pointer; color: var(--muted); }
+.prefs-body { display: flex; flex-wrap: wrap; gap: 0.75rem 1.25rem; align-items: center; margin-top: 0.5rem; }
+.prefs-hint { margin: 0.4rem 0 0; color: var(--muted); font-size: 0.8rem; }
+.prefs-saved { color: var(--muted); font-size: 0.8rem; }
+.files-preview { color: var(--muted); font-size: 0.8rem; margin-top: 0.25rem; overflow-wrap: anywhere; }
+
 /* ---- agent 过程 ---- */
 .agent-steps {
   margin: 0;

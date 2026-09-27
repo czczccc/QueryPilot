@@ -20,6 +20,7 @@ from app.models import (
     QuarkSearchResponse,
     SearchMetrics,
     SearchRequest,
+    UserPrefs,
 )
 from app.providers.base import ProviderError, SearchProvider
 from app.services.douban import extract_douban_id, fetch_douban_meta
@@ -36,6 +37,7 @@ from app.services.quark import (
     search_qkyunso,
     verify_quark_files,
 )
+from app.services.relevance import build_target, judge
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +106,11 @@ class QuarkSearchService:
         outcome = await self._parser.parse(query)
         return outcome.parsed, outcome.fallback_used, douban_meta
 
+    async def prefs_for(self, client_id: str | None) -> UserPrefs:
+        if not (self._store and client_id):
+            return UserPrefs()
+        return await self._store.get_prefs(client_id)
+
     def new_providers(self) -> dict[str, ProviderStatus]:
         providers = {"tavily": ProviderStatus(name="tavily")}
         if self._use_qkyunso:
@@ -135,6 +142,8 @@ class QuarkSearchService:
         started = time.monotonic()
         request_id = uuid.uuid4().hex
         parsed, fallback_used, douban_meta = await self.prepare(req.query)
+        prefs = await self.prefs_for(req.client_id)
+        target = build_target(parsed, req.query, douban_meta.year if douban_meta else None)
         providers = self.new_providers()
 
         # 记忆：先取该资源下记住的有效链接
@@ -168,7 +177,9 @@ class QuarkSearchService:
 
         # 新鲜的记忆链接不再复验，其余并发验证
         await self.verify([link for link in final if not is_fresh(link, fresh_after)])
-        sort_links(final)
+        for link in final:
+            judge(link, target)
+        sort_links(final, prefs)
         await self.remember(key, req.query, final, served_from_memory)
 
         metrics = SearchMetrics(
@@ -247,12 +258,16 @@ class QuarkSearchService:
 
         async def check(link: QuarkLink) -> None:
             async with sem:
-                link.http, link.state, files = await verify_quark_files(
+                link.http, link.state, files, title = await verify_quark_files(
                     link.share, self._client, timeout=8.0, pwd=link.pwd
                 )
                 link.last_checked = time.time()
                 if link.state == "valid":
-                    link.quality = parse_quality(files, link.name)
+                    link.quality = parse_quality(files, title or link.name)
+                    link.share_title = title
+                    link.files_preview = [
+                        str(f.get("file_name")) for f in files[:5] if f.get("file_name")
+                    ]
 
         await asyncio.gather(*(check(link) for link in links))
 
@@ -327,14 +342,31 @@ def dedupe(links: list[QuarkLink]) -> list[QuarkLink]:
     return list(uniq.values())
 
 
-def sort_links(links: list[QuarkLink]) -> None:
-    """有效优先，未知居中，失效最后；同状态按质量分（高→低），再按置信度。"""
+def preference_score(link: QuarkLink, prefs: UserPrefs | None) -> int:
+    """质量分 + 偏好加分（偏好字幕 / HDR 且链接满足时各 +8）。"""
+    q = link.quality
+    if q is None:
+        return 0
+    score = q.score
+    if prefs and prefs.prefer_subtitle and q.has_subtitle:
+        score += 8
+    if prefs and prefs.prefer_hdr and q.hdr:
+        score += 8
+    return score
+
+
+def sort_links(links: list[QuarkLink], prefs: UserPrefs | None = None) -> None:
+    """有效优先，未知居中，失效最后；同状态内：相关 > 待定 > 不相关，
+    再按质量分（含偏好加分）、被复制次数、置信度。"""
     state_rank = {"valid": 0, "unknown": 1, "invalid": 2}
+    relevance_rank = {"match": 0, "uncertain": 1, "mismatch": 2}
     conf_rank = {"高": 0, "中": 1, "低": 2}
     links.sort(
         key=lambda link: (
             state_rank.get(link.state, 1),
-            -(link.quality.score if link.quality else 0),
+            relevance_rank.get(link.relevance, 1),
+            -preference_score(link, prefs),
+            -link.copy_count,
             conf_rank.get(link.conf, 1),
             link.share,
         )

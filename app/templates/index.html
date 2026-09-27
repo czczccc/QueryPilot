@@ -32,6 +32,25 @@
       </form>
     </section>
 
+    <details id="prefs-panel" class="prefs" hidden>
+      <summary>偏好设置</summary>
+      <div class="prefs-body">
+        <label class="filter-label">
+          默认最低清晰度
+          <select id="pref-min-res">
+            <option value="">不限</option>
+            <option value="720p">720p</option>
+            <option value="1080p">1080p</option>
+            <option value="2160p">4K</option>
+          </select>
+        </label>
+        <label class="filter-label"><input type="checkbox" id="pref-sub"> 优先带字幕</label>
+        <label class="filter-label"><input type="checkbox" id="pref-hdr"> 优先 HDR</label>
+        <span id="prefs-saved" class="prefs-saved" aria-live="polite"></span>
+      </div>
+      <p class="prefs-hint">agent 会把默认清晰度当作搜索目标，偏好的字幕/HDR 资源排在前面。偏好保存在服务器上，对应当前浏览器。</p>
+    </details>
+
     <p id="status" class="status" role="status" aria-live="polite" hidden></p>
 
     <section id="agent-panel" class="card agent-panel" hidden aria-label="搜索过程">
@@ -44,7 +63,7 @@
       <div id="metrics" class="metrics" hidden></div>
       <div id="link-actions" class="link-actions" hidden>
         <label class="filter-label">
-          <input type="checkbox" id="hide-dead" checked> 只看有效链接
+          <input type="checkbox" id="hide-dead" checked> 只看有效且相关的链接
         </label>
         <label class="filter-label">
           最低清晰度

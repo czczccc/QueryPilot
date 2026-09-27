@@ -217,7 +217,7 @@ async def test_verify_quark_network_error_unknown():
 
 async def test_verify_quark_files_returns_list():
     client = httpx.AsyncClient(transport=httpx.MockTransport(_verify_ok_handler()))
-    code, state, files = await verify_quark_files("abc1234567", client, timeout=5)
+    code, state, files, _ = await verify_quark_files("abc1234567", client, timeout=5)
     assert (code, state) == (200, "valid")
     assert files == [{"file_name": "电影.mkv"}]
 
@@ -234,7 +234,7 @@ async def test_verify_quark_files_expands_single_folder():
         return httpx.Response(200, json={"code": 0, "data": {"share": {"status": 1}, "list": top}})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    _, state, files = await verify_quark_files("abc1234567", client, timeout=5)
+    _, state, files, _ = await verify_quark_files("abc1234567", client, timeout=5)
     assert state == "valid"
     assert [f["file_name"] for f in files] == ["流浪地球2", "流浪地球2.2160p.mkv"]
 
@@ -249,6 +249,6 @@ async def test_verify_quark_files_folder_expand_failure_still_valid():
         return httpx.Response(500)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    _, state, files = await verify_quark_files("abc1234567", client, timeout=5)
+    _, state, files, _ = await verify_quark_files("abc1234567", client, timeout=5)
     assert state == "valid"
     assert len(files) == 1

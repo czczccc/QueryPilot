@@ -9,13 +9,14 @@ sqlite3 是同步库，所有公开方法都通过 `asyncio.to_thread` 调用，
 """
 
 import asyncio
+import json
 import re
 import sqlite3
 import threading
 import time
 from pathlib import Path
 
-from app.models import QualityInfo, QuarkLink
+from app.models import QualityInfo, QuarkLink, UserPrefs
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS links (
@@ -46,7 +47,19 @@ CREATE TABLE IF NOT EXISTS searches (
     ts           REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_links_state_checked ON links(state, last_checked);
+CREATE TABLE IF NOT EXISTS prefs (
+    client_id TEXT PRIMARY KEY,
+    data      TEXT NOT NULL,
+    updated   REAL NOT NULL
+);
 """
+
+# 旧库升级：后续版本新增的列（ALTER TABLE 只加不删）
+_MIGRATIONS = [
+    ("links", "share_title", "TEXT"),
+    ("links", "files_preview", "TEXT"),
+    ("links", "copy_count", "INTEGER NOT NULL DEFAULT 0"),
+]
 
 _PUNCT_RE = re.compile(r"[\s\-_·:：,，.。!！?？'\"“”‘’()（）\[\]【】《》<>]+")
 
@@ -69,6 +82,10 @@ class LinkStore:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            for table, column, ddl in _MIGRATIONS:
+                cols = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+                if column not in cols:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
             self._conn.commit()
 
     def close(self) -> None:
@@ -90,6 +107,9 @@ class LinkStore:
             http=row["http"],
             state=row["state"],
             quality=quality,
+            share_title=row["share_title"],
+            files_preview=json.loads(row["files_preview"]) if row["files_preview"] else [],
+            copy_count=row["copy_count"],
             from_memory=True,
             last_checked=row["last_checked"],
         )
@@ -129,13 +149,16 @@ class LinkStore:
                 self._conn.execute(
                     """
                     INSERT INTO links (share, pwd, name, source, time, conf, state, http,
-                                       quality, first_seen, last_checked, fail_count)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                       quality, first_seen, last_checked, fail_count,
+                                       share_title, files_preview)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(share) DO UPDATE SET
                         pwd = COALESCE(excluded.pwd, links.pwd),
                         state = excluded.state,
                         http = excluded.http,
                         quality = COALESCE(excluded.quality, links.quality),
+                        share_title = COALESCE(excluded.share_title, links.share_title),
+                        files_preview = COALESCE(excluded.files_preview, links.files_preview),
                         last_checked = excluded.last_checked,
                         fail_count = CASE WHEN excluded.state = 'invalid'
                                           THEN links.fail_count + 1 ELSE 0 END
@@ -144,6 +167,9 @@ class LinkStore:
                         link.share, link.pwd, link.name, link.source, link.time, link.conf,
                         link.state, link.http, quality, now, now,
                         1 if link.state == "invalid" else 0,
+                        link.share_title,
+                        json.dumps(link.files_preview, ensure_ascii=False)
+                        if link.files_preview else None,
                     ),
                 )
                 self._conn.execute(
@@ -182,6 +208,31 @@ class LinkStore:
             )
             self._conn.commit()
 
+    def _record_copy(self, share: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE links SET copy_count = copy_count + 1 WHERE share = ?", (share,)
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def _get_prefs(self, client_id: str) -> UserPrefs:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT data FROM prefs WHERE client_id = ?", (client_id,)
+            ).fetchone()
+        return UserPrefs.model_validate_json(row["data"]) if row else UserPrefs()
+
+    def _set_prefs(self, client_id: str, prefs: UserPrefs, now: float) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO prefs (client_id, data, updated) VALUES (?, ?, ?) "
+                "ON CONFLICT(client_id) DO UPDATE SET data = excluded.data, "
+                "updated = excluded.updated",
+                (client_id, prefs.model_dump_json(), now),
+            )
+            self._conn.commit()
+
     def _stats(self) -> dict[str, int]:
         with self._lock:
             rows = self._conn.execute(
@@ -217,6 +268,16 @@ class LinkStore:
 
     async def update_state(self, link: QuarkLink) -> None:
         await asyncio.to_thread(self._update_state, link, time.time())
+
+    async def record_copy(self, share: str) -> bool:
+        """用户复制了某条链接：计数 +1（排序时作为「被认可」的信号）。"""
+        return await asyncio.to_thread(self._record_copy, share)
+
+    async def get_prefs(self, client_id: str) -> UserPrefs:
+        return await asyncio.to_thread(self._get_prefs, client_id)
+
+    async def set_prefs(self, client_id: str, prefs: UserPrefs) -> None:
+        await asyncio.to_thread(self._set_prefs, client_id, prefs, time.time())
 
     async def stats(self) -> dict[str, int]:
         return await asyncio.to_thread(self._stats)
