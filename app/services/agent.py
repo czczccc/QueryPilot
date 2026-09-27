@@ -43,7 +43,13 @@ from app.services.conversation import (
 )
 from app.services.memory import resource_key
 from app.services.quality import meets_requirement, required_resolution
-from app.services.relevance import RelevanceTarget, build_target, judge, llm_judge
+from app.services.relevance import (
+    RelevanceTarget,
+    add_aliases,
+    build_target,
+    judge,
+    llm_judge,
+)
 from app.services.search import (
     FRESH_HOURS,
     QuarkSearchService,
@@ -383,9 +389,12 @@ class SearchAgent:
         max_seconds: float = MAX_SECONDS,
         conversations: ConversationStore | None = None,
         cache_minutes: float = 0,
+        lookup=None,
     ) -> None:
-        """`cache_minutes`：同一句搜索（同样的偏好）在这段时间内直接复用上次结果，不再调 LLM。"""
+        """`cache_minutes`：同一句搜索（同样的偏好）在这段时间内直接复用上次结果，不再调 LLM。
+        `lookup`：MetadataLookup，用 TMDB / 豆瓣的标准名、原名补充相关性判定的片名。"""
         self._service = service
+        self.lookup = lookup
         self._cache_seconds = cache_minutes * 60
         self._cache: OrderedDict[str, tuple[float, AgentSearchResponse, Conversation]] = (
             OrderedDict()
@@ -473,6 +482,9 @@ class SearchAgent:
                 fresh_after=time.time() - fresh_hours * 3600,
             )
             session_id, history = ConversationStore.new_id(), [req.query]
+            if self.lookup is not None:
+                year = str(state.target.year) if state.target.year else None
+                add_aliases(state.target, await self.lookup(parsed.resource, year))
         providers = self._service.new_providers()
         key = resource_key(parsed.resource)
 

@@ -111,6 +111,11 @@ class SubscriptionWatcher:
             SearchRequest(query=sub.query, refresh=True, client_id=client_id), fresh_hours=0
         )
         required = sub.resolution or resp.required_resolution
+        # 按订阅的条目（片名、年份、季）再判一遍相关性：只有确认是这部的才通知 / 转存
+        target = self._target(sub)
+        for lk in resp.links:
+            if lk.relevance == "match":
+                judge(lk, target)
         links = [lk for lk in resp.links if passes_filters(lk, sub.include, sub.exclude)]
         episodes, score, res, most, best = snapshot(links)
         if sub.media:
@@ -144,6 +149,8 @@ class SubscriptionWatcher:
                 ))
             sub.best_score = score
             sub.best_resolution = res
+        if not most:  # 没有确认相关的：拿不准的只提醒一次，请用户自己核对，不自动转存
+            notes += await self._maybe(sub, links)
         ok = [lk for lk in links if lk.state == "valid" and lk.quality
               and lk.relevance == "match" and meets_requirement(lk.quality, required)]
         if sub.auto_save and self.auto_saver is not None:
@@ -157,6 +164,29 @@ class SubscriptionWatcher:
         if notes:
             await self._push(notes)
         return notes
+
+    @staticmethod
+    def _target(sub: Subscription):
+        name = strip_season(sub.resource)
+        target = build_target(
+            ParsedResource(resource=name, search_suggestions=[name]), sub.resource, sub.year,
+        )
+        if sub.media == "tv" and sub.season:
+            target.season = sub.season
+        return target
+
+    async def _maybe(self, sub: Subscription, links: list[QuarkLink]) -> list[Note]:
+        unsure = [lk for lk in links if lk.state == "valid" and lk.quality
+                  and lk.relevance == "uncertain"]
+        if not unsure:
+            return []
+        pick = max(unsure, key=lambda lk: (lk.quality.video_count, lk.quality.score))
+        if pick.share in await self._store.notified_shares(sub.id):
+            return []
+        title = pick.share_title or pick.name
+        message = (f"《{sub.resource}》找到一个可能相关的资源「{title}」，没能确认是这部，"
+                   f"请自己核对：{_link_text(pick)}")
+        return [("maybe", message, pick.share)]
 
     async def _auto_save(
         self, client_id: str, sub: Subscription, movie: bool, ok: list[QuarkLink],
