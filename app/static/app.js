@@ -379,9 +379,12 @@ const TOOL_NAME = {
   judge_relevance: "AI 核对",
   finish: "完成",
   interpret_followup: "追问",
+  cache: "缓存",
 };
 
 const TOOL_TEXT = {
+  cache: (a) => "复用最近结果：" + (a.minutes_ago ? a.minutes_ago + " 分钟前" : "刚刚") +
+    "有人搜过同样的内容，直接用那次验证过的链接",
   recall_memory: (a, o) =>
     "查记忆：记住 " + (o.remembered_valid || 0) + " 条有效链接，其中 " +
     (o.fresh || 0) + " 条近期验证过",
@@ -530,11 +533,46 @@ function setBusy(busy) {
   if (busy) startTimer(); else stopTimer();
 }
 
-function doSearch(query, refresh = false, followupOf = null) {
+// 自己解析 SSE（而不是 EventSource），这样能拿到 401/403/429 的状态码和提示
+async function readSSE(resp, onEvent) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    let idx;
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const chunk = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      let event = "message";
+      const data = [];
+      for (const line of chunk.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+      }
+      if (data.length) onEvent(event, data.join("\n"));
+    }
+  }
+}
+
+function searchFailed(title, detail) {
+  agentSteps.querySelectorAll(".pending").forEach((p) => p.remove());
+  setText(agentTitle, title);
+  showStatus(detail, "error");
+}
+
+async function doSearch(query, refresh = false, followupOf = null) {
+  if (meState.banned) {
+    showBanned(meState.banned);
+    return;
+  }
   lastQuery = query;
   hideFormError();
+  hideQuotaNote();
   resultsSection.hidden = true;
-  if (currentSource) currentSource.close();
+  if (currentSource) currentSource.abort();
   document.body.classList.add("searched");
 
   agentPanel.hidden = false;
@@ -551,39 +589,83 @@ function doSearch(query, refresh = false, followupOf = null) {
     (refresh ? "&refresh=true" : "") +
     (clientId ? "&client_id=" + encodeURIComponent(clientId) : "") +
     (followupOf ? "&session_id=" + encodeURIComponent(followupOf) : "");
-  const source = new EventSource(url);
-  currentSource = source;
+  const controller = new AbortController();
+  currentSource = controller;
   let finished = false;
-
+  controller.signal.addEventListener("abort", () => clearTimeout(timer));
   const done = () => {
     finished = true;
-    source.close();
     clearTimeout(timer);
-    setBusy(false);
+    if (currentSource === controller) setBusy(false);
   };
   const timer = setTimeout(() => {
     if (finished) return;
+    controller.abort();
     done();
-    showStatus("搜索超时（超过 150 秒），请稍后重试或换一个更精确的资源名。", "error");
+    searchFailed("搜索超时", "搜索超时（超过 150 秒），请稍后重试或换一个更精确的资源名。");
   }, 150000);
 
-  source.addEventListener("step", (e) => renderStep(JSON.parse(e.data)));
-  source.addEventListener("result", (e) => {
+  let resp;
+  try {
+    resp = await fetch(url, { signal: controller.signal, headers: { Accept: "text/event-stream" } });
+  } catch (_) {
+    if (finished || controller.signal.aborted) return;
     done();
-    hideStatus();
-    renderResult(JSON.parse(e.data));
-  });
-  source.addEventListener("error", (e) => {
-    if (finished) return;
+    searchFailed("搜索中断", "网络连接失败，请检查网络后重试。");
+    return;
+  }
+
+  if (!resp.ok) {
     done();
-    agentSteps.querySelectorAll(".pending").forEach((p) => p.remove());
-    setText(agentTitle, "搜索中断");
-    let detail = "搜索失败或请求过于频繁，请稍后重试。";
-    if (e.data) {
-      try { detail = JSON.parse(e.data).detail || detail; } catch (_) { /* 保持默认提示 */ }
+    const body = await resp.json().catch(() => ({}));
+    const detail = typeof body.detail === "string" ? body.detail : "搜索失败，请稍后重试。";
+    if (resp.status === 401) {
+      // 未登录免费次数用完：直接引导扫码登录，登录成功后自动重新搜索
+      searchFailed("需要登录", detail);
+      if (meState.login && await quarkLogin(detail)) doSearch(query, refresh, followupOf);
+    } else if (resp.status === 403) {
+      searchFailed("无法搜索", detail);
+      showBanned(detail);
+    } else if (resp.status === 429) {
+      searchFailed("请求太频繁", detail);
+    } else {
+      searchFailed("搜索中断", detail);
     }
-    showStatus(detail, "error");
-  });
+    loadMe();
+    return;
+  }
+
+  try {
+    await readSSE(resp, (event, data) => {
+      if (finished) return;
+      if (event === "step") renderStep(JSON.parse(data));
+      else if (event === "quota") {
+        const q = JSON.parse(data);
+        renderQuota(q);
+        showQuotaNote(q);
+      } else if (event === "result") {
+        done();
+        hideStatus();
+        const result = JSON.parse(data);
+        renderResult(result);
+        if (result.quota) {
+          renderQuota(result.quota);
+          showQuotaNote(result.quota);
+        }
+      } else if (event === "error") {
+        done();
+        let detail = "搜索失败，请稍后重试。";
+        try { detail = JSON.parse(data).detail || detail; } catch (_) { /* 保持默认提示 */ }
+        searchFailed("搜索中断", detail);
+      }
+    });
+  } catch (_) {
+    if (controller.signal.aborted) return;
+  }
+  if (!finished) {
+    done();
+    searchFailed("搜索中断", "连接意外断开，请稍后重试。");
+  }
 }
 
 form.addEventListener("submit", (e) => {
@@ -692,31 +774,119 @@ async function loadSubs() {
 
     notifList.innerHTML = "";
     notes.slice(0, 10).forEach((n) => {
-      const li = el("li", n.read ? "" : "unread-item", formatTime(n.ts) + "　" + n.message);
+      const li = el("li", (n.read ? "" : "unread-item ") + "kind-" + n.kind, formatTime(n.ts) + "　" + n.message);
       notifList.appendChild(li);
     });
 
     subsList.innerHTML = "";
     if (subs.length === 0) subsList.appendChild(el("li", "muted", "还没有订阅。"));
-    subs.forEach((sub) => {
-      const li = el("li");
-      const res = RES_LABEL[sub.best_resolution] || "";
-      const text = el("span", "", "《" + sub.resource + "》" +
-        (sub.best_episodes ? "　已见 " + sub.best_episodes + " 集" : "") +
-        (res ? "　最高 " + res : "") +
-        "　" + (sub.last_checked ? "上次检查 " + formatTime(sub.last_checked) : "尚未检查"));
-      const del = el("button", "secondary-btn small", "取消");
-      del.type = "button";
-      del.addEventListener("click", async () => {
-        del.disabled = true;
-        await fetch("/api/subscriptions/" + sub.id + "?" + cidParam(), { method: "DELETE" }).catch(() => {});
-        toast("已取消订阅《" + sub.resource + "》");
-        loadSubs();
-      });
-      li.append(text, del);
-      subsList.appendChild(li);
-    });
+    subs.forEach((sub) => subsList.appendChild(subItem(sub)));
   } catch (_) { /* 网络问题：下次再试 */ }
+}
+
+// 一条订阅：标题与进度、自动转存开关、登录失效提示、转存记录、取消
+function subItem(sub) {
+  const li = el("li", "sub-item");
+  const res = RES_LABEL[sub.best_resolution] || "";
+  const head = el("div", "sub-head");
+  const info = el("div", "sub-info");
+  info.append(el("b", "sub-title", "《" + sub.resource + "》"), el("span", "sub-meta",
+    [sub.best_episodes ? "已见 " + sub.best_episodes + " 集" : "", res ? "最高 " + res : "",
+      sub.last_checked ? "上次检查 " + formatTime(sub.last_checked) : "尚未检查"].filter(Boolean).join(" · ")));
+  const del = el("button", "ghost-btn small", "取消订阅");
+  del.type = "button";
+  del.addEventListener("click", async () => {
+    del.disabled = true;
+    await fetch("/api/subscriptions/" + sub.id + "?" + cidParam(), { method: "DELETE" }).catch(() => {});
+    toast("已取消订阅《" + sub.resource + "》");
+    loadSubs();
+  });
+  head.append(info, del);
+  li.appendChild(head);
+
+  const row = el("div", "sub-row");
+  const sw = el("label", "switch small");
+  const cb = el("input");
+  cb.type = "checkbox";
+  cb.checked = !!sub.auto_save;
+  sw.append(cb, el("span", "switch-track"), "有新集自动转存");
+  sw.querySelector(".switch-track").setAttribute("aria-hidden", "true");
+  sw.title = "检查到新集时，自动把网盘里还没有的集转存到你的夸克网盘";
+  cb.addEventListener("change", async () => {
+    const want = cb.checked;
+    cb.disabled = true;
+    try {
+      const resp = await fetch("/api/subscriptions/" + sub.id + "?" + cidParam(), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ auto_save: want }),
+      });
+      const body = await resp.json().catch(() => ({}));
+      if (resp.ok) {
+        toast(want ? "已开启《" + sub.resource + "》自动转存" : "已关闭《" + sub.resource + "》自动转存");
+        loadSubs();
+      } else {
+        cb.checked = !want;
+        if (resp.status === 401 && meState.login) {
+          if (await quarkLogin(body.detail || "自动转存需要先扫码登录夸克")) {
+            cb.checked = want;
+            cb.dispatchEvent(new Event("change"));
+          }
+        } else {
+          toast(body.detail || "设置失败", "error");
+        }
+      }
+    } catch (_) {
+      cb.checked = !want;
+      toast("设置失败，请稍后重试", "error");
+    }
+    cb.disabled = false;
+  });
+  row.appendChild(sw);
+
+  if (sub.auto_save) {
+    const logBtn = el("button", "link-btn", "转存记录");
+    logBtn.type = "button";
+    const log = el("ul", "save-log");
+    log.hidden = true;
+    logBtn.addEventListener("click", async () => {
+      if (!log.hidden) { log.hidden = true; return; }
+      log.hidden = false;
+      log.innerHTML = "";
+      log.appendChild(el("li", "muted", "加载中…"));
+      try {
+        const resp = await fetch("/api/subscriptions/" + sub.id + "/saves?" + cidParam());
+        const rows = resp.ok ? await resp.json() : [];
+        log.innerHTML = "";
+        if (!rows.length) log.appendChild(el("li", "muted", "还没有自动转存过；发现新集时会自动存进你的网盘。"));
+        rows.slice(0, 20).forEach((r) => {
+          const item = el("li", r.ok ? "ok" : "fail");
+          item.append(el("span", "save-log-ico", r.ok ? "✓" : "!"), el("span", "save-log-time", formatTime(r.ts)),
+            el("span", "save-log-msg", r.ok
+              ? (r.file_count ? r.file_count + " 个文件 → " : "") + (r.folder || "网盘默认目录")
+              : (r.message || "转存失败")));
+          log.appendChild(item);
+        });
+      } catch (_) {
+        log.innerHTML = "";
+        log.appendChild(el("li", "fail", "记录加载失败"));
+      }
+    });
+    row.appendChild(logBtn);
+    li.appendChild(row);
+    if (sub.auto_save_status === "login_expired") {
+      const warn = el("button", "sub-warn", "夸克登录已失效，自动转存已暂停 · 点此重新扫码");
+      warn.type = "button";
+      warn.addEventListener("click", async () => {
+        if (await quarkLogin("重新扫码后，《" + sub.resource + "》的自动转存会自动恢复")) loadSubs();
+      });
+      li.appendChild(warn);
+    }
+    li.appendChild(log);
+  } else {
+    li.appendChild(row);
+  }
+  return li;
 }
 
 subscribeBtn.addEventListener("click", async () => {
@@ -740,8 +910,13 @@ subscribeBtn.addEventListener("click", async () => {
     } else {
       const body = await resp.json().catch(() => ({}));
       setText(subscribeBtn, "订阅更新");
-      toast(body.detail || "订阅失败", "error");
       subscribeBtn.disabled = false;
+      if (resp.status === 401 && meState.login) {
+        // 订阅需要登录：扫码成功后自动再订阅一次
+        if (await quarkLogin(body.detail || "订阅追剧需要先扫码登录夸克")) subscribeBtn.click();
+        return;
+      }
+      toast(body.detail || "订阅失败", "error");
     }
   } catch (_) {
     toast("订阅失败", "error");
@@ -763,6 +938,8 @@ setInterval(loadSubs, 5 * 60 * 1000);
 // 优先扫码登录自己的夸克（凭证加密存在服务器，浏览器只拿一个 HttpOnly 会话）；
 // 部署者在 .env 配了自己的 cookie 时，也可以凭口令存到部署者的网盘。
 let saveStatus = { enabled: false, login: false, logged_in: false, token_mode: false };
+// /api/me 的内容：是否开放登录、要不要邀请码、是否被停用、剩余次数
+const meState = { login: false, invite_required: false, logged_in: false, nickname: null, banned: null, quota: null };
 
 function getSaveToken(forceAsk) {
   let token = null;
@@ -776,26 +953,42 @@ function getSaveToken(forceAsk) {
   return token;
 }
 
-// 扫码登录弹窗：显示二维码并轮询，成功返回 true，关闭或过期返回 false
-function quarkLogin() {
-  return new Promise(async (resolve) => {
-    const dlg = document.createElement("dialog");
-    dlg.className = "qr-dialog";
-    const title = document.createElement("p");
-    setText(title, "用夸克 App 扫码登录，转存会保存到你自己的网盘");
-    const box = document.createElement("div");
-    box.className = "qr-box";
-    const tip = document.createElement("p");
-    tip.className = "qr-tip";
-    setText(tip, "正在获取二维码…");
-    const close = document.createElement("button");
+// 扫码登录弹窗：显示二维码并轮询，成功返回 true，关闭或失败返回 false。
+// reason：为什么要登录（例如免费次数用完），显示在标题下面。
+// 开启邀请制时，新用户先填邀请码再扫码；扫码后提示邀请码无效时可以改了重试。
+function quarkLogin(reason) {
+  return new Promise((resolve) => {
+    const dlg = el("dialog", "qr-dialog");
+    const title = el("p", "qr-title", "用夸克 App 扫码登录");
+    const sub = el("p", "qr-sub", reason || "登录后搜索次数更多，转存会保存到你自己的网盘");
+    const invite = el("div", "qr-invite");
+    const inviteInput = el("input");
+    inviteInput.type = "text";
+    inviteInput.maxLength = 64;
+    inviteInput.placeholder = "邀请码（老用户不用填）";
+    inviteInput.autocomplete = "off";
+    inviteInput.setAttribute("aria-label", "邀请码");
+    const inviteGo = el("button", "primary-btn small", "扫码登录");
+    inviteGo.type = "button";
+    invite.append(inviteInput, inviteGo);
+    invite.hidden = !meState.invite_required;
+    const box = el("div", "qr-box");
+    const tip = el("p", "qr-tip");
+    const actions = el("div", "qr-actions");
+    const retry = el("button", "secondary-btn small", "重新获取二维码");
+    retry.type = "button";
+    retry.hidden = true;
+    const close = el("button", "secondary-btn small", "取消");
     close.type = "button";
-    close.className = "secondary-btn small";
-    setText(close, "取消");
-    dlg.append(title, box, tip, close);
+    actions.append(retry, close);
+    dlg.append(title, sub, invite, box, tip, actions);
     document.body.appendChild(dlg);
+
     let timer = null;
+    let closed = false;
     const finish = (ok) => {
+      if (closed) return;
+      closed = true;
       clearInterval(timer);
       dlg.close();
       dlg.remove();
@@ -803,29 +996,85 @@ function quarkLogin() {
     };
     close.addEventListener("click", () => finish(false));
     dlg.addEventListener("cancel", () => finish(false));
+
+    const stopWith = (text, kind) => {
+      clearInterval(timer);
+      box.innerHTML = "";
+      box.classList.add("empty-qr");
+      setText(tip, text);
+      tip.className = "qr-tip " + (kind || "");
+    };
+
+    async function start() {
+      clearInterval(timer);
+      retry.hidden = true;
+      box.classList.remove("empty-qr");
+      box.innerHTML = '<span class="qr-loading" aria-hidden="true"></span>';
+      tip.className = "qr-tip";
+      setText(tip, "正在获取二维码…");
+      try {
+        const code = inviteInput.value.trim();
+        const resp = await fetch("/api/quark/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(code ? { invite_code: code } : {}),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (closed) return;
+        if (!resp.ok) {
+          stopWith(data.detail || "获取二维码失败", "error");
+          retry.hidden = false;
+          return;
+        }
+        box.innerHTML = data.qr_svg || ""; // 服务器生成的二维码 SVG
+        setText(tip, "扫码后在手机上确认登录");
+        timer = setInterval(async () => {
+          try {
+            const r = await (await fetch("/api/quark/login/" + encodeURIComponent(data.login_id))).json();
+            if (closed) return;
+            if (r.status === "success") {
+              clearInterval(timer);
+              saveStatus.logged_in = true;
+              saveStatus.nickname = r.nickname;
+              meState.logged_in = true;
+              meState.nickname = r.nickname;
+              renderAccount();
+              loadMe();
+              loadSubs();
+              finish(true);
+            } else if (r.status === "invite_required") {
+              meState.invite_required = true;
+              invite.hidden = false;
+              stopWith((r.message || "新用户需要邀请码") + "，填好邀请码后点「扫码登录」重新扫码", "error");
+              inviteInput.focus();
+            } else if (r.status === "banned") {
+              stopWith(r.message || "该账号已被停用", "error");
+            } else if (r.status !== "waiting" && r.status !== "scanned") {
+              stopWith(r.message || "二维码已过期", "error");
+              retry.hidden = false;
+            } else if (r.status === "scanned") {
+              setText(tip, "已扫码，请在手机上确认登录");
+            }
+          } catch (_) { /* 网络抖动：下次再试 */ }
+        }, 2000);
+      } catch (_) {
+        if (!closed) {
+          stopWith("获取二维码失败，请稍后重试", "error");
+          retry.hidden = false;
+        }
+      }
+    }
+
+    retry.addEventListener("click", start);
+    inviteGo.addEventListener("click", start);
+    inviteInput.addEventListener("keydown", (e) => { if (e.key === "Enter") start(); });
     dlg.showModal();
-    try {
-      const resp = await fetch("/api/quark/login", { method: "POST" });
-      const data = await resp.json();
-      if (!resp.ok) { setText(tip, data.detail || "获取二维码失败"); return; }
-      box.innerHTML = data.qr_svg || ""; // 服务器生成的二维码 SVG
-      setText(tip, "扫码后在手机上确认登录");
-      timer = setInterval(async () => {
-        try {
-          const r = await (await fetch("/api/quark/login/" + encodeURIComponent(data.login_id))).json();
-          if (r.status === "success") {
-            saveStatus.logged_in = true;
-            saveStatus.nickname = r.nickname;
-            renderAccount();
-            finish(true);
-          } else if (r.status !== "waiting") {
-            clearInterval(timer);
-            setText(tip, r.message || "二维码已过期，请关闭后重试");
-          }
-        } catch (_) { /* 网络抖动：下次再试 */ }
-      }, 2000);
-    } catch (_) {
-      setText(tip, "获取二维码失败，请稍后重试");
+    if (meState.invite_required) {
+      box.classList.add("empty-qr");
+      setText(tip, "新用户请先填写邀请码；已经登录过的老用户直接点「扫码登录」");
+      inviteInput.focus();
+    } else {
+      start();
     }
   });
 }
@@ -952,6 +1201,8 @@ logoutBtn.addEventListener("click", async () => {
     saveStatus.logged_in = false;
     saveStatus.nickname = null;
     renderAccount();
+    loadMe();
+    loadSubs();
     toast("已退出登录，服务器上保存的凭证已删除");
   } catch (_) {
     toast("退出失败，请稍后重试", "error");
@@ -971,8 +1222,85 @@ document.addEventListener("keydown", (e) => {
 
 fetch("/api/save/status")
   .then((r) => r.json())
-  .then((d) => { saveStatus = d; saveEnabled = !!d.enabled; renderAccount(); })
+  .then((d) => { saveStatus = Object.assign(saveStatus, d); saveEnabled = !!d.enabled; renderAccount(); })
   .catch(() => {});
+
+
+// ---- 访客信息：剩余次数、降级提示、停用状态（/api/me） ----
+const quotaLine = document.getElementById("quota-line");
+const quotaNote = document.getElementById("quota-note");
+const banBanner = document.getElementById("ban-banner");
+
+function renderQuota(q) {
+  meState.quota = q;
+  quotaLine.innerHTML = "";
+  if (!q) {
+    quotaLine.hidden = true;
+    return;
+  }
+  const ai = q.limit === 0 || q.remaining == null ? "不限" : String(q.remaining);
+  const loggedIn = q.logged_in || meState.logged_in;
+  const pill = el("span", "quota-pill" + (q.ai ? "" : " degraded"));
+  pill.appendChild(el("span", "quota-dot"));
+  if (!loggedIn && q.searches_remaining != null) {
+    pill.append("今日还可免费搜索 ", el("b", "", String(q.searches_remaining)), " 次（其中 AI 搜索 ",
+      el("b", "", ai), " 次）");
+  } else {
+    pill.append("今日 AI 搜索剩余 ", el("b", "", ai), " 次");
+  }
+  if (!q.ai) pill.append(el("span", "quota-tag", "当前为基础模式"));
+  quotaLine.appendChild(pill);
+  if (!loggedIn && meState.login) {
+    const btn = el("button", "link-btn", "扫码登录获得更多");
+    btn.type = "button";
+    btn.addEventListener("click", () => quarkLogin());
+    quotaLine.appendChild(btn);
+  }
+  quotaLine.hidden = false;
+}
+
+function showQuotaNote(q) {
+  if (!q || !q.message) return;
+  quotaNote.innerHTML = "";
+  quotaNote.append(el("span", "quota-note-ico", "!"), el("span", "", q.message));
+  if (q.reason === "user_quota" && !(q.logged_in || meState.logged_in) && meState.login) {
+    const btn = el("button", "secondary-btn small", "扫码登录");
+    btn.type = "button";
+    btn.addEventListener("click", () => quarkLogin());
+    quotaNote.appendChild(btn);
+  }
+  quotaNote.hidden = false;
+}
+
+function hideQuotaNote() {
+  quotaNote.hidden = true;
+}
+
+function showBanned(text) {
+  meState.banned = text;
+  banBanner.innerHTML = "";
+  banBanner.append(el("strong", "", "无法使用搜索"), el("span", "", text));
+  banBanner.hidden = false;
+  submitBtn.disabled = true;
+  input.disabled = true;
+}
+
+async function loadMe() {
+  try {
+    const resp = await fetch("/api/me");
+    if (!resp.ok) return;
+    const me = await resp.json();
+    Object.assign(meState, me);
+    saveStatus.login = !!me.login;
+    saveStatus.logged_in = !!me.logged_in;
+    saveStatus.nickname = me.nickname;
+    renderAccount();
+    renderQuota(me.quota);
+    if (me.banned) showBanned(me.banned);
+  } catch (_) { /* 网络问题：保持现状 */ }
+}
+
+loadMe();
 
 
 // ---- 首页：记忆库统计 ----

@@ -60,6 +60,7 @@
       <h1>想看什么，<span class="grad-text">交给 agent 去找</span></h1>
       <p class="tagline">输入影视或剧集名，agent 自动多轮搜索分享链接，逐条验证有效性并识别清晰度。</p>
 
+      <div id="ban-banner" class="ban-banner" role="alert" hidden></div>
       <form id="search-form" class="search-form" novalidate>
         <label class="visually-hidden" for="query">搜索内容</label>
         <div class="search-box">
@@ -74,6 +75,7 @@
           </button>
         </div>
         <p id="form-error" class="form-error" role="alert" hidden></p>
+        <div id="quota-line" class="quota-line" aria-live="polite" hidden></div>
         <div class="examples" aria-label="示例查询">
           <span class="examples-label">试试</span>
           <button type="button" class="example" data-query="漫长的季节 4K">漫长的季节</button>
@@ -153,6 +155,8 @@
       <div class="skeleton-card"><span class="sk sk-title"></span><span class="sk sk-line"></span><span class="sk sk-line short"></span></div>
       <div class="skeleton-card"><span class="sk sk-title"></span><span class="sk sk-line"></span><span class="sk sk-line short"></span></div>
     </section>
+
+    <div id="quota-note" class="quota-note" role="status" hidden></div>
 
     <section id="results" hidden aria-label="搜索结果">
       <div id="parsed-card" class="card parsed-card" hidden></div>

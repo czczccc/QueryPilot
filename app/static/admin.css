@@ -1,0 +1,184 @@
+/* 站长后台：复用 styles.css 的配色变量，只补后台特有的布局 */
+body.admin { background: var(--bg); }
+
+.admin-tag {
+  margin-left: 0.3rem;
+  padding: 0.05rem 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 6px;
+}
+
+.admin-main { max-width: 1100px; margin: 0 auto; padding: 1.25rem 1.25rem 3rem; }
+
+.muted { color: var(--muted); }
+.small { font-size: 0.8rem; }
+code, .code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.85em; }
+
+.admin-login { max-width: 420px; margin: 4rem auto 0; text-align: center; }
+.admin-login h1 { margin: 0 0 0.5rem; font-size: 1.4rem; }
+.admin-login p { font-size: 0.88rem; }
+.admin-error { color: var(--danger); font-size: 0.88rem; }
+
+.admin-row { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.9rem; }
+.admin-row.wrap { flex-wrap: wrap; align-items: flex-end; }
+
+.admin-row input,
+.field input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.9rem;
+  background: var(--surface-solid);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  outline: none;
+}
+
+.admin-row input:focus, .field input:focus { border-color: var(--accent); box-shadow: var(--ring); }
+
+.field { display: grid; gap: 0.25rem; font-size: 0.78rem; color: var(--muted); }
+.field input { width: 8rem; }
+.field.grow { flex: 1; min-width: 10rem; }
+.field.grow input { width: 100%; }
+
+/* 分区切换 */
+.admin-tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+  padding: 0.25rem;
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.tab {
+  flex: none;
+  padding: 0.45rem 1rem;
+  font-size: 0.88rem;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.tab:hover { color: var(--text); }
+.tab[aria-selected="true"] { color: var(--text); font-weight: 600; background: var(--surface-solid); box-shadow: var(--shadow-sm); }
+
+.tab-panel { animation: fade-up 0.35s var(--ease) both; }
+.tab-panel[hidden] { display: none; }
+
+.card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; }
+
+/* 指标卡 */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; margin-bottom: 1rem; }
+.kpis.compact { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+
+.kpi {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.9rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+
+.kpi-label { font-size: 0.78rem; color: var(--muted); }
+.kpi-value { font-size: 1.6rem; font-weight: 750; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.kpis.compact .kpi-value { font-size: 1.2rem; }
+.kpi-sub { font-size: 0.75rem; color: var(--muted); }
+
+/* 14 天趋势 */
+.trend { display: flex; align-items: stretch; gap: 0.35rem; height: 180px; }
+.bar-col { flex: 1; display: grid; grid-template-rows: auto 1fr auto; gap: 0.25rem; min-width: 0; text-align: center; }
+.bar-wrap { position: relative; display: flex; align-items: flex-end; justify-content: center; }
+.bar {
+  width: 100%;
+  max-width: 34px;
+  background: var(--grad);
+  border-radius: 6px 6px 2px 2px;
+  opacity: 0.85;
+  transform-origin: bottom;
+  animation: grow 0.6s var(--ease) both;
+}
+.bar-ai {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 6px;
+  margin-left: -3px;
+  background: var(--warn);
+  border-radius: 3px;
+  opacity: 0.9;
+}
+.bar-num { font-size: 0.68rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.bar-day { font-size: 0.68rem; color: var(--muted); }
+@keyframes grow { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+
+.admin-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 1rem; }
+
+.limits { display: grid; grid-template-columns: 1fr auto; gap: 0.5rem 1rem; margin: 0 0 0.75rem; font-size: 0.88rem; }
+.limits dt { color: var(--muted); }
+.limits dd { margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* 表格 */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+th {
+  padding: 0.5rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border-strong);
+}
+td { padding: 0.6rem; vertical-align: middle; border-bottom: 1px solid var(--border); }
+tbody tr { transition: background-color 0.15s ease; }
+tbody tr:hover { background: var(--surface-2); }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.empty-cell { padding: 1.5rem; text-align: center; color: var(--muted); }
+
+.user-cell { display: grid; gap: 0.05rem; }
+.user-cell small { font-size: 0.72rem; overflow-wrap: anywhere; }
+
+.pill {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.5rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  background: var(--neutral-soft);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+td > .pill:first-child { margin-left: 0; }
+.pill.ok { color: var(--ok); background: var(--ok-soft); }
+.pill.danger { color: var(--danger); background: var(--danger-soft); }
+
+.btn-group { display: inline-flex; gap: 0.35rem; }
+.secondary-btn.danger:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+
+.pager { display: flex; align-items: center; justify-content: center; gap: 0.75rem; margin-top: 0.9rem; }
+
+/* 窄屏：表格改成卡片 */
+@media (max-width: 720px) {
+  .admin-main { padding: 1rem 1rem 2.5rem; }
+  .admin-grid { grid-template-columns: 1fr; }
+  .trend { height: 140px; gap: 0.2rem; }
+  .bar-num { display: none; }
+  thead { display: none; }
+  table, tbody, tr, td { display: block; width: 100%; }
+  tbody tr { padding: 0.6rem 0; border-bottom: 1px solid var(--border); }
+  td { display: flex; justify-content: space-between; gap: 1rem; padding: 0.25rem 0; border: none; text-align: right; }
+  td::before { content: attr(data-label); flex: none; color: var(--muted); font-size: 0.78rem; text-align: left; }
+  td.empty-cell { justify-content: center; }
+  td.empty-cell::before { display: none; }
+  .user-cell { text-align: right; }
+}
