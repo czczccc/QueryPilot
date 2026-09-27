@@ -740,12 +740,20 @@ loadPrefs();
 
 
 // ---- 追剧订阅 ----
+// 结构：loadSubs 拉数据 → renderSubsTab 按标签页渲染；订阅卡片 subItem 由几块拼成，
+// 右上角按钮来自 SUB_ACTIONS，设置面板的字段来自 SUB_RULES，以后加功能往数组里加一项即可。
 const subsPanel = document.getElementById("subs-panel");
 const subsList = document.getElementById("subs-list");
 const notifList = document.getElementById("notif-list");
 const subsUnread = document.getElementById("subs-unread");
+const subsTabs = document.getElementById("subs-tabs");
+const newSubBtn = document.getElementById("new-sub-btn");
 const subscribeBtn = document.getElementById("subscribe-btn");
 let lastResult = null;
+let subsCache = [];
+let historyCache = [];
+let subsTab = "tv";
+try { subsTab = localStorage.getItem("qp_subs_tab") || "tv"; } catch (_) { /* 无痕模式 */ }
 
 function cidParam() {
   return "client_id=" + encodeURIComponent(clientId);
@@ -757,15 +765,37 @@ function formatTime(ts) {
     String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
 }
 
+// 订阅接口的小封装：返回 { ok, status, body }
+async function subApi(path, method, payload) {
+  const opts = { method: method || "GET" };
+  if (payload !== undefined) {
+    opts.headers = { "Content-Type": "application/json" };
+    opts.body = JSON.stringify(payload);
+  }
+  const sep = path.includes("?") ? "&" : "?";
+  const resp = await fetch("/api/subscriptions" + path + sep + cidParam(), opts);
+  const body = await resp.json().catch(() => ({}));
+  return { ok: resp.ok, status: resp.status, body };
+}
+
+// 需要登录的操作失败时引导扫码；扫码成功返回 true（调用方可重试）
+async function loginIfNeeded(res, why) {
+  if (res.status === 401 && meState.login) return quarkLogin(res.body.detail || why);
+  toast(res.body.detail || "操作失败", "error");
+  return false;
+}
+
 async function loadSubs() {
   if (!clientId) return;
   try {
-    const [subsResp, notifResp] = await Promise.all([
+    const [subsResp, notifResp, histResp] = await Promise.all([
       fetch("/api/subscriptions?" + cidParam()),
       fetch("/api/notifications?" + cidParam()),
+      fetch("/api/subscriptions/history?" + cidParam()).catch(() => null),
     ]);
     if (!subsResp.ok || !notifResp.ok) return; // 记忆未开启：不显示订阅
-    const subs = await subsResp.json();
+    subsCache = await subsResp.json();
+    historyCache = histResp && histResp.ok ? await histResp.json() : [];
     const notes = await notifResp.json();
     subsPanel.hidden = false;
     if (lastResult) {
@@ -783,17 +813,131 @@ async function loadSubs() {
       notifList.appendChild(li);
     });
 
-    subsList.innerHTML = "";
-    if (subs.length === 0) subsList.appendChild(el("li", "muted", "还没有订阅。"));
-    subs.forEach((sub) => subsList.appendChild(subItem(sub)));
+    renderSubsTab();
   } catch (_) { /* 网络问题：下次再试 */ }
 }
 
-// 订阅卡片右上角的操作按钮；以后要加「编辑」「暂停」等，往这里追加一个函数即可
-const SUB_ACTIONS = [checkNowButton];
+// 没识别出类型的关键词订阅归到「剧集」
+function subMedia(sub) {
+  return sub.media === "movie" ? "movie" : "tv";
+}
+
+const SUBS_TABS = {
+  tv: { count: () => subsCache.filter((s) => subMedia(s) === "tv").length, empty: "还没有订阅剧集。" },
+  movie: { count: () => subsCache.filter((s) => subMedia(s) === "movie").length, empty: "还没有订阅电影。" },
+  history: { count: () => historyCache.length, empty: "还没有完成的订阅。集齐或手动完成的订阅会出现在这里，可以一键重新订阅。" },
+};
+
+function renderSubsTab() {
+  if (!SUBS_TABS[subsTab]) subsTab = "tv";
+  subsTabs.querySelectorAll("[data-tab]").forEach((b) => {
+    const tab = b.dataset.tab;
+    b.setAttribute("aria-selected", String(tab === subsTab));
+    const n = SUBS_TABS[tab].count();
+    setText(b.querySelector(".seg-n"), n ? String(n) : "");
+  });
+  subsList.innerHTML = "";
+  const items = subsTab === "history"
+    ? historyCache.map(historyItem)
+    : subsCache.filter((s) => subMedia(s) === subsTab).map(subItem);
+  if (!items.length) subsList.appendChild(el("li", "muted subs-empty", SUBS_TABS[subsTab].empty));
+  items.forEach((li) => subsList.appendChild(li));
+}
+
+subsTabs.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-tab]");
+  if (!b || b.dataset.tab === subsTab) return;
+  subsTab = b.dataset.tab;
+  try { localStorage.setItem("qp_subs_tab", subsTab); } catch (_) { /* 忽略 */ }
+  renderSubsTab();
+});
+
+// ---- 订阅卡片的各个部件 ----
+function posterEl(src, title, cls) {
+  const wrap = el("span", "poster " + (cls || ""));
+  const fallback = () => {
+    wrap.innerHTML = "";
+    wrap.classList.add("no-img");
+    wrap.textContent = (title || "?").replace(/[《》\s]/g, "").slice(0, 1) || "?";
+  };
+  if (!src) { fallback(); return wrap; }
+  const img = el("img");
+  img.alt = "";
+  img.loading = "lazy";
+  img.referrerPolicy = "no-referrer"; // 豆瓣海报防盗链
+  img.addEventListener("error", fallback, { once: true });
+  img.src = src;
+  wrap.appendChild(img);
+  return wrap;
+}
+
+const STATE_BADGE = {
+  new: ["首次搜索中", "info", "刚订阅，服务器正在第一次搜索"],
+  active: ["订阅中", "ok", "定期重搜，有资源、新集或更高清时提醒"],
+  pending: ["待定", "warn", "没识别出条目或不知道总集数：照常搜索和提醒，但不会自动完成"],
+  paused: ["已暂停", "neutral", "暂停期间不检查，恢复后立即检查一次"],
+};
+
+// 把集号压缩成「3、5–7、10」
+function episodeRanges(list) {
+  const out = [];
+  list.slice().sort((a, b) => a - b).forEach((n) => {
+    const last = out[out.length - 1];
+    if (last && n === last[1] + 1) last[1] = n;
+    else out.push([n, n]);
+  });
+  return out.map(([a, b]) => (a === b ? a : a + "–" + b)).join("、");
+}
+
+function subProgress(sub) {
+  const box = el("div", "sub-progress");
+  if (sub.media === "movie") {
+    const got = sub.saved_episodes && sub.saved_episodes.length;
+    const res = RES_LABEL[sub.best_resolution];
+    box.appendChild(el("span", "sub-progress-text", got ? "已存进网盘" + (res ? "（" + res + "）" : "")
+      : res ? "已有资源，最高 " + res : "等待资源"));
+    return box;
+  }
+  const total = sub.total_episodes;
+  if (!total) {
+    box.appendChild(el("span", "sub-progress-text",
+      (sub.best_episodes ? "已见 " + sub.best_episodes + " 集" : "还没有资源") + " · 总集数未知"));
+    return box;
+  }
+  const lack = sub.lack_episodes || [];
+  const range = total - sub.start_episode + 1;
+  const done = Math.max(0, range - lack.length);
+  const bar = el("div", "meter");
+  bar.setAttribute("role", "progressbar");
+  bar.setAttribute("aria-valuemin", "0");
+  bar.setAttribute("aria-valuemax", String(range));
+  bar.setAttribute("aria-valuenow", String(done));
+  const fill = el("span", "meter-fill");
+  fill.style.width = (range ? Math.round((done / range) * 100) : 0) + "%";
+  bar.appendChild(fill);
+  const text = el("span", "sub-progress-text");
+  text.append(el("b", "", "已存 " + done + " / " + range), " 集");
+  if (lack.length && lack.length < range) text.append(el("span", "sub-lack", "　缺 " + episodeRanges(lack)));
+  box.append(bar, text);
+  return box;
+}
+
+// 规则摘要：≥1080p · 含「内嵌」· 排除「枪版」· 从第 3 集
+function rulesSummary(sub) {
+  return [
+    sub.resolution ? "≥" + (RES_LABEL[sub.resolution] || sub.resolution) : "",
+    sub.include ? "含「" + sub.include + "」" : "",
+    sub.exclude ? "排除「" + sub.exclude + "」" : "",
+    sub.media === "tv" && sub.start_episode > 1 ? "从第 " + sub.start_episode + " 集" : "",
+  ].filter(Boolean).join(" · ");
+}
+
+// 订阅卡片右上角的操作按钮；以后要加新按钮，往这里追加一个函数即可
+const SUB_ACTIONS = [checkNowButton, settingsButton];
 
 // 立即检查：同步重搜，可能要几十秒；同一订阅 2 分钟冷却
 function checkNowButton(sub) {
+  if (sub.state === "paused") return null;
   const btn = el("button", "secondary-btn small", "立即检查");
   btn.type = "button";
   btn.title = "马上重搜一次" + (sub.auto_save ? "，并补齐网盘里缺的集" : "");
@@ -802,20 +946,15 @@ function checkNowButton(sub) {
     btn.classList.add("loading");
     setText(btn, "检查中…");
     try {
-      const resp = await fetch("/api/subscriptions/" + sub.id + "/check?" + cidParam(), { method: "POST" });
-      const body = await resp.json().catch(() => ({}));
-      if (resp.ok) {
-        const notes = body.notifications || [];
+      const res = await subApi("/" + sub.id + "/check", "POST");
+      if (res.ok) {
+        const notes = res.body.notifications || [];
         if (!notes.length) toast("《" + sub.resource + "》暂时没有变化");
         else notes.slice(0, 3).forEach((n) => toast(n.message, n.kind === "auto_save_failed" ? "error" : "ok", 5000));
         loadSubs();
         return;
       }
-      if (resp.status === 401 && meState.login) {
-        if (await quarkLogin(body.detail || "检查订阅需要先扫码登录夸克")) loadSubs();
-      } else {
-        toast(body.detail || "检查失败", "error");
-      }
+      if (await loginIfNeeded(res, "检查订阅需要先扫码登录夸克")) loadSubs();
     } catch (_) {
       toast("检查失败，请稍后重试", "error");
     }
@@ -826,61 +965,174 @@ function checkNowButton(sub) {
   return btn;
 }
 
-// 一条订阅：标题与进度、自动转存开关、登录失效提示、转存记录、取消
-function subItem(sub) {
-  const li = el("li", "sub-item");
-  const res = RES_LABEL[sub.best_resolution] || "";
-  const head = el("div", "sub-head");
-  const info = el("div", "sub-info");
-  info.append(el("b", "sub-title", "《" + sub.resource + "》"), el("span", "sub-meta",
-    [sub.best_episodes ? "已见 " + sub.best_episodes + " 集" : "", res ? "最高 " + res : "",
-      sub.last_checked ? "上次检查 " + formatTime(sub.last_checked) : "尚未检查"].filter(Boolean).join(" · ")));
-  const del = el("button", "ghost-btn small", "取消订阅");
+function settingsButton(sub, li) {
+  const btn = el("button", "ghost-btn small icon-only", "");
+  btn.type = "button";
+  btn.title = "订阅设置";
+  btn.setAttribute("aria-label", "订阅设置");
+  btn.setAttribute("aria-expanded", "false");
+  btn.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="19" cy="12" r="1.8" fill="currentColor"/></svg>';
+  btn.addEventListener("click", () => {
+    let panel = li.querySelector(".sub-edit");
+    if (!panel) {
+      panel = subEditor(sub);
+      li.appendChild(panel);
+    } else {
+      panel.hidden = !panel.hidden;
+    }
+    btn.setAttribute("aria-expanded", String(!panel.hidden));
+    if (!panel.hidden) panel.querySelector("select, input")?.focus();
+  });
+  return btn;
+}
+
+// 设置面板里的规则字段；以后加新规则（比如洗版）往这里追加一项
+const SUB_RULES = [
+  { key: "resolution", label: "清晰度不低于", type: "select",
+    options: [["", "不限"], ["2160p", "4K"], ["1080p", "1080p"], ["720p", "720p"], ["SD", "标清"]] },
+  { key: "include", label: "必须包含", type: "text", placeholder: "如 内嵌 国语" },
+  { key: "exclude", label: "排除", type: "text", placeholder: "如 枪版 TC" },
+  { key: "start_episode", label: "从第几集开始", type: "number", tvOnly: true, min: 1 },
+  { key: "total_episodes", label: "总集数", type: "number", tvOnly: true, min: 1,
+    hint: (sub) => (sub.manual_total ? "手动设置" : sub.total_episodes ? "自动获取，可改" : "未知，可手动填") },
+];
+
+function ruleField(rule, sub) {
+  const wrap = el("label", "field");
+  wrap.appendChild(el("span", "field-label", rule.label));
+  let input;
+  if (rule.type === "select") {
+    input = el("select");
+    rule.options.forEach(([v, t]) => {
+      const o = el("option", "", t);
+      o.value = v;
+      input.appendChild(o);
+    });
+  } else {
+    input = el("input");
+    input.type = rule.type;
+    if (rule.placeholder) input.placeholder = rule.placeholder;
+    if (rule.type === "text") input.maxLength = 100;
+    if (rule.min) input.min = String(rule.min);
+    if (rule.type === "number") input.inputMode = "numeric";
+  }
+  const cur = sub ? sub[rule.key] : null;
+  input.value = cur == null ? "" : String(cur);
+  input.dataset.key = rule.key;
+  wrap.appendChild(input);
+  if (rule.hint && sub) wrap.appendChild(el("span", "field-hint", rule.hint(sub)));
+  return wrap;
+}
+
+// 读取规则字段里改过的值（number 空着不传；text/select 空串表示清除）
+function readRules(container, sub) {
+  const out = {};
+  container.querySelectorAll("[data-key]").forEach((input) => {
+    const rule = SUB_RULES.find((r) => r.key === input.dataset.key);
+    const raw = input.value.trim();
+    const before = sub && sub[rule.key] != null ? String(sub[rule.key]) : "";
+    if (raw === before) return;
+    if (rule.type === "number") {
+      const n = parseInt(raw, 10);
+      if (n >= 1) out[rule.key] = n;
+    } else {
+      out[rule.key] = raw;
+    }
+  });
+  return out;
+}
+
+function subEditor(sub) {
+  const panel = el("div", "sub-edit");
+  const grid = el("div", "sub-edit-grid");
+  SUB_RULES.filter((r) => !r.tvOnly || sub.media !== "movie").forEach((r) => grid.appendChild(ruleField(r, sub)));
+  const save = el("button", "primary-btn small", "保存规则");
+  save.type = "button";
+  save.addEventListener("click", async () => {
+    const patch = readRules(grid, sub);
+    if (!Object.keys(patch).length) { toast("规则没有变化"); return; }
+    save.disabled = true;
+    const res = await subApi("/" + sub.id, "PATCH", patch).catch(() => ({ ok: false, body: {} }));
+    save.disabled = false;
+    if (res.ok) { toast("已保存《" + sub.resource + "》的规则", "ok"); loadSubs(); }
+    else toast(res.body.detail || "保存失败", "error");
+  });
+
+  const paused = sub.state === "paused";
+  const pause = el("button", "secondary-btn small", paused ? "恢复订阅" : "暂停");
+  pause.type = "button";
+  pause.addEventListener("click", async () => {
+    pause.disabled = true;
+    const res = await subApi("/" + sub.id, "PATCH", { paused: !paused }).catch(() => ({ ok: false, body: {} }));
+    if (res.ok) {
+      toast(paused ? "已恢复《" + sub.resource + "》，正在后台检查一次" : "已暂停《" + sub.resource + "》", "ok");
+      loadSubs();
+      if (paused) setTimeout(loadSubs, 45000);
+    } else {
+      pause.disabled = false;
+      toast(res.body.detail || "操作失败", "error");
+    }
+  });
+
+  const complete = el("button", "secondary-btn small", "标记完成");
+  complete.type = "button";
+  complete.title = "不再追这个订阅，移入订阅历史，之后可以一键重新订阅";
+  complete.addEventListener("click", async () => {
+    complete.disabled = true;
+    const res = await subApi("/" + sub.id + "/complete", "POST").catch(() => ({ ok: false, body: {} }));
+    if (res.ok) { toast("《" + sub.resource + "》已完成，移入订阅历史", "ok"); loadSubs(); }
+    else { complete.disabled = false; toast(res.body.detail || "操作失败", "error"); }
+  });
+
+  const del = el("button", "ghost-btn small danger", "取消订阅");
   del.type = "button";
   del.addEventListener("click", async () => {
+    if (!del.classList.contains("confirm")) { // 第一次点只是确认
+      del.classList.add("confirm");
+      setText(del, "确定取消？");
+      setTimeout(() => { del.classList.remove("confirm"); setText(del, "取消订阅"); }, 3000);
+      return;
+    }
     del.disabled = true;
-    await fetch("/api/subscriptions/" + sub.id + "?" + cidParam(), { method: "DELETE" }).catch(() => {});
+    await subApi("/" + sub.id, "DELETE").catch(() => {});
     toast("已取消订阅《" + sub.resource + "》");
     loadSubs();
   });
-  const acts = el("div", "sub-actions");
-  SUB_ACTIONS.forEach((make) => { const b = make(sub); if (b) acts.appendChild(b); });
-  acts.appendChild(del);
-  head.append(info, acts);
-  li.appendChild(head);
 
-  const row = el("div", "sub-row");
+  const foot = el("div", "sub-edit-foot");
+  const left = el("div", "sub-edit-left");
+  left.append(pause, complete, del);
+  foot.append(left, save);
+  panel.append(grid, foot);
+  return panel;
+}
+
+function autoSaveSwitch(sub) {
   const sw = el("label", "switch small");
   const cb = el("input");
   cb.type = "checkbox";
   cb.checked = !!sub.auto_save;
-  sw.append(cb, el("span", "switch-track"), "有新集自动转存");
-  sw.querySelector(".switch-track").setAttribute("aria-hidden", "true");
-  sw.title = "检查到新集时，自动把网盘里还没有的集转存到你的夸克网盘";
+  const track = el("span", "switch-track");
+  track.setAttribute("aria-hidden", "true");
+  sw.append(cb, track, sub.media === "movie" ? "有资源自动转存" : "自动转存补齐缺集");
+  sw.title = sub.media === "movie"
+    ? "出现满足清晰度要求的资源时存一次；之后更高清只提醒"
+    : "打开后立即把网盘里缺的集补齐，之后出新集也自动转存";
   cb.addEventListener("change", async () => {
     const want = cb.checked;
     cb.disabled = true;
     try {
-      const resp = await fetch("/api/subscriptions/" + sub.id + "?" + cidParam(), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ auto_save: want }),
-      });
-      const body = await resp.json().catch(() => ({}));
-      if (resp.ok) {
+      const res = await subApi("/" + sub.id, "PATCH", { auto_save: want });
+      if (res.ok) {
         toast(want ? "已开启《" + sub.resource + "》自动转存，正在后台补齐网盘缺的集，稍后在转存记录里查看"
           : "已关闭《" + sub.resource + "》自动转存", "ok", want ? 4000 : 2200);
         loadSubs();
         if (want) setTimeout(loadSubs, 45000);
       } else {
         cb.checked = !want;
-        if (resp.status === 401 && meState.login) {
-          if (await quarkLogin(body.detail || "自动转存需要先扫码登录夸克")) {
-            cb.checked = want;
-            cb.dispatchEvent(new Event("change"));
-          }
-        } else {
-          toast(body.detail || "设置失败", "error");
+        if (await loginIfNeeded(res, "自动转存需要先扫码登录夸克")) {
+          cb.checked = want;
+          cb.dispatchEvent(new Event("change"));
         }
       }
     } catch (_) {
@@ -889,54 +1141,138 @@ function subItem(sub) {
     }
     cb.disabled = false;
   });
-  row.appendChild(sw);
+  return sw;
+}
 
-  if (sub.auto_save) {
-    const logBtn = el("button", "link-btn", "转存记录");
-    logBtn.type = "button";
-    const log = el("ul", "save-log");
-    log.hidden = true;
-    logBtn.addEventListener("click", async () => {
-      if (!log.hidden) { log.hidden = true; return; }
-      log.hidden = false;
+function saveLogButton(sub, log) {
+  const logBtn = el("button", "link-btn", "转存记录");
+  logBtn.type = "button";
+  logBtn.addEventListener("click", async () => {
+    if (!log.hidden) { log.hidden = true; return; }
+    log.hidden = false;
+    log.innerHTML = "";
+    log.appendChild(el("li", "muted", "加载中…"));
+    try {
+      const resp = await fetch("/api/subscriptions/" + sub.id + "/saves?" + cidParam());
+      const rows = resp.ok ? await resp.json() : [];
       log.innerHTML = "";
-      log.appendChild(el("li", "muted", "加载中…"));
-      try {
-        const resp = await fetch("/api/subscriptions/" + sub.id + "/saves?" + cidParam());
-        const rows = resp.ok ? await resp.json() : [];
-        log.innerHTML = "";
-        if (!rows.length) log.appendChild(el("li", "muted", "还没有自动转存过；发现新集时会自动存进你的网盘。"));
-        rows.slice(0, 20).forEach((r) => {
-          const item = el("li", r.ok ? "ok" : "fail");
-          item.append(el("span", "save-log-ico", r.ok ? "✓" : "!"), el("span", "save-log-time", formatTime(r.ts)),
-            el("span", "save-log-msg", r.ok
-              ? (r.file_count ? r.file_count + " 个文件 → " : "") + (r.folder || "网盘默认目录")
-              : (r.message || "转存失败")));
-          log.appendChild(item);
-        });
-      } catch (_) {
-        log.innerHTML = "";
-        log.appendChild(el("li", "fail", "记录加载失败"));
-      }
-    });
-    row.appendChild(logBtn);
-    li.appendChild(row);
-    if (sub.auto_save_status === "login_expired") {
-      const warn = el("button", "sub-warn", "夸克登录已失效，自动转存已暂停 · 点此重新扫码");
-      warn.type = "button";
-      warn.addEventListener("click", async () => {
-        if (await quarkLogin("重新扫码后，《" + sub.resource + "》的自动转存会自动恢复")) loadSubs();
+      if (!rows.length) log.appendChild(el("li", "muted", "还没有自动转存过；发现缺的集时会自动存进你的网盘。"));
+      rows.slice(0, 20).forEach((r) => {
+        const item = el("li", r.ok ? "ok" : "fail");
+        item.append(el("span", "save-log-ico", r.ok ? "✓" : "!"), el("span", "save-log-time", formatTime(r.ts)),
+          el("span", "save-log-msg", r.ok
+            ? (r.file_count ? r.file_count + " 个文件 → " : "") + (r.folder || "网盘默认目录")
+            : (r.message || "转存失败")));
+        log.appendChild(item);
       });
-      li.appendChild(warn);
+    } catch (_) {
+      log.innerHTML = "";
+      log.appendChild(el("li", "fail", "记录加载失败"));
     }
-    li.appendChild(log);
-  } else {
-    li.appendChild(row);
+  });
+  return logBtn;
+}
+
+// 一条订阅：海报 + 标题与状态 + 进度 + 规则 + 自动转存 + 设置面板
+function subItem(sub) {
+  const li = el("li", "sub-item" + (sub.state === "paused" ? " is-paused" : ""));
+  const card = el("div", "sub-card");
+  const body = el("div", "sub-body");
+
+  const head = el("div", "sub-head");
+  const info = el("div", "sub-info");
+  const titleRow = el("div", "sub-title-row");
+  titleRow.appendChild(el("b", "sub-title", "《" + sub.resource + "》"));
+  const st = STATE_BADGE[sub.state] || STATE_BADGE.active;
+  titleRow.appendChild(badge(st[0], "state-" + st[1], st[2]));
+  info.appendChild(titleRow);
+  const tags = [
+    sub.year || "",
+    sub.media === "movie" ? "电影" : sub.media === "tv" ? "剧集" : "按关键词",
+    sub.last_checked ? "检查于 " + formatTime(sub.last_checked) : "尚未检查",
+  ].filter(Boolean).join(" · ");
+  info.appendChild(el("span", "sub-meta", tags));
+  const acts = el("div", "sub-actions");
+  SUB_ACTIONS.forEach((make) => { const b = make(sub, li); if (b) acts.appendChild(b); });
+  head.append(info, acts);
+  body.appendChild(head);
+
+  body.appendChild(subProgress(sub));
+  const rules = rulesSummary(sub);
+  if (rules) body.appendChild(el("span", "sub-rules", rules));
+
+  const row = el("div", "sub-row");
+  row.appendChild(autoSaveSwitch(sub));
+  const log = el("ul", "save-log");
+  log.hidden = true;
+  if (sub.auto_save) row.appendChild(saveLogButton(sub, log));
+  body.appendChild(row);
+
+  card.append(posterEl(sub.poster, sub.resource), body);
+  li.appendChild(card);
+
+  if (sub.auto_save && sub.auto_save_status === "login_expired") {
+    const warn = el("button", "sub-warn", "夸克登录已失效，自动转存已暂停 · 点此重新扫码");
+    warn.type = "button";
+    warn.addEventListener("click", async () => {
+      if (await quarkLogin("重新扫码后，《" + sub.resource + "》的自动转存会自动恢复")) loadSubs();
+    });
+    li.appendChild(warn);
   }
+  li.appendChild(log);
   return li;
 }
 
-// ---- 订阅：结果页的订阅卡片与共用的订阅请求 ----
+// 订阅历史的一条：可一键重新订阅或删除
+function historyItem(h) {
+  const li = el("li", "sub-item is-history");
+  const card = el("div", "sub-card");
+  const body = el("div", "sub-body");
+  const head = el("div", "sub-head");
+  const info = el("div", "sub-info");
+  const titleRow = el("div", "sub-title-row");
+  titleRow.appendChild(el("b", "sub-title", "《" + h.resource + "》"));
+  titleRow.appendChild(badge("已完成", "state-ok"));
+  info.append(titleRow, el("span", "sub-meta", [
+    h.year || "", h.media === "movie" ? "电影" : h.media === "tv" ? "剧集" : "",
+    h.reason, formatTime(h.completed) + " 完成",
+  ].filter(Boolean).join(" · ")));
+
+  const acts = el("div", "sub-actions");
+  const again = el("button", "secondary-btn small", "重新订阅");
+  again.type = "button";
+  again.addEventListener("click", async () => {
+    again.disabled = true;
+    const res = await subApi("/history/" + h.id + "/resubscribe", "POST").catch(() => ({ ok: false, body: {} }));
+    if (res.ok) {
+      toast("已重新订阅《" + res.body.resource + "》", "ok");
+      subsTab = subMedia(res.body);
+      loadSubs();
+      return;
+    }
+    again.disabled = false;
+    if (await loginIfNeeded(res, "订阅追剧需要先扫码登录夸克")) again.click();
+  });
+  const del = el("button", "ghost-btn small", "删除");
+  del.type = "button";
+  del.title = "删除这条历史记录";
+  del.addEventListener("click", async () => {
+    del.disabled = true;
+    await subApi("/history/" + h.id, "DELETE").catch(() => {});
+    loadSubs();
+  });
+  acts.append(again, del);
+  head.append(info, acts);
+  body.appendChild(head);
+  if (h.media === "tv" && h.total_episodes) {
+    body.appendChild(el("span", "sub-rules", "共 " + h.total_episodes + " 集，存了 " + h.saved_count + " 集"));
+  }
+  card.append(posterEl(h.poster, h.resource), body);
+  li.appendChild(card);
+  return li;
+}
+
+// ---- 订阅：选条目弹窗与共用的订阅请求 ----
 // 订阅的目标：有结果时用识别出的资源名，没结果时直接用搜索词
 function subscribeTarget(data) {
   const first = data.history && data.history.length ? data.history[0] : data.query;
@@ -945,30 +1281,207 @@ function subscribeTarget(data) {
 }
 
 // 发起订阅；需要登录时引导扫码，成功后重试一次。返回订阅对象或 null
-async function subscribe(target, autoSave) {
-  const body = { client_id: clientId, query: target.query, resource: target.resource };
-  if (autoSave) body.auto_save = true;
-  const resp = await fetch("/api/subscriptions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await resp.json().catch(() => ({}));
-  if (resp.ok) {
-    toast("已订阅《" + target.resource + "》" + (autoSave
+async function subscribe(payload) {
+  const res = await subApi("", "POST", Object.assign({ client_id: clientId }, payload));
+  if (res.ok) {
+    const sub = res.body;
+    toast("已订阅《" + sub.resource + "》" + (payload.auto_save
       ? "，正在后台检查，有资源会自动转存到你的网盘"
-      : "，有" + (target.empty ? "资源" : "更新") + "时会在「我的订阅」提醒"), "ok", 3500);
+      : "，有资源或更新时会在「我的订阅」提醒"), "ok", 3500);
+    subsTab = subMedia(sub);
     loadSubs();
-    if (autoSave) setTimeout(loadSubs, 45000); // 后台检查完成后刷新转存记录和通知
-    return data;
+    setTimeout(loadSubs, 45000); // 后台第一次检查完成后刷新状态、进度和通知
+    return sub;
   }
-  if (resp.status === 401 && meState.login) {
-    const why = data.detail || (autoSave ? "自动转存需要先扫码登录夸克" : "订阅追剧需要先扫码登录夸克");
-    if (await quarkLogin(why)) return subscribe(target, autoSave);
-    return null;
-  }
-  toast(data.detail || "订阅失败", "error");
+  const why = payload.auto_save ? "自动转存需要先扫码登录夸克" : "订阅追剧需要先扫码登录夸克";
+  if (await loginIfNeeded(res, why)) return subscribe(payload);
   return null;
+}
+
+// 候选条目的一行：海报、片名、年份、类型；剧集带选季
+function candidateOption(c, idx, name) {
+  const opt = el("label", "cand");
+  const radio = el("input");
+  radio.type = "radio";
+  radio.name = name;
+  radio.value = String(idx);
+  const text = el("span", "cand-text");
+  const title = el("b", "cand-title", c.title);
+  const meta = [c.year || "", c.media === "movie" ? "电影" : "剧集",
+    c.media === "tv" && c.seasons ? "共 " + c.seasons + " 季" : "",
+    c.source === "tmdb" ? "TMDB" : "豆瓣"].filter(Boolean).join(" · ");
+  text.append(title);
+  if (c.original_title && c.original_title !== c.title) text.appendChild(el("span", "cand-orig", c.original_title));
+  text.appendChild(el("span", "cand-meta", meta));
+  opt.append(radio, posterEl(c.poster, c.title, "small"), text);
+  if (c.media === "tv") {
+    const seasons = Object.keys(c.episodes || {}).map(Number).filter((n) => n > 0).sort((a, b) => a - b);
+    if (!seasons.length) seasons.push(1);
+    const sel = el("select", "cand-season");
+    sel.setAttribute("aria-label", "选择季");
+    seasons.forEach((s) => {
+      const n = c.episodes && c.episodes[s];
+      const o = el("option", "", "第 " + s + " 季" + (n ? " · " + n + " 集" : ""));
+      o.value = String(s);
+      sel.appendChild(o);
+    });
+    sel.value = String(seasons[seasons.length - 1]); // 默认最新一季
+    sel.addEventListener("click", () => { radio.checked = true; radio.dispatchEvent(new Event("change", { bubbles: true })); });
+    opt.appendChild(sel);
+  }
+  return opt;
+}
+
+// 订阅弹窗：先搜 TMDB/豆瓣让用户选条目，选不到就按关键词订阅
+function openSubscribeDialog(target, opts) {
+  opts = opts || {};
+  return new Promise((resolve) => {
+    const dlg = el("dialog", "sub-dialog");
+    const head = el("div", "sd-head");
+    head.appendChild(el("p", "sd-title", target.resource ? "订阅《" + target.resource + "》" : "新订阅"));
+    const x = el("button", "ghost-btn small icon-only", "✕");
+    x.type = "button";
+    x.setAttribute("aria-label", "关闭");
+    head.appendChild(x);
+
+    const searchRow = el("form", "sd-search");
+    const q = el("input");
+    q.type = "search";
+    q.placeholder = "片名，如 繁花、沙丘";
+    q.maxLength = 100;
+    q.value = target.resource || "";
+    q.setAttribute("aria-label", "片名");
+    const go = el("button", "secondary-btn small", "查找");
+    go.type = "submit";
+    searchRow.append(q, go);
+
+    const hint = el("p", "sd-hint", "选中对应的影视条目，订阅会按季追踪缺的集；找不到也可以直接按关键词订阅。");
+    const list = el("div", "cand-list");
+    list.setAttribute("role", "radiogroup");
+
+    const optsBox = el("div", "sd-opts");
+    let autoCb = null;
+    if (meState.login) {
+      const sw = el("label", "switch small");
+      autoCb = el("input");
+      autoCb.type = "checkbox";
+      autoCb.checked = !!opts.autoSave;
+      const track = el("span", "switch-track");
+      track.setAttribute("aria-hidden", "true");
+      sw.append(autoCb, track, "自动转存到我的网盘");
+      sw.title = meState.logged_in ? "剧集会立即补齐网盘里缺的集；电影有合适资源时存一次" : "需要先扫码登录夸克";
+      optsBox.appendChild(sw);
+    }
+    const more = el("details", "sd-more");
+    more.appendChild(el("summary", "", "更多规则（清晰度、关键词、起始集）"));
+    const rulesGrid = el("div", "sub-edit-grid");
+    SUB_RULES.filter((r) => r.key !== "total_episodes").forEach((r) => {
+      const f = ruleField(r, null);
+      if (r.tvOnly) f.classList.add("tv-only");
+      rulesGrid.appendChild(f);
+    });
+    more.appendChild(rulesGrid);
+    optsBox.appendChild(more);
+
+    const foot = el("div", "sd-foot");
+    const cancel = el("button", "secondary-btn small", "取消");
+    cancel.type = "button";
+    const ok = el("button", "primary-btn small", "订阅");
+    ok.type = "button";
+    foot.append(cancel, ok);
+    dlg.append(head, searchRow, hint, list, optsBox, foot);
+    document.body.appendChild(dlg);
+
+    let cands = [];
+    let closed = false;
+    const finish = (sub) => {
+      if (closed) return;
+      closed = true;
+      dlg.close();
+      dlg.remove();
+      resolve(sub);
+    };
+    x.addEventListener("click", () => finish(null));
+    cancel.addEventListener("click", () => finish(null));
+    dlg.addEventListener("cancel", () => finish(null));
+
+    const selected = () => {
+      const r = list.querySelector("input[type=radio]:checked");
+      return r && r.value !== "kw" ? cands[Number(r.value)] : null;
+    };
+    const syncOpts = () => { // 电影没有起始集
+      const c = selected();
+      rulesGrid.querySelectorAll(".tv-only").forEach((f) => { f.hidden = !!c && c.media === "movie"; });
+      list.querySelectorAll(".cand").forEach((l) => l.classList.toggle("on", l.querySelector("input").checked));
+    };
+    list.addEventListener("change", syncOpts);
+
+    async function lookup() {
+      const name = q.value.trim();
+      list.innerHTML = "";
+      cands = [];
+      if (!name) { q.focus(); return; }
+      for (let i = 0; i < 3; i++) list.appendChild(el("div", "cand cand-skel"));
+      try {
+        const resp = await fetch("/api/media/search?q=" + encodeURIComponent(name));
+        cands = resp.ok ? await resp.json() : [];
+      } catch (_) { cands = []; }
+      list.innerHTML = "";
+      cands.slice(0, 6).forEach((c, i) => list.appendChild(candidateOption(c, i, "sd-cand")));
+      const kw = el("label", "cand cand-kw");
+      const kwRadio = el("input");
+      kwRadio.type = "radio";
+      kwRadio.name = "sd-cand";
+      kwRadio.value = "kw";
+      const kwText = el("span", "cand-text");
+      kwText.append(el("b", "cand-title", "按关键词「" + name + "」订阅"),
+        el("span", "cand-meta", cands.length ? "上面都不对时选这个" : "没找到对应的影视条目，照常定期搜索和提醒"));
+      kw.append(kwRadio, el("span", "poster small no-img", "#"), kwText);
+      list.appendChild(kw);
+      (list.querySelector("input[type=radio]") || kwRadio).checked = true;
+      syncOpts();
+    }
+    searchRow.addEventListener("submit", (e) => { e.preventDefault(); lookup(); });
+
+    ok.addEventListener("click", async () => {
+      const name = q.value.trim();
+      if (name.length < 2 && !selected()) { toast("片名至少 2 个字", "error"); q.focus(); return; }
+      const c = selected();
+      const payload = {};
+      if (c) {
+        const sel = list.querySelector(".cand.on .cand-season");
+        payload.media = c.media;
+        payload.year = c.year || undefined;
+        payload.poster = c.poster || undefined;
+        payload[c.source === "douban" ? "douban_id" : "tmdb_id"] = c.id || undefined;
+        payload.resource = c.title;
+        payload.query = c.title.length >= 2 ? c.title : (target.query || name);
+        if (c.media === "tv") {
+          payload.season = sel ? Number(sel.value) : 1;
+          if (payload.season > 1) payload.query = c.title + " 第" + payload.season + "季";
+        }
+      } else {
+        payload.resource = name;
+        payload.query = name === target.resource && target.query ? target.query : name;
+      }
+      const rules = readRules(rulesGrid, null);
+      Object.keys(rules).forEach((k) => { if (rules[k] !== "") payload[k] = rules[k]; });
+      if (c && c.media === "movie") delete payload.start_episode;
+      if (autoCb && autoCb.checked) payload.auto_save = true;
+      Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
+      ok.disabled = true;
+      ok.classList.add("loading");
+      dlg.close(); // 扫码弹窗可能要叠在上面
+      const sub = await subscribe(payload);
+      if (sub || closed) { finish(sub); return; }
+      dlg.showModal();
+      ok.disabled = false;
+      ok.classList.remove("loading");
+    });
+
+    dlg.showModal();
+    if (target.resource) lookup(); else q.focus();
+  });
 }
 
 const subscribeBox = document.getElementById("subscribe-box");
@@ -984,8 +1497,8 @@ function renderSubscribeBox(data) {
   text.append(
     el("b", "sb-title", target.empty ? "暂时没有资源，要不要先订阅？" : "追更《" + target.resource + "》"),
     el("span", "sb-sub", target.empty
-      ? "服务器每 12 小时替你重搜「" + target.query + "」，有资源了第一时间提醒你"
-      : "有新集或更高清的版本时提醒你；剧集可以自动补齐网盘里缺的集"),
+      ? "服务器会定期替你重搜「" + target.query + "」，有资源了第一时间提醒你"
+      : "按季追踪缺的集，有新集或更高清的版本时提醒你；可以自动补齐网盘"),
   );
   const controls = el("div", "sb-controls");
   let cb = null;
@@ -1003,7 +1516,7 @@ function renderSubscribeBox(data) {
   go.type = "button";
   go.addEventListener("click", async () => {
     go.disabled = true;
-    const sub = await subscribe(target, !!(cb && cb.checked));
+    const sub = await openSubscribeDialog(target, { autoSave: !!(cb && cb.checked) });
     if (sub) {
       go.className = "secondary-btn done";
       setText(go, "已订阅 ✓");
@@ -1032,6 +1545,9 @@ subscribeBtn.addEventListener("click", () => {
   void subscribeBox.offsetWidth;
   subscribeBox.classList.add("flash");
 });
+
+// 订阅面板里的「＋ 新订阅」：不用先搜资源
+newSubBtn.addEventListener("click", () => openSubscribeDialog({ query: "", resource: "", empty: true }));
 
 subsPanel.addEventListener("toggle", async () => {
   if (!subsPanel.open || subsUnread.hidden) return;
