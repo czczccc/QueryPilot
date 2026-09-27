@@ -38,6 +38,7 @@ from app.services.quark import (
     verify_quark_files,
 )
 from app.services.relevance import build_target, judge
+from app.services.sources import search_sites, search_telegram
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +67,14 @@ class QuarkSearchService:
         timeout: float = 8.0,
         client: httpx.AsyncClient | None = None,
         store: LinkStore | None = None,
+        tg_channels: list[str] | tuple[str, ...] = (),
+        tg_client: httpx.AsyncClient | None = None,
+        extra_sites: list[str] | tuple[str, ...] = (),
     ) -> None:
         self._parser = parser
         self._store = store
+        self._tg_channels = list(tg_channels)
+        self._extra_sites = list(extra_sites)
         self._tavily = tavily
         self._use_qkyunso = use_qkyunso
         self._use_bing = use_bing
@@ -77,6 +83,7 @@ class QuarkSearchService:
         self._client = client or httpx.AsyncClient(
             timeout=timeout, headers={"User-Agent": UA}, follow_redirects=True
         )
+        self._tg_client = tg_client or self._client
 
     @property
     def store(self) -> LinkStore | None:
@@ -117,6 +124,10 @@ class QuarkSearchService:
             providers["qkyunso"] = ProviderStatus(name="qkyunso")
         if self._use_bing:
             providers["bing"] = ProviderStatus(name="bing")
+        if self._tg_channels:
+            providers["telegram"] = ProviderStatus(name="telegram")
+        if self._extra_sites:
+            providers["sites"] = ProviderStatus(name="sites")
         return providers
 
     async def recall(self, key: str) -> list[QuarkLink]:
@@ -207,7 +218,7 @@ class QuarkSearchService:
         keyword: str,
         providers: dict[str, ProviderStatus],
     ) -> list[QuarkLink]:
-        """三个引擎并发召回：Tavily 用 `queries`，云搜/Bing 用 `keyword`。
+        """各引擎并发召回：Tavily 用 `queries`，云搜/Bing/Telegram/资源站用 `keyword`。
 
         单引擎失败只标记状态，不中断整体。
         """
@@ -221,6 +232,12 @@ class QuarkSearchService:
         async def run_bing() -> list[QuarkLink]:
             return await search_bing(keyword, self._client, self._timeout)
 
+        async def run_telegram() -> list[QuarkLink]:
+            return await search_telegram(keyword, self._tg_channels, self._tg_client)
+
+        async def run_sites() -> list[QuarkLink]:
+            return await search_sites(keyword, self._extra_sites, self._client)
+
         engines: list[tuple[str, Callable[[], Awaitable[list[QuarkLink]]]]] = [
             ("tavily", run_tavily)
         ]
@@ -228,6 +245,10 @@ class QuarkSearchService:
             engines.append(("qkyunso", run_qkyunso))
         if "bing" in providers:
             engines.append(("bing", run_bing))
+        if "telegram" in providers:
+            engines.append(("telegram", run_telegram))
+        if "sites" in providers:
+            engines.append(("sites", run_sites))
 
         async def guarded(
             name: str, fn: Callable[[], Awaitable[list[QuarkLink]]]
