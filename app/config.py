@@ -53,6 +53,10 @@ class Settings:
     invite_codes: tuple[str, ...] = field(default=(), repr=False)  # .env 里的固定邀请码（可多次使用）
     admin_token: str = field(default="", repr=False)  # 站长后台口令（请求头 X-Admin-Token），空则关闭后台
     trust_proxy: bool = False  # 部署在 Nginx 等反代后面时开启，按 X-Forwarded-For 取真实 IP
+    pansou_url: str = ""  # 自建 PanSou 地址，如 http://pansou:8888；空则不启用
+    pansou_token: str = field(default="", repr=False)  # PanSou 开启认证时的 JWT
+    pansou_timeout: float = 6.0
+    pansou_src: str = "plugin"  # plugin（只用白名单插件）/ tg / all
     extra: dict = field(default_factory=dict)
 
 
@@ -109,5 +113,9 @@ def load_settings() -> Settings:
         invite_required=os.getenv("INVITE_REQUIRED", "false").strip().lower() in ("1", "true", "yes"),
         invite_codes=_list("INVITE_CODES"),
         admin_token=os.getenv("ADMIN_TOKEN", "").strip(),
+        pansou_url=os.getenv("PANSOU_URL", "").strip(),
+        pansou_token=os.getenv("PANSOU_TOKEN", "").strip(),
+        pansou_timeout=_float("PANSOU_TIMEOUT", 6.0),
+        pansou_src=os.getenv("PANSOU_SRC", "plugin").strip().lower() or "plugin",
         trust_proxy=os.getenv("TRUST_PROXY", "false").strip().lower() in ("1", "true", "yes"),
     )
