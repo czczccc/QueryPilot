@@ -20,6 +20,8 @@ class Settings:
     log_level: str = "INFO"
     request_timeout_seconds: float = 8.0
     max_results: int = 12
+    memory_db_path: str = "data/querypilot.db"  # 空字符串关闭记忆
+    reverify_interval_hours: float = 6.0  # 后台复验周期，0 关闭
     extra: dict = field(default_factory=dict)
 
 
@@ -43,4 +45,6 @@ def load_settings() -> Settings:
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         request_timeout_seconds=_float("REQUEST_TIMEOUT_SECONDS", 8.0),
         max_results=_int("MAX_RESULTS", 12),
+        memory_db_path=os.getenv("MEMORY_DB_PATH", "data/querypilot.db"),
+        reverify_interval_hours=_float("REVERIFY_INTERVAL_HOURS", 6.0),
     )

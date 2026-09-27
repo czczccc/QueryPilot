@@ -2,6 +2,9 @@
 .env
 config.json
 
+# ---- 运行数据（记忆库）----
+data/
+
 # ---- Python ----
 __pycache__/
 *.py[cod]

@@ -8,4 +8,9 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    volumes:
+      - querypilot-data:/app/data
     restart: unless-stopped
+
+volumes:
+  querypilot-data:
