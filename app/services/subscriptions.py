@@ -17,6 +17,7 @@ import httpx
 
 from app.models import QuarkLink, SearchRequest, Subscription
 from app.services.memory import LinkStore, resource_key
+from app.services.quality import meets_requirement
 
 logger = logging.getLogger(__name__)
 
@@ -69,21 +70,36 @@ class SubscriptionWatcher:
         episodes, score, res, _, _ = snapshot(await self._store.recall(resource_key(resource)))
         return episodes, score, res
 
-    async def check(self, client_id: str, sub: Subscription) -> list[tuple[str, str, str | None]]:
-        """检查一个订阅，返回新产生的通知 (kind, message, share)。"""
+    async def check(
+        self, client_id: str, sub: Subscription, sync_save: bool = False
+    ) -> list[tuple[str, str, str | None]]:
+        """检查一个订阅，返回新产生的通知 (kind, message, share)。
+
+        `sync_save`：刚打开自动转存或手动「立即检查」时为 True——即使没有新集，
+        也把目前集数最多的分享里网盘缺的集补齐（已有的跳过）。
+        """
         # 强制全网搜索，且记忆里的链接也全部重新验证（集数可能已经变了）
         resp = await self._agent.run(
             SearchRequest(query=sub.query, refresh=True, client_id=client_id), fresh_hours=0
         )
         episodes, score, res, most, best = snapshot(resp.links)
+        movie = most is not None and most.quality.video_count <= 1  # 单个视频文件按电影处理
         notes: list[tuple[str, str, str | None]] = []
         if most and episodes > sub.best_episodes:
-            before = f"（之前 {sub.best_episodes} 集）" if sub.best_episodes else ""
-            notes.append((
-                "episodes",
-                f"《{sub.resource}》更新到 {episodes} 集{before}：{_link_text(most)}",
-                most.share,
-            ))
+            if sub.best_episodes == 0:  # 订阅时还没有资源（或只搜到过无效的）
+                count = "" if movie else f"，目前 {episodes} 集"
+                notes.append((
+                    "found", f"《{sub.resource}》有资源了{count}：{_link_text(most)}", most.share,
+                ))
+            else:
+                notes.append((
+                    "episodes",
+                    (
+                        f"《{sub.resource}》更新到 {episodes} 集（之前 {sub.best_episodes} 集）："
+                        f"{_link_text(most)}"
+                    ),
+                    most.share,
+                ))
             sub.best_episodes = episodes
         if best and score > sub.best_score:
             if sub.best_score:  # 第一次拿到质量分只作为起点，不打扰
@@ -95,9 +111,25 @@ class SubscriptionWatcher:
                 ))
             sub.best_score = score
             sub.best_resolution = res
-        if notes and sub.auto_save and self.auto_saver is not None:
+        if sub.auto_save and self.auto_saver is not None:
             links = {lk.share: lk for lk in (most, best) if lk is not None}
-            for share in dict.fromkeys(n[2] for n in list(notes) if n[2] in links):
+            if movie:
+                # 电影：第一次出现满足清晰度要求的有效资源时存一次；之后更高清只提醒，不重复存
+                shares: list[str] = []
+                if not await self._store.has_auto_saved(sub.id):
+                    ok = [lk for lk in resp.links if lk.state == "valid" and lk.quality
+                          and lk.relevance != "mismatch"
+                          and meets_requirement(lk.quality, resp.required_resolution)]
+                    if ok:
+                        pick = max(ok, key=lambda lk: lk.quality.score)
+                        links[pick.share] = pick
+                        shares = [pick.share]
+            else:
+                # 剧集：新集 / 更高清 / 立即检查时，把网盘缺的集补齐（已有的跳过）
+                shares = [n[2] for n in notes if n[2] in links]
+                if sync_save and most:
+                    shares.insert(0, most.share)
+            for share in dict.fromkeys(shares):
                 try:
                     notes += await self.auto_saver(client_id, sub, links[share])
                 except Exception:  # 自动转存出错不影响通知本身

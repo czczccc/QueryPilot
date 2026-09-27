@@ -361,11 +361,19 @@ def create_app(
         user = await _user_cookie(request)
         if login_enabled and user is None:
             raise HTTPException(status_code=401, detail="订阅追剧需要先扫码登录夸克")
+        if req.auto_save and user is None:
+            raise HTTPException(status_code=401, detail="自动转存需要先扫码登录夸克")
         owner = f"u:{user[3]}" if user else req.client_id
         baseline = await app.state.watcher.baseline(req.resource)
         sub = await store.add_subscription(owner, req.query, req.resource, baseline)
         if sub is None:
             raise HTTPException(status_code=409, detail="订阅数已达上限（20 个）")
+        if req.auto_save:
+            sub = await store.set_auto_save(owner, sub.id, True) or sub
+            if _cooldown_ok(sub.id):  # 立即在后台检查一次：已有资源就马上存
+                task = asyncio.create_task(_sync_check(owner, sub))
+                _bg_tasks.add(task)
+                task.add_done_callback(_bg_tasks.discard)
         return sub
 
     @app.get("/api/subscriptions", response_model=list[Subscription])
@@ -382,10 +390,65 @@ def create_app(
         user = await _user_cookie(request)
         if req.auto_save and user is None:
             raise HTTPException(status_code=401, detail="自动转存需要先扫码登录夸克")
-        sub = await store.set_auto_save(await _owner(request, client_id), sub_id, req.auto_save)
+        owner = await _owner(request, client_id)
+        sub = await store.set_auto_save(owner, sub_id, req.auto_save)
         if sub is None:
             raise HTTPException(status_code=404, detail="订阅不存在")
+        if req.auto_save and _cooldown_ok(sub.id):
+            # 打开时立即在后台检查一次，把网盘里缺的现有集补齐
+            task = asyncio.create_task(_sync_check(owner, sub))
+            _bg_tasks.add(task)
+            task.add_done_callback(_bg_tasks.discard)
         return sub
+
+    _bg_tasks: set[asyncio.Task] = set()
+    _last_sync: dict[int, float] = {}
+    SYNC_COOLDOWN = 120.0  # 同一订阅两次「立即检查」至少间隔这么多秒
+
+    def _cooldown_ok(sub_id: int) -> bool:
+        now = time.monotonic()
+        if now - _last_sync.get(sub_id, -SYNC_COOLDOWN) < SYNC_COOLDOWN:
+            return False
+        _last_sync[sub_id] = now
+        while len(_last_sync) > 5000:
+            _last_sync.pop(next(iter(_last_sync)))
+        return True
+
+    async def _sync_check(owner: str, sub: Subscription) -> list[tuple]:
+        """立即检查并补齐：重搜 → 通知 → 自动转存缺的集。LLM 用量记到订阅者名下。"""
+        allowed = True
+        if quota is not None:
+            allowed = (await quota.check(SYSTEM, SYSTEM, True)).reason != "site_budget"
+        try:
+            with llm.scope(allowed=allowed) as meter:
+                notes = await app.state.watcher.check(owner, sub, sync_save=True)
+        except Exception:
+            logger.exception("订阅立即检查失败 id=%s", sub.id)
+            return []
+        if quota is not None and owner.startswith("u:"):
+            await quota.record(f"user:{owner[2:]}", SYSTEM, meter, searched=False)
+        return notes
+
+    @app.post("/api/subscriptions/{sub_id}/check")
+    async def check_now(
+        sub_id: int, request: Request, client_id: str = ClientId,
+        _: None = Depends(rate_limit_dep),
+    ) -> dict:
+        """立即检查这个订阅（会重新搜索，耗时几十秒）；打开了自动转存时顺带补齐网盘缺的集。
+
+        返回这次产生的通知；同一订阅 2 分钟内只能触发一次。
+        """
+        store = _store_or_404()
+        if login_enabled and await _user_cookie(request) is None:
+            raise HTTPException(status_code=401, detail="请先扫码登录夸克")
+        owner = await _owner(request, client_id)
+        sub = next((x for _, x in await store.list_subscriptions(owner) if x.id == sub_id), None)
+        if sub is None:
+            raise HTTPException(status_code=404, detail="订阅不存在")
+        if not _cooldown_ok(sub.id):
+            raise HTTPException(status_code=429, detail="刚检查过，请稍后再试")
+        notes = await _sync_check(owner, sub)
+        return {"notifications": [{"kind": k, "message": m, "share": sh} for k, m, sh in notes]}
 
     @app.get("/api/subscriptions/{sub_id}/saves")
     async def auto_save_log(sub_id: int, request: Request, client_id: str = ClientId) -> list[dict]:

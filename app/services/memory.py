@@ -565,6 +565,17 @@ class LinkStore:
             (sub_id, share, int(ok), file_count, folder, message, time.time()),
         )
 
+    async def has_auto_saved(self, sub_id: int) -> bool:
+        """这个订阅是否已经成功自动转存过文件（电影只存一次）。"""
+        def run() -> bool:
+            with self._lock:
+                return self._conn.execute(
+                    "SELECT 1 FROM auto_saves WHERE subscription_id = ? AND ok = 1"
+                    " AND file_count > 0 LIMIT 1", (sub_id,),
+                ).fetchone() is not None
+
+        return await asyncio.to_thread(run)
+
     async def auto_save_log(self, client_id: str, sub_id: int, limit: int = 20) -> list[dict]:
         def run() -> list[dict]:
             with self._lock:
