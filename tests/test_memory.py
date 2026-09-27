@@ -1,7 +1,7 @@
 """记忆库（SQLite 链接库）与搜索编排中的记忆逻辑测试。"""
 
+import asyncio
 import socket
-import time
 
 import httpx
 import pytest
@@ -67,7 +67,7 @@ async def test_stale_valid_ordering():
     store = LinkStore(":memory:")
     await store.save("k", [_link("old")])
     await store.save("k", [_link("new")])
-    time.sleep(0.01)
+    await asyncio.sleep(0.01)
     assert await store.stale_valid(older_than_hours=0, limit=10) != []
     assert await store.stale_valid(older_than_hours=1, limit=10) == []
 
@@ -176,7 +176,7 @@ async def test_reverify_stale_marks_dead_links():
     store = LinkStore(":memory:")
     await store.save("k", [_link("alive00001"), _link("dead000001")])
     svc = _svc(CountingTavily([]), _verify_client(invalid={"dead000001"}), store)
-    time.sleep(0.01)
+    await asyncio.sleep(0.01)
     died = await svc.reverify_stale(older_than_hours=0, limit=10)
     assert died == 1
     assert [r.share for r in await store.recall("k")] == ["alive00001"]
