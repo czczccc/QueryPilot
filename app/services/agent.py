@@ -14,7 +14,7 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 import httpx
@@ -29,6 +29,14 @@ from app.models import (
     SearchMetrics,
     SearchRequest,
     UserPrefs,
+)
+from app.services.conversation import (
+    Conversation,
+    ConversationStore,
+    Refinement,
+    interpret_llm,
+    interpret_rules,
+    refined_parsed,
 )
 from app.services.memory import resource_key
 from app.services.quality import meets_requirement, required_resolution
@@ -153,6 +161,8 @@ class AgentState:
     refresh: bool
     target: RelevanceTarget
     prefs: UserPrefs = field(default_factory=UserPrefs)
+    need_subtitle: bool = False
+    need_hdr: bool = False
     candidates: dict[str, QuarkLink] = field(default_factory=dict)
     verified: set[str] = field(default_factory=set)
     skipped_invalid: set[str] = field(default_factory=set)
@@ -168,6 +178,13 @@ class AgentState:
         """本次验证过，或是新鲜期内的记忆链接（旧记忆需重新验证才算数）。"""
         return link.share in self.verified or is_fresh(link, self.fresh_after)
 
+    def passes_filters(self, link: QuarkLink) -> bool:
+        """追问里提出的硬性条件：要字幕 / 要 HDR。"""
+        q = link.quality
+        if self.need_subtitle and not (q and q.has_subtitle):
+            return False
+        return not (self.need_hdr and not (q and q.hdr))
+
     def matching(self) -> list[QuarkLink]:
         return [
             c for c in self.candidates.values()
@@ -175,7 +192,16 @@ class AgentState:
             and c.state == "valid"
             and c.relevance != "mismatch"
             and meets_requirement(c.quality, self.required)
+            and self.passes_filters(c)
         ]
+
+    def filters(self) -> dict:
+        return {
+            "season": self.target.season,
+            "resolution": self.required,
+            "subtitle": self.need_subtitle,
+            "hdr": self.need_hdr,
+        }
 
     def unverified(self) -> list[QuarkLink]:
         return [
@@ -355,8 +381,10 @@ class SearchAgent:
         api_key: str = "",
         client: httpx.AsyncClient | None = None,
         max_seconds: float = MAX_SECONDS,
+        conversations: ConversationStore | None = None,
     ) -> None:
         self._service = service
+        self._conversations = conversations or ConversationStore()
         self._api_key = api_key
         self._client = client or httpx.AsyncClient(timeout=20.0)
         self._max_seconds = max_seconds
@@ -369,28 +397,75 @@ class SearchAgent:
     async def run(self, req: SearchRequest, emit: Emit | None = None) -> AgentSearchResponse:
         started = time.monotonic()
         request_id = uuid.uuid4().hex
-        parsed, fallback_used, douban = await self._service.prepare(req.query)
         prefs = await self._service.prefs_for(req.client_id)
-        state = AgentState(
-            parsed=parsed,
-            # 本次明确要求的清晰度优先，其次是用户偏好里的默认最低清晰度
-            required=required_resolution(parsed.quality)
-            or required_resolution(req.query)
-            or prefs.min_resolution,
-            refresh=req.refresh,
-            target=build_target(parsed, req.query, douban.year if douban else None),
-            prefs=prefs,
-            fresh_after=time.time() - FRESH_HOURS * 3600,
-        )
+        steps: list[AgentStep] = []
+
+        # 追问：沿用上一轮会话，把这句话解释成对条件的修改
+        conv = self._conversations.get(req.session_id)
+        ref: Refinement | None = None
+        if conv is not None:
+            t0 = time.monotonic()
+            ref = None
+            if self._api_key:
+                ref = await interpret_llm(req.query, conv, self._api_key, self._client)
+            ref = ref or interpret_rules(req.query)
+            step = AgentStep(
+                step=1, tool="interpret_followup", args={"text": req.query},
+                observation=ref.describe(), planner="llm" if ref.by == "llm" else "rules",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            )
+            steps.append(step)
+            if emit:
+                await emit(step)
+            if ref.mode == "new":
+                conv = None
+
+        if conv is not None and ref is not None:
+            parsed = refined_parsed(conv, ref)
+            fallback_used, douban = False, conv.douban
+            state = AgentState(
+                parsed=parsed,
+                required=ref.resolution or conv.required,
+                refresh=ref.more,  # 「再找找」：即使已满足也补搜一轮
+                target=replace(conv.target, season=ref.season or conv.target.season),
+                prefs=prefs,
+                need_subtitle=conv.need_subtitle or ref.subtitle,
+                need_hdr=conv.need_hdr or ref.hdr,
+                recalled=True,
+                fresh_after=time.time() - FRESH_HOURS * 3600,
+            )
+            # 上一轮验证过的链接直接作为候选（条件变了要重新判定相关性）
+            for link in conv.links:
+                judge(link, state.target)
+                state.candidates[link.share] = link
+            state.verified = {s for s in conv.verified if s in state.candidates}
+            session_id, history = conv.id, [*conv.history, req.query]
+        else:
+            parsed, fallback_used, douban = await self._service.prepare(req.query)
+            state = AgentState(
+                parsed=parsed,
+                # 本次明确要求的清晰度优先，其次是用户偏好里的默认最低清晰度
+                required=required_resolution(parsed.quality)
+                or required_resolution(req.query)
+                or prefs.min_resolution,
+                refresh=req.refresh,
+                target=build_target(parsed, req.query, douban.year if douban else None),
+                prefs=prefs,
+                fresh_after=time.time() - FRESH_HOURS * 3600,
+            )
+            session_id, history = ConversationStore.new_id(), [req.query]
         providers = self._service.new_providers()
         key = resource_key(parsed.resource)
 
         planner: Planner = self._planner()
-        steps: list[AgentStep] = []
         last: tuple[Action, dict] | None = None
         stop_reason = "达到步数上限"
+        # 追问后上一轮结果已够用：只筛选，不再搜索
+        filter_only = conv is not None and state.satisfied() and not state.refresh
+        if filter_only:
+            stop_reason = "在上一轮结果里筛选即可满足"
 
-        while len(steps) < MAX_STEPS:
+        while not filter_only and len(steps) < MAX_STEPS:
             if time.monotonic() - started > self._max_seconds:
                 stop_reason = "达到时间预算"
                 break
@@ -458,7 +533,8 @@ class SearchAgent:
 
         return await self._finalize(
             req, request_id, started, state, providers, key, steps, planner.name,
-            stop_reason, fallback_used, douban,
+            stop_reason, fallback_used, douban, session_id, history,
+            ref.describe() if ref else None,
         )
 
     async def _execute(
@@ -554,9 +630,15 @@ class SearchAgent:
         stop_reason: str,
         fallback_used: bool,
         douban: DoubanMeta | None,
+        session_id: str,
+        history: list[str],
+        followup: dict | None,
     ) -> AgentSearchResponse:
-        # 只返回验证过（或新鲜记忆）的链接；未验证的不展示
-        final = [c for c in state.candidates.values() if state.confirmed(c)]
+        # 只返回验证过（或新鲜记忆）的链接；未验证的不展示；追问的硬性条件不满足的不展示
+        final = [
+            c for c in state.candidates.values()
+            if state.confirmed(c) and (c.state != "valid" or state.passes_filters(c))
+        ]
         searched = state.search_calls > 0
         if (
             searched
@@ -576,6 +658,19 @@ class SearchAgent:
             )
         )
         await self._service.remember(key, req.query, final, from_memory=not searched)
+        # 保存会话：下一句追问在这轮结果上继续（包括被筛掉的，条件放宽时还能用）
+        self._conversations.put(Conversation(
+            id=session_id,
+            parsed=state.parsed,
+            target=state.target,
+            required=state.required,
+            need_subtitle=state.need_subtitle,
+            need_hdr=state.need_hdr,
+            links=[c for c in state.candidates.values() if state.confirmed(c)],
+            verified={c.share for c in state.candidates.values() if state.confirmed(c)},
+            history=history,
+            douban=douban,
+        ))
 
         metrics = SearchMetrics(
             duration_ms=int((time.monotonic() - started) * 1000),
@@ -599,5 +694,9 @@ class SearchAgent:
             stop_reason=stop_reason,
             required_resolution=state.required,
             matching_count=len(state.matching()),
+            session_id=session_id,
+            history=history,
+            followup=followup,
+            filters=state.filters(),
         )
 

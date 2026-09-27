@@ -135,7 +135,7 @@ function renderParsed(parsed, douban) {
   parsedCard.appendChild(v);
 }
 
-function renderMetrics(metrics, providers) {
+function renderMetrics(metrics, providers, isFollowup) {
   metricsEl.hidden = false;
   metricsEl.innerHTML = "";
   const parts = [
@@ -151,7 +151,7 @@ function renderMetrics(metrics, providers) {
   setText(p, parts.join("　·　"));
   metricsEl.appendChild(p);
 
-  if (metrics.served_from_memory) {
+  if (metrics.served_from_memory && !isFollowup) {
     const note = document.createElement("p");
     setText(note, "这些结果来自之前搜索并验证过的记忆，已跳过全网搜索。");
     const btn = document.createElement("button");
@@ -320,6 +320,17 @@ const TOOL_TEXT = {
     "AI 核对 " + (a.count || 0) + " 条标题不明确的链接 → 相关 " + (o.match || 0) +
     "、不相关 " + (o.mismatch || 0) + "；满足要求累计 " + (o.matching_total || 0) + " 条",
   finish: (a) => "结束：" + (a.reason || ""),
+  interpret_followup: (a, o) => {
+    if (o.mode === "new") return "理解追问「" + a.text + "」：这是一个新的搜索";
+    const bits = [];
+    if (o.season) bits.push("改为第" + o.season + "季");
+    if (o.resolution) bits.push("要 " + (RES_LABEL[o.resolution] || o.resolution) + " 以上");
+    if (o.subtitle) bits.push("要字幕");
+    if (o.hdr) bits.push("要 HDR");
+    if (o.more) bits.push("再多找一些");
+    return "理解追问「" + a.text + "」" + (o.by === "llm" ? "（AI）" : "") + "：" +
+      (bits.join("、") || "沿用上一轮条件");
+  },
 };
 
 function renderStep(step) {
@@ -355,7 +366,8 @@ function renderResult(data) {
     "，" + data.steps.length + " 步）· " + data.stop_reason);
 
   renderParsed(data.parsed, data.douban);
-  renderMetrics(data.metrics, data.providers);
+  renderMetrics(data.metrics, data.providers, !!data.followup);
+  renderFollowup(data);
 
   if (data.links.length === 0) {
     resultList.innerHTML = "";
@@ -371,8 +383,34 @@ function renderResult(data) {
 }
 
 let currentSource = null;
+let sessionId = null;
 
-function doSearch(query, refresh = false) {
+const followupForm = document.getElementById("followup-form");
+const followupInput = document.getElementById("followup-input");
+const followupHistory = document.getElementById("followup-history");
+
+function renderFollowup(data) {
+  sessionId = data.session_id || null;
+  followupForm.hidden = !sessionId;
+  const f = data.filters || {};
+  const conds = [];
+  if (f.season) conds.push("第" + f.season + "季");
+  if (f.resolution) conds.push((RES_LABEL[f.resolution] || f.resolution) + " 以上");
+  if (f.subtitle) conds.push("要字幕");
+  if (f.hdr) conds.push("要 HDR");
+  setText(followupHistory, "对话：" + (data.history || []).join(" › ") +
+    (conds.length ? "　|　当前条件：" + conds.join("、") : ""));
+  followupInput.value = "";
+}
+
+followupForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const q = followupInput.value.trim();
+  if (q.length < 2) return;
+  doSearch(q, false, sessionId);
+});
+
+function doSearch(query, refresh = false, followupOf = null) {
   lastQuery = query;
   hideFormError();
   resultsSection.hidden = true;
@@ -390,7 +428,8 @@ function doSearch(query, refresh = false) {
 
   const url = "/api/agent/stream?query=" + encodeURIComponent(query) +
     (refresh ? "&refresh=true" : "") +
-    (clientId ? "&client_id=" + encodeURIComponent(clientId) : "");
+    (clientId ? "&client_id=" + encodeURIComponent(clientId) : "") +
+    (followupOf ? "&session_id=" + encodeURIComponent(followupOf) : "");
   const source = new EventSource(url);
   currentSource = source;
   let finished = false;

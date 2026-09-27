@@ -61,6 +61,15 @@
     <section id="results" hidden aria-label="搜索结果">
       <div id="parsed-card" class="card" hidden></div>
       <div id="metrics" class="metrics" hidden></div>
+      <form id="followup-form" class="card followup" hidden novalidate>
+        <p id="followup-history" class="followup-history"></p>
+        <div class="search-row">
+          <label class="visually-hidden" for="followup-input">继续追问</label>
+          <input id="followup-input" type="text" autocomplete="off" maxlength="200"
+                 placeholder="继续追问：要第二季 / 只要中字的 / 4K 的呢 / 再找找">
+          <button id="followup-btn" type="submit" class="secondary-btn">追问</button>
+        </div>
+      </form>
       <div id="link-actions" class="link-actions" hidden>
         <label class="filter-label">
           <input type="checkbox" id="hide-dead" checked> 只看有效且相关的链接
