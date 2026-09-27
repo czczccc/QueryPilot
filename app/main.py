@@ -239,6 +239,8 @@ def create_app(
         )
     if watcher is not None:
         watcher.lookup = media_lookup
+    if agent is None:
+        resolved_agent.lookup = media_lookup
     if search_on_subscribe is None:
         search_on_subscribe = service is None
     if classifier is None and service is None and _settings.save_classify:

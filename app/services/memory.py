@@ -655,6 +655,18 @@ class LinkStore:
         )
         return n > 0
 
+    async def notified_shares(self, sub_id: int) -> set[str]:
+        """这个订阅已经发过通知的分享码。"""
+        def run() -> set[str]:
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT DISTINCT share FROM notifications WHERE subscription_id = ? "
+                    "AND share IS NOT NULL", (sub_id,),
+                ).fetchall()
+            return {r["share"] for r in rows}
+
+        return await asyncio.to_thread(run)
+
     async def archive_subscription(self, client_id: str, sub: Subscription, reason: str) -> int:
         """订阅完成：移入订阅历史（可重新订阅），返回历史记录 id。"""
         return await asyncio.to_thread(self._archive, client_id, sub, reason, time.time())

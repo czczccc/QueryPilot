@@ -110,6 +110,19 @@ def build_target(parsed: ParsedResource, query: str, douban_year: str | None = N
     )
 
 
+def add_aliases(target: RelevanceTarget, infos: list) -> None:
+    """用 TMDB / 豆瓣查到的标准中文名、原名补充片名（只认和搜索片名互相包含的条目，免得认错）。"""
+    for info in infos:
+        keys = [_key(t) for t in (info.title, info.original_title or "") if t]
+        if not keys or not any(
+            n in keys[0] or keys[0] in n for n in target.names if len(keys[0]) >= 2
+        ):
+            continue
+        for k in keys:
+            if len(k) >= 2 and k not in target.names:
+                target.names.append(k)
+
+
 def _title_hits(title: str, target: RelevanceTarget) -> bool:
     """书名号里的作品名是不是要找的那部：互相包含（「鬼吹灯之精绝古城」含「鬼吹灯」，
     「精英律师」在「靳东精英律师」里）；只含演员名这类片段不算。"""

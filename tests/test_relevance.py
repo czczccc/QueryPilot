@@ -285,3 +285,51 @@ def test_uncertain_links_never_trigger_subscription_or_auto_save():
     assert snapshot([link])[0] == 0
     link.relevance = "match"
     assert snapshot([link])[0] == 40
+
+
+def test_aliases_from_tmdb_douban():
+    from app.services.metadata import MediaInfo
+    from app.services.relevance import add_aliases
+
+    target = build_target(P("漫长的季节"), "漫长的季节")
+    add_aliases(target, [
+        MediaInfo(source="tmdb", title="漫长的季节", original_title="The Long Season"),
+        MediaInfo(source="tmdb", title="繁花", original_title="Blossoms Shanghai"),  # 不相干
+    ])
+    assert "thelongseason" in target.names and "blossomsshanghai" not in target.names
+    link = L(title="The.Long.Season.S01.2160p", files=["E01.mkv"])
+    judge(link, target)
+    assert link.relevance == "match"
+
+
+async def test_subscription_rechecks_entry_and_asks_about_unsure():
+    """订阅按自己的条目再判：年份不符的不算；只有拿不准的时发一次「请核对」，不自动转存。"""
+    from tests.test_subscriptions import eps, setup
+
+    s = shares("ep", 2)
+    files = {s[0]: ["流浪地球2.2019.E01.1080p.mkv", "流浪地球2.2019.E02.1080p.mkv"],
+             s[1]: eps(3)}
+    store, _, watcher = setup(files, s)
+    saved = []
+
+    async def saver(client_id, sub, link, wanted=None):
+        saved.append(link.share)
+        return []
+
+    watcher.auto_saver = saver
+    sub = await store.add_subscription("c" * 8, "流浪地球2", "流浪地球2", year="2023",
+                                       media="tv", season=1, auto_save=True)
+    notes = await watcher.check("c" * 8, sub)
+    # 2019 年的那个被判年份不符；另一个确认相关
+    assert [k for k, _, _ in notes] == ["found"] and s[1] in notes[0][1]
+    assert saved == [s[1]]
+
+    unsure_files = {s[0]: ["合集.E01.mkv", "合集.E02.mkv"]}
+    store2, _, watcher2 = setup(unsure_files, [s[0]])
+    watcher2.auto_saver = saver
+    saved.clear()
+    sub2 = await store2.add_subscription("c" * 8, "流浪地球2", "流浪地球2", auto_save=True)
+    notes = await watcher2.check("c" * 8, sub2)
+    assert [k for k, _, _ in notes] == ["maybe"] and saved == []
+    [(_, again)] = await store2.list_subscriptions("c" * 8)
+    assert await watcher2.check("c" * 8, again) == []  # 同一个只提醒一次
