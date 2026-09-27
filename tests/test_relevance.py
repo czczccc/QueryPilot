@@ -87,10 +87,11 @@ def test_uncertain_when_no_name():
     assert link.relevance == "uncertain"
 
 
-def test_falls_back_to_page_title_without_share_info():
+def test_page_title_only_is_not_enough():
+    """只有搜索页标题（可能是一页上百个链接的聚合页）：最多算待核对。"""
     link = L(name="漫长的季节 夸克网盘资源")
     judge(link, build_target(P(), "漫长的季节"))
-    assert link.relevance == "match"
+    assert link.relevance == "uncertain"
 
 
 async def test_llm_judge_resolves_uncertain():
@@ -228,3 +229,59 @@ def test_prefs_and_feedback_api():
 def test_prefs_api_404_without_memory():
     client = _client(store=None)
     assert client.get("/api/prefs", params={"client_id": "client-xyz"}).status_code == 404
+
+
+# ---------------- 聚合页 / 演员名干扰（用户反馈的两个例子） ----------------
+
+AGG = "datashare_data/share_detail.md at main"
+
+
+def test_aggregator_page_links_judged_by_their_own_share_title():
+    """搜「鬼吹灯」：GitHub 聚合页一页上百个链接，每条都带页面标题；
+    以夸克分享自己的标题为准，《魔力歌先生》《还珠格格》不能算相关。"""
+    from app.services.intent import rule_based_parsed
+
+    target = build_target(rule_based_parsed("鬼吹灯"), "鬼吹灯")
+    wrong1 = L(name=AGG, title="[国产综艺]《魔力歌先生》（2026年）-毒舌电影最抖音",
+               files=["S01.2026.2160p.60fps.WEB-DL.h265.10bit.AAC"])
+    wrong2 = L(name=AGG, title="[国产剧]《还珠格格》（共4季）（1998-2011年）-毒舌电影最抖音",
+               files=["还珠格格1 1080P 国语中字 无台标"])
+    right = L(name=AGG, title="[国产剧]《鬼吹灯之精绝古城》（2016）4K",
+              files=["鬼吹灯之精绝古城.E01.2160p.mkv"])
+    for lk in (wrong1, wrong2, right):
+        judge(lk, target)
+    assert (wrong1.relevance, wrong1.relevance_note) == ("mismatch", "分享是《魔力歌先生》")
+    assert wrong2.relevance == "mismatch"
+    assert right.relevance == "match"
+    # 只有聚合页标题、没读到分享内容：最多待核对
+    page_only = L(name="鬼吹灯 夸克网盘资源合集")
+    judge(page_only, target)
+    assert page_only.relevance == "uncertain"
+
+
+def test_actor_name_in_query_does_not_decide_relevance():
+    """搜「靳东 精英律师」：片名是「精英律师」，只含演员名的其它剧不算相关。"""
+    from app.services.intent import rule_based_parsed
+
+    for q in ("靳东 精英律师", "靳东的精英律师"):
+        target = build_target(rule_based_parsed(q), q)
+        other = L(title="《伪装者》靳东 胡歌 全48集", files=["伪装者.E01.1080p.mp4"])
+        actor_only = L(title="靳东主演 电视剧合集", files=["外交风云.E01.1080p.mp4"])
+        right = L(title="《精英律师》全40集 4K", files=["精英律师.E01.2160p.mp4"])
+        plain = L(title="精英律师 全40集", files=["E01.mp4"])
+        for lk in (other, actor_only, right, plain):
+            judge(lk, target)
+        assert other.relevance == "mismatch", q
+        assert actor_only.relevance == "uncertain", q  # 不算相关，留给 AI 核对
+        assert right.relevance == "match" and plain.relevance == "match", q
+
+
+def test_uncertain_links_never_trigger_subscription_or_auto_save():
+    from app.services.subscriptions import snapshot
+
+    link = L(title="靳东主演 电视剧合集", files=["外交风云.E01.1080p.mp4"],
+             quality=QualityInfo(resolution="1080p", score=30, video_count=40))
+    link.relevance = "uncertain"
+    assert snapshot([link])[0] == 0
+    link.relevance = "match"
+    assert snapshot([link])[0] == 40

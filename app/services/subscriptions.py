@@ -16,9 +16,10 @@ from collections.abc import Awaitable, Callable
 
 import httpx
 
-from app.models import QuarkLink, SearchRequest, Subscription
+from app.models import ParsedResource, QuarkLink, SearchRequest, Subscription
 from app.services.memory import LinkStore, resource_key
 from app.services.quality import meets_requirement
+from app.services.relevance import build_target, judge
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ def snapshot(links: list[QuarkLink]) -> tuple[int, int, str | None, QuarkLink | 
     """(最多集数, 最高质量分, 最高分的清晰度, 集数最多的链接, 质量最高的链接)。"""
     good = [
         lk for lk in links
-        if lk.state == "valid" and lk.quality and lk.relevance != "mismatch"
+        if lk.state == "valid" and lk.quality and lk.relevance == "match"  # 待核对的不算
     ]
     if not good:
         return 0, 0, None, None, None
@@ -86,7 +87,12 @@ class SubscriptionWatcher:
 
     async def baseline(self, resource: str) -> tuple[int, int, str | None]:
         """订阅时的起点：记忆库里这部资源已知的最好情况，避免一订阅就把旧资源当成更新。"""
-        episodes, score, res, _, _ = snapshot(await self._store.recall(resource_key(resource)))
+        links = await self._store.recall(resource_key(resource))
+        target = build_target(ParsedResource(resource=resource, search_suggestions=[resource]),
+                              resource)
+        for link in links:  # 记忆库不存相关性，按片名重新判一遍
+            judge(link, target)
+        episodes, score, res, _, _ = snapshot(links)
         return episodes, score, res
 
     async def check(
@@ -139,7 +145,7 @@ class SubscriptionWatcher:
             sub.best_score = score
             sub.best_resolution = res
         ok = [lk for lk in links if lk.state == "valid" and lk.quality
-              and lk.relevance != "mismatch" and meets_requirement(lk.quality, required)]
+              and lk.relevance == "match" and meets_requirement(lk.quality, required)]
         if sub.auto_save and self.auto_saver is not None:
             notes += await self._auto_save(client_id, sub, movie, ok, notes, sync_save)
         done = self._completed(sub, movie, ok)
