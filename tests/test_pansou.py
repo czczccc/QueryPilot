@@ -129,13 +129,13 @@ def pansou_service(seen: list):
     return service
 
 
-async def test_rules_mode_also_uses_pansou():
+async def test_search_always_includes_pansou():
     seen: list = []
     resp = await SearchAgent(pansou_service(seen)).run(SearchRequest(query="流浪地球2"))
     tools = [s.tool for s in resp.steps]
     assert resp.planner == "rules"
-    assert tools[:4] == ["recall_memory", "search", "pansou_search", "verify"]
-    assert seen == ["流浪地球2"]  # search 工具本身不再调 PanSou，只调一次
+    assert tools[:3] == ["recall_memory", "search", "verify"]
+    assert seen == ["流浪地球2"]  # search 顺带查了 PanSou
     # PanSou 的结果和其他来源一样经过验证与相关性判定
     got = {lk.share: lk for lk in resp.links}
     assert all(got[s].state == "valid" and got[s].relevance == "match" for s in PS_SHARES)
@@ -158,7 +158,8 @@ async def test_llm_sees_pansou_tool_only_when_configured():
     names = [t["function"]["name"] for t in seen_llm[0]["tools"]]
     assert names.index("pansou_search") == names.index("search") + 1
     assert "pansou_search" in seen_llm[0]["messages"][0]["content"]
-    assert seen == ["The Wandering Earth 2"]  # 同一关键词第二次被拒绝
+    # AI 模式下 search 也自动带上 PanSou；pansou_search 换别名深挖；同一关键词第二次被拒绝
+    assert seen == ["流浪地球2", "The Wandering Earth 2"]
     assert resp.steps[2].observation == {"error": "这个关键词已经用 PanSou 搜过了"}
     assert resp.matching_count == 6
 

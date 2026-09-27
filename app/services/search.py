@@ -186,7 +186,7 @@ class QuarkSearchService:
                 status.status = "skipped"
         else:
             links = await self.collect(
-                parsed.search_suggestions, parsed.resource, providers, pansou=True
+                parsed.search_suggestions, parsed.resource, providers
             )
             if (
                 not links
@@ -232,13 +232,13 @@ class QuarkSearchService:
         keyword: str,
         providers: dict[str, ProviderStatus],
         keyword_engines: bool = True,
-        pansou: bool = False,
+        pansou: bool = True,
         tavily: bool = True,
     ) -> list[QuarkLink]:
         """各引擎并发召回：Tavily 用 `queries`，云搜/Bing/Telegram/资源站/PanSou 用 `keyword`。
 
         `keyword_engines=False` 时不跑云搜/Bing/Telegram/资源站（关键词和上一轮相同，结果不会变）。
-        `pansou`：同时查 PanSou（agent 里它是单独的工具 `pansou_search`，这里默认不查）。
+        `pansou`：同时查 PanSou（配了才查；关键词用 PanSou 搜过时 agent 传 False 避免重复）。
         `tavily=False`：不跑 Tavily（只查 PanSou 时用）。
         单引擎失败只标记状态，不中断整体。
         """

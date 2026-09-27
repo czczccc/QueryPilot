@@ -68,6 +68,8 @@ class CaseResult:
     wrong: list[str] = field(default_factory=list)  # 判为相关但其实不是的分享标题（前几个）
     missed: list[str] = field(default_factory=list)  # 真相关但没判为相关的（前几个）
     error: str | None = None
+    pansou_valid: int = 0  # 只有 PanSou 找到的有效链接（同一分享码其他来源也有时标注保留其他来源）
+    pansou_relevant: int = 0  # 其中真相关的
 
 
 def score_case(case: Case, links: list[QuarkLink], labels: dict | None = None) -> CaseResult:
@@ -80,6 +82,9 @@ def score_case(case: Case, links: list[QuarkLink], labels: dict | None = None) -
             continue
         r.valid += 1
         g = gold(lk, case, labels)
+        if (lk.source or "").startswith("PanSou"):
+            r.pansou_valid += 1
+            r.pansou_relevant += bool(g)
         pred = lk.relevance == "match"
         if pred:
             r.predicted += 1
@@ -124,6 +129,8 @@ def summarize(results: list[CaseResult]) -> dict:
         "validity": _ratio(sum(r.valid for r in ok), sum(r.verified for r in ok)),
         "top1": _ratio(sum(1 for r in judged_top1 if r.top1), len(judged_top1)),
         "found": _ratio(sum(1 for r in ok if r.found), len(ok)),
+        "pansou_valid": sum(r.pansou_valid for r in ok),
+        "pansou_relevant": sum(r.pansou_relevant for r in ok),
     }
 
 
@@ -140,6 +147,9 @@ def report_markdown(summary: dict, results: list[CaseResult], title: str) -> str
         f"| 有效率 validity | {pct(summary['validity'])} | 验证出结果的链接里有效的比例 |",
         f"| 首条准确率 top1 | {pct(summary['top1'])} | 排第一的相关结果是对的比例 |",
         f"| 命中率 found | {pct(summary['found'])} | 至少找到一个真相关有效链接的比例 |",
+        "",
+        (f"PanSou 新增（只有 PanSou 找到的）有效链接 {summary.get('pansou_valid', 0)} 条，"
+         f"其中真相关 {summary.get('pansou_relevant', 0)} 条。"),
         "", "| 片名 | 有效/验证 | 判相关 | 真相关 | 命中 | 判错的 | 漏掉的 |",
         "|---|---|---|---|---|---|---|",
     ]

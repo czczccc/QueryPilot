@@ -154,8 +154,8 @@ PANSOU_TOOL = {
         "name": "pansou_search",
         "description": (
             "用 PanSou 网盘聚合搜索（几十个网盘搜索站一起搜，只要夸克链接），结果加入候选池（未验证）。"
-            "只按资源名搜，不花通用搜索引擎的额度；第一次 search 之后通常也调一次，"
-            "换别名、英文名时也可以再用。同一个关键词不要重复搜。"
+            "search 已经会用它的 keyword 顺带查 PanSou；想只用 PanSou 换别名、英文名、"
+            "指定季再深挖时用这个，不花通用搜索引擎的额度。同一个关键词不要重复搜。"
         ),
         "parameters": {
             "type": "object",
@@ -299,8 +299,6 @@ class RulePlanner:
                 "queries": state.parsed.search_suggestions,
                 "keyword": state.parsed.resource,
             })
-        if state.pansou and not state.pansou_keywords:  # 降级成规则时 PanSou 也照样用上
-            return Action("pansou_search", {"keyword": state.parsed.resource})
         if state.unverified() and state.verify_calls < 4:
             return Action("verify", {"limit": MAX_VERIFY_PER_CALL})
         if not state.satisfied() and state.search_calls == 1:
@@ -348,8 +346,8 @@ class DeepSeekPlanner:
         p = state.parsed
         prompt = SYSTEM_PROMPT.format(target=TARGET_MATCHES, steps=MAX_STEPS)
         if state.pansou:
-            prompt += ("\n另有 pansou_search（网盘聚合搜索，只按资源名）：第一次 search 之后"
-                       "通常也调一次，结果和 search 一样要 verify。")
+            prompt += ("\nsearch 会顺带查 PanSou 网盘聚合搜索；另有 pansou_search 只查 PanSou，"
+                       "适合换别名、英文名、加季数深挖，结果同样要 verify。")
         self._messages = [
             {"role": "system", "content": prompt},
             {"role": "user", "content": json.dumps({
@@ -684,8 +682,12 @@ class SearchAgent:
             state.used_keywords.append(keyword)
 
         # 关键词没变时，按关键词搜的引擎（云搜/Bing/Telegram/资源站）不再重复请求
+        # 每次 search 都同时查 PanSou（AI 模式也不靠 LLM 想起来）；这个关键词查过就不重复
+        pansou = state.pansou and keyword not in state.pansou_keywords
+        if pansou:
+            state.pansou_keywords.append(keyword)
         found = await self._service.collect(
-            queries, keyword, providers, keyword_engines=new_keyword
+            queries, keyword, providers, keyword_engines=new_keyword, pansou=pansou
         )
         return await self._add_found(found, state, providers)
 
