@@ -118,6 +118,8 @@ class QuarkSearchResponse(BaseModel):
     providers: list[ProviderStatus] = Field(default_factory=list)
     metrics: SearchMetrics
     douban: DoubanMeta | None = None  # 输入为豆瓣链接时填充
+    # 今日额度：{ai, reason, message, used, limit, remaining, logged_in}；未开启额度时为空
+    quota: dict | None = None
 
 
 class AgentStep(BaseModel):

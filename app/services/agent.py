@@ -13,7 +13,9 @@ import json
 import logging
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
@@ -380,15 +382,25 @@ class SearchAgent:
         client: httpx.AsyncClient | None = None,
         max_seconds: float = MAX_SECONDS,
         conversations: ConversationStore | None = None,
+        cache_minutes: float = 0,
     ) -> None:
+        """`cache_minutes`：同一句搜索（同样的偏好）在这段时间内直接复用上次结果，不再调 LLM。"""
         self._service = service
+        self._cache_seconds = cache_minutes * 60
+        self._cache: OrderedDict[str, tuple[float, AgentSearchResponse, Conversation]] = (
+            OrderedDict()
+        )
         self._conversations = conversations or ConversationStore()
         self._api_key = api_key
         self._client = client or httpx.AsyncClient(timeout=20.0)
         self._max_seconds = max_seconds
 
+    def _llm_on(self) -> bool:
+        """有 key，且本次请求没被降级（额度 / 全站预算）。"""
+        return bool(self._api_key) and llm.enabled()
+
     def _planner(self) -> Planner:
-        if self._api_key:
+        if self._llm_on():
             return DeepSeekPlanner(self._api_key, self._client)
         return RulePlanner()
 
@@ -403,11 +415,17 @@ class SearchAgent:
 
         # 追问：沿用上一轮会话，把这句话解释成对条件的修改
         conv = self._conversations.get(req.session_id)
+        cache_key = None
+        if conv is None and not req.refresh and fresh_hours > 0 and self._cache_seconds > 0:
+            cache_key = f"{resource_key(req.query)}|{prefs.model_dump_json()}"
+            hit = await self._from_cache(cache_key, emit)
+            if hit is not None:
+                return hit
         ref: Refinement | None = None
         if conv is not None:
             t0 = time.monotonic()
             ref = None
-            if self._api_key:
+            if self._llm_on():
                 ref = await interpret_llm(req.query, conv, self._api_key, self._client)
             ref = ref or interpret_rules(req.query)
             step = AgentStep(
@@ -505,7 +523,7 @@ class SearchAgent:
                 break
 
         # 规则判不了的标题，有 LLM 时批量交给 LLM 判断是否是同一部作品
-        if self._api_key and planner.name == "llm":
+        if self._llm_on() and planner.name == "llm":
             uncertain = [
                 c for c in state.candidates.values()
                 if state.confirmed(c) and c.state == "valid" and c.relevance == "uncertain"
@@ -532,11 +550,45 @@ class SearchAgent:
                 if emit:
                     await emit(step)
 
-        return await self._finalize(
+        resp = await self._finalize(
             req, request_id, started, state, providers, key, steps, planner.name,
             stop_reason, fallback_used, douban, session_id, history,
             ref.describe() if ref else None,
         )
+        if cache_key and resp.matching_count > 0:
+            self._cache[cache_key] = (
+                time.time(), resp.model_copy(deep=True),
+                deepcopy(self._conversations.get(session_id)),
+            )
+            while len(self._cache) > 500:
+                self._cache.popitem(last=False)
+        return resp
+
+    async def _from_cache(self, key: str, emit: Emit | None) -> AgentSearchResponse | None:
+        """命中缓存：复制一份结果（新的会话 id，追问照常可用），不调用 LLM、不搜索。"""
+        item = self._cache.get(key)
+        if item is None:
+            return None
+        ts, cached, conv = item
+        age = time.time() - ts
+        if age > self._cache_seconds or conv is None:
+            self._cache.pop(key, None)
+            return None
+        session_id = ConversationStore.new_id()
+        conv = deepcopy(conv)
+        conv.id = session_id
+        self._conversations.put(conv)
+        step = AgentStep(
+            step=1, tool="cache", args={"minutes_ago": int(age // 60)},
+            observation={"links": len(cached.links), "matching": cached.matching_count},
+        )
+        if emit:
+            await emit(step)
+        return cached.model_copy(deep=True, update={
+            "request_id": uuid.uuid4().hex, "session_id": session_id, "steps": [step],
+            "planner": "rules",
+            "stop_reason": f"{max(1, int(age // 60))} 分钟内搜过同样的内容，直接复用结果",
+        })
 
     async def _execute(
         self, action: Action, state: AgentState, providers: dict[str, ProviderStatus], key: str

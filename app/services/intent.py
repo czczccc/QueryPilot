@@ -126,7 +126,7 @@ class DeepSeekParser:
         self._timeout = timeout
 
     async def parse(self, query: str) -> ParseOutcome:
-        if not self._api_key:
+        if not self._api_key or not llm.enabled():
             logger.info("未配置 DEEPSEEK_API_KEY，使用规则降级")
             return ParseOutcome(parsed=rule_based_parsed(query), fallback_used=True)
         payload = {
