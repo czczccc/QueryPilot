@@ -16,7 +16,7 @@ import threading
 import time
 from pathlib import Path
 
-from app.models import QualityInfo, QuarkLink, UserPrefs
+from app.models import Notification, QualityInfo, QuarkLink, Subscription, UserPrefs
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS links (
@@ -47,6 +47,31 @@ CREATE TABLE IF NOT EXISTS searches (
     ts           REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_links_state_checked ON links(state, last_checked);
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id       TEXT NOT NULL,
+    query           TEXT NOT NULL,
+    resource        TEXT NOT NULL,
+    resource_key    TEXT NOT NULL,
+    created         REAL NOT NULL,
+    last_checked    REAL,
+    best_episodes   INTEGER NOT NULL DEFAULT 0,
+    best_score      INTEGER NOT NULL DEFAULT 0,
+    best_resolution TEXT,
+    UNIQUE (client_id, resource_key)
+);
+CREATE TABLE IF NOT EXISTS notifications (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscription_id INTEGER NOT NULL,
+    client_id       TEXT NOT NULL,
+    resource        TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    message         TEXT NOT NULL,
+    share           TEXT,
+    ts              REAL NOT NULL,
+    read            INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_client ON notifications(client_id, ts);
 CREATE TABLE IF NOT EXISTS prefs (
     client_id TEXT PRIMARY KEY,
     data      TEXT NOT NULL,
@@ -243,6 +268,105 @@ class LinkStore:
         stats["searches"] = searches
         return stats
 
+    def _add_subscription(
+        self, client_id: str, query: str, resource: str, baseline: tuple[int, int, str | None],
+        now: float, limit: int,
+    ) -> Subscription | None:
+        key = resource_key(resource)
+        with self._lock:
+            count = self._conn.execute(
+                "SELECT COUNT(*) FROM subscriptions WHERE client_id = ?", (client_id,)
+            ).fetchone()[0]
+            exists = self._conn.execute(
+                "SELECT id FROM subscriptions WHERE client_id = ? AND resource_key = ?",
+                (client_id, key),
+            ).fetchone()
+            if exists is None and count >= limit:
+                return None
+            self._conn.execute(
+                "INSERT INTO subscriptions (client_id, query, resource, resource_key, created, "
+                "best_episodes, best_score, best_resolution) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(client_id, resource_key) DO UPDATE SET query = excluded.query",
+                (client_id, query, resource, key, now, *baseline),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM subscriptions WHERE client_id = ? AND resource_key = ?",
+                (client_id, key),
+            ).fetchone()
+        return self._row_to_sub(row)
+
+    @staticmethod
+    def _row_to_sub(row: sqlite3.Row) -> Subscription:
+        return Subscription(
+            id=row["id"], query=row["query"], resource=row["resource"], created=row["created"],
+            last_checked=row["last_checked"], best_episodes=row["best_episodes"],
+            best_score=row["best_score"], best_resolution=row["best_resolution"],
+        )
+
+    def _list_subscriptions(self, client_id: str | None) -> list[tuple[str, Subscription]]:
+        sql = "SELECT * FROM subscriptions"
+        args: tuple = ()
+        if client_id is not None:
+            sql += " WHERE client_id = ?"
+            args = (client_id,)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY COALESCE(last_checked, 0), id", args)
+            return [(r["client_id"], self._row_to_sub(r)) for r in rows.fetchall()]
+
+    def _delete_subscription(self, client_id: str, sub_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM subscriptions WHERE id = ? AND client_id = ?", (sub_id, client_id)
+            )
+            self._conn.execute(
+                "DELETE FROM notifications WHERE subscription_id = ? AND client_id = ?",
+                (sub_id, client_id),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def _update_subscription(
+        self, sub: Subscription, now: float, notes: list[tuple[str, str, str | None]],
+        client_id: str,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE subscriptions SET last_checked = ?, best_episodes = ?, best_score = ?, "
+                "best_resolution = ? WHERE id = ?",
+                (now, sub.best_episodes, sub.best_score, sub.best_resolution, sub.id),
+            )
+            for kind, message, share in notes:
+                self._conn.execute(
+                    "INSERT INTO notifications (subscription_id, client_id, resource, kind, "
+                    "message, share, ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (sub.id, client_id, sub.resource, kind, message, share, now),
+                )
+            self._conn.commit()
+
+    def _notifications(self, client_id: str, limit: int) -> list[Notification]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM notifications WHERE client_id = ? ORDER BY ts DESC, id DESC "
+                "LIMIT ?",
+                (client_id, limit),
+            ).fetchall()
+        return [
+            Notification(
+                id=r["id"], subscription_id=r["subscription_id"], resource=r["resource"],
+                kind=r["kind"], message=r["message"], share=r["share"], ts=r["ts"],
+                read=bool(r["read"]),
+            )
+            for r in rows
+        ]
+
+    def _mark_read(self, client_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE notifications SET read = 1 WHERE client_id = ?", (client_id,)
+            )
+            self._conn.commit()
+
     # ---------------- 异步接口 ----------------
 
     async def recall(self, key: str) -> list[QuarkLink]:
@@ -281,3 +405,36 @@ class LinkStore:
 
     async def stats(self) -> dict[str, int]:
         return await asyncio.to_thread(self._stats)
+
+    async def add_subscription(
+        self, client_id: str, query: str, resource: str,
+        baseline: tuple[int, int, str | None] = (0, 0, None), limit: int = 20,
+    ) -> Subscription | None:
+        """新增订阅（同一资源重复订阅只更新搜索词）；超过每人上限返回 None。
+
+        baseline = (集数, 质量分, 清晰度)：订阅时已有的最好情况，之后只有超过它才通知。
+        """
+        return await asyncio.to_thread(
+            self._add_subscription, client_id, query, resource, baseline, time.time(), limit
+        )
+
+    async def list_subscriptions(
+        self, client_id: str | None = None
+    ) -> list[tuple[str, Subscription]]:
+        """(client_id, 订阅)；不传 client_id 时返回全部，最久没检查的在前。"""
+        return await asyncio.to_thread(self._list_subscriptions, client_id)
+
+    async def delete_subscription(self, client_id: str, sub_id: int) -> bool:
+        return await asyncio.to_thread(self._delete_subscription, client_id, sub_id)
+
+    async def update_subscription(
+        self, client_id: str, sub: Subscription, notes: list[tuple[str, str, str | None]]
+    ) -> None:
+        """写回检查结果，并记下通知 (kind, message, share)。"""
+        await asyncio.to_thread(self._update_subscription, sub, time.time(), notes, client_id)
+
+    async def notifications(self, client_id: str, limit: int = 30) -> list[Notification]:
+        return await asyncio.to_thread(self._notifications, client_id, limit)
+
+    async def mark_read(self, client_id: str) -> None:
+        await asyncio.to_thread(self._mark_read, client_id)

@@ -394,7 +394,10 @@ class SearchAgent:
             return DeepSeekPlanner(self._api_key, self._client)
         return RulePlanner()
 
-    async def run(self, req: SearchRequest, emit: Emit | None = None) -> AgentSearchResponse:
+    async def run(
+        self, req: SearchRequest, emit: Emit | None = None, fresh_hours: float = FRESH_HOURS
+    ) -> AgentSearchResponse:
+        """`fresh_hours`：记忆里多久内验证过的链接可免复验（订阅检查传 0，全部重验）。"""
         started = time.monotonic()
         request_id = uuid.uuid4().hex
         prefs = await self._service.prefs_for(req.client_id)
@@ -432,7 +435,7 @@ class SearchAgent:
                 need_subtitle=conv.need_subtitle or ref.subtitle,
                 need_hdr=conv.need_hdr or ref.hdr,
                 recalled=True,
-                fresh_after=time.time() - FRESH_HOURS * 3600,
+                fresh_after=time.time() - fresh_hours * 3600,
             )
             # 上一轮验证过的链接直接作为候选（条件变了要重新判定相关性）
             for link in conv.links:
@@ -451,7 +454,7 @@ class SearchAgent:
                 refresh=req.refresh,
                 target=build_target(parsed, req.query, douban.year if douban else None),
                 prefs=prefs,
-                fresh_after=time.time() - FRESH_HOURS * 3600,
+                fresh_after=time.time() - fresh_hours * 3600,
             )
             session_id, history = ConversationStore.new_id(), [req.query]
         providers = self._service.new_providers()

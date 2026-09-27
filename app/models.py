@@ -158,3 +158,33 @@ class FeedbackRequest(BaseModel):
     """用户对某条链接的反馈（目前只有「复制」）。"""
 
     share: str = Field(min_length=6, max_length=32, pattern=r"^[0-9a-zA-Z]+$")
+
+
+class SubscribeRequest(BaseModel):
+    """订阅某部剧/电影：有新集数或更高清版本时通知。"""
+
+    client_id: str = Field(min_length=8, max_length=64)
+    query: str = Field(min_length=2, max_length=200)  # 定期检查时用的搜索词
+    resource: str = Field(min_length=1, max_length=100)  # 资源名（记忆库主键来源）
+
+
+class Subscription(BaseModel):
+    id: int
+    query: str
+    resource: str
+    created: float
+    last_checked: float | None = None
+    best_episodes: int = 0  # 目前见过的最多集数（有效且相关的链接里）
+    best_score: int = 0  # 目前见过的最高质量分
+    best_resolution: str | None = None
+
+
+class Notification(BaseModel):
+    id: int
+    subscription_id: int
+    resource: str
+    kind: Literal["episodes", "quality"]
+    message: str
+    share: str | None = None  # 带来更新的那条链接
+    ts: float
+    read: bool = False

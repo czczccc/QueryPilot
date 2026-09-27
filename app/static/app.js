@@ -368,6 +368,10 @@ function renderResult(data) {
   renderParsed(data.parsed, data.douban);
   renderMetrics(data.metrics, data.providers, !!data.followup);
   renderFollowup(data);
+  lastResult = data;
+  subscribeBtn.hidden = subsPanel.hidden;
+  subscribeBtn.disabled = false;
+  setText(subscribeBtn, "订阅更新");
 
   if (data.links.length === 0) {
     resultList.innerHTML = "";
@@ -530,3 +534,112 @@ async function savePrefs() {
 
 [prefMinRes, prefSub, prefHdr].forEach((el) => el.addEventListener("change", savePrefs));
 loadPrefs();
+
+
+// ---- 追剧订阅 ----
+const subsPanel = document.getElementById("subs-panel");
+const subsList = document.getElementById("subs-list");
+const notifList = document.getElementById("notif-list");
+const subsUnread = document.getElementById("subs-unread");
+const subscribeBtn = document.getElementById("subscribe-btn");
+let lastResult = null;
+
+function cidParam() {
+  return "client_id=" + encodeURIComponent(clientId);
+}
+
+function formatTime(ts) {
+  const d = new Date(ts * 1000);
+  return (d.getMonth() + 1) + "/" + d.getDate() + " " +
+    String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+
+async function loadSubs() {
+  if (!clientId) return;
+  try {
+    const [subsResp, notifResp] = await Promise.all([
+      fetch("/api/subscriptions?" + cidParam()),
+      fetch("/api/notifications?" + cidParam()),
+    ]);
+    if (!subsResp.ok || !notifResp.ok) return; // 记忆未开启：不显示订阅
+    const subs = await subsResp.json();
+    const notes = await notifResp.json();
+    subsPanel.hidden = false;
+    if (lastResult) subscribeBtn.hidden = false;
+
+    const unread = notes.filter((n) => !n.read).length;
+    subsUnread.hidden = unread === 0;
+    setText(subsUnread, unread + " 条新提醒");
+
+    notifList.innerHTML = "";
+    notes.slice(0, 10).forEach((n) => {
+      const li = document.createElement("li");
+      if (!n.read) li.className = "unread-item";
+      setText(li, formatTime(n.ts) + "　" + n.message);
+      notifList.appendChild(li);
+    });
+
+    subsList.innerHTML = "";
+    if (subs.length === 0) {
+      const li = document.createElement("li");
+      li.className = "muted";
+      setText(li, "还没有订阅。");
+      subsList.appendChild(li);
+    }
+    subs.forEach((sub) => {
+      const li = document.createElement("li");
+      const text = document.createElement("span");
+      const res = RES_LABEL[sub.best_resolution] || "";
+      setText(text, "《" + sub.resource + "》" +
+        (sub.best_episodes ? "　已见 " + sub.best_episodes + " 集" : "") +
+        (res ? "　最高 " + res : "") +
+        "　" + (sub.last_checked ? "上次检查 " + formatTime(sub.last_checked) : "尚未检查"));
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "secondary-btn small";
+      setText(del, "取消");
+      del.addEventListener("click", async () => {
+        await fetch("/api/subscriptions/" + sub.id + "?" + cidParam(), { method: "DELETE" });
+        loadSubs();
+      });
+      li.append(text, del);
+      subsList.appendChild(li);
+    });
+  } catch (_) { /* 网络问题：下次再试 */ }
+}
+
+subscribeBtn.addEventListener("click", async () => {
+  if (!lastResult) return;
+  subscribeBtn.disabled = true;
+  try {
+    const resp = await fetch("/api/subscriptions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: clientId,
+        query: lastResult.history && lastResult.history.length ? lastResult.history[0] : lastResult.query,
+        resource: lastResult.parsed.resource,
+      }),
+    });
+    if (resp.ok) {
+      setText(subscribeBtn, "已订阅");
+      loadSubs();
+    } else {
+      const body = await resp.json().catch(() => ({}));
+      setText(subscribeBtn, body.detail || "订阅失败");
+      subscribeBtn.disabled = false;
+    }
+  } catch (_) {
+    setText(subscribeBtn, "订阅失败");
+    subscribeBtn.disabled = false;
+  }
+});
+
+subsPanel.addEventListener("toggle", async () => {
+  if (!subsPanel.open || subsUnread.hidden) return;
+  await fetch("/api/notifications/read?" + cidParam(), { method: "POST" }).catch(() => {});
+  subsUnread.hidden = true;
+});
+
+loadSubs();
+setInterval(loadSubs, 5 * 60 * 1000);

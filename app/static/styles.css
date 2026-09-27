@@ -320,3 +320,10 @@ footer {
   #submit-btn { width: 100%; }
   .container { padding: 1.25rem 1rem 2.5rem; }
 }
+
+.unread { margin-left: 0.4rem; padding: 0.05rem 0.5rem; border-radius: 999px; background: #dc2626; color: #fff; font-size: 0.75rem; }
+.notif-list, .subs-list { list-style: none; margin: 0.5rem 0 0; padding: 0; }
+.notif-list li { padding: 0.35rem 0; border-bottom: 1px dashed #e5e7eb; word-break: break-all; color: var(--muted); }
+.notif-list li.unread-item { color: inherit; font-weight: 600; }
+.subs-list li { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; padding: 0.35rem 0; }
+.subs-list li.muted { color: var(--muted); }
