@@ -37,9 +37,11 @@ from app.models import (
 from app.providers.tavily import TavilyProvider
 from app.security import RateLimiter, install_request_id_factory, set_request_id
 from app.services.agent import SearchAgent
+from app.services.classify import Classifier
 from app.services.cookie_box import CookieBox, session_hash
 from app.services.intent import DeepSeekParser
 from app.services.memory import LinkStore
+from app.services.metadata import MetadataLookup
 from app.services.quark_login import LoginError, QuarkQrLogin, qr_svg
 from app.services.quark_save import LoginExpiredError, QuarkSaver, SaveError
 from app.services.search import QuarkSearchService, SearchUnavailableError
@@ -116,6 +118,7 @@ def create_app(
     qr_login: QuarkQrLogin | None = None,
     cookie_box: CookieBox | None = None,
     quark_client: httpx.AsyncClient | None = None,
+    classifier=None,
 ) -> FastAPI:
     """创建应用；传入 service / agent 便于测试注入假实现。"""
     resolved = service or build_default_service()
@@ -173,8 +176,19 @@ def create_app(
     app.state.agent = resolved_agent
     app.state.watcher = watcher
     # 一键转存：cookie 与口令都配置了才开启（测试可注入）
+    # 转存自动分类：有 LLM key 用 LLM 判断，否则规则；SAVE_CLASSIFY=false 关闭
+    if classifier is None and service is None and _settings.save_classify:
+        classifier = Classifier(
+            api_key=_settings.deepseek_api_key,
+            lookup=MetadataLookup(
+                tmdb_key=_settings.tmdb_api_key, tmdb_base=_settings.tmdb_api_base,
+                douban=_settings.douban_lookup,
+            ),
+        )
+    root_dir = _settings.save_root_dir if service is None else "QueryPilot"
     if saver is None and service is None and _settings.quark_cookie and _settings.save_token:
-        saver = QuarkSaver(_settings.quark_cookie, _settings.quark_save_dir_fid)
+        saver = QuarkSaver(_settings.quark_cookie, _settings.quark_save_dir_fid,
+                           classifier=classifier, root_dir=root_dir)
     resolved_token = save_token if save_token is not None else (
         _settings.save_token if service is None else ""
     )
@@ -388,8 +402,10 @@ def create_app(
         """转存到夸克网盘：扫码登录过的存到自己的网盘；否则凭口令存到部署者的网盘。"""
         user = await _user_cookie(request)
         if user is not None:
-            saver_obj = QuarkSaver(user[1], _settings.quark_save_dir_fid if service is None
-                                   else "0", client=quark_http)
+            saver_obj = QuarkSaver(
+                user[1], _settings.quark_save_dir_fid if service is None else "0",
+                client=quark_http, classifier=classifier, root_dir=root_dir,
+            )
         elif app.state.saver is not None and x_save_token:
             if not hmac.compare_digest(x_save_token.encode(), resolved_token.encode()):
                 raise HTTPException(status_code=401, detail="转存口令不正确")
@@ -411,8 +427,15 @@ def create_app(
         except SaveError as e:
             return SaveResponse(ok=False, message=str(e))
         name = f"《{result.title}》" if result.title else f"{result.file_count} 个文件"
-        message = f"已转存{name}到你的夸克网盘" if result.done else f"已提交转存{name}，夸克正在后台处理"
-        return SaveResponse(ok=True, message=message, file_count=result.file_count)
+        where = f"「{result.folder}」" if result.folder else "你的夸克网盘"
+        if result.done:
+            message = f"已转存{name}到{where}"
+        else:
+            message = f"已提交转存{name}到{where}，夸克正在后台处理"
+        if result.category:
+            message += f"（识别为{result.category}，依据：{result.basis}）"
+        return SaveResponse(ok=True, message=message, file_count=result.file_count,
+                            folder=result.folder, category=result.category)
 
     @app.post("/api/search", response_model=QuarkSearchResponse)
     async def api_search(

@@ -18,12 +18,15 @@ from dataclasses import dataclass
 
 import httpx
 
+from app.services.classify import decide_folder
 from app.services.quark import DETAIL_URL, TOKEN_URL, UA
 
 logger = logging.getLogger(__name__)
 
 SAVE_URL = "https://drive-pc.quark.cn/1/clouddrive/share/sharepage/save"
 TASK_URL = "https://drive-pc.quark.cn/1/clouddrive/task"
+PATH_LIST_URL = "https://drive-pc.quark.cn/1/clouddrive/file/info/path_list"
+MKDIR_URL = "https://drive-pc.quark.cn/1/clouddrive/file"
 COMMON_PARAMS = {"pr": "ucpro", "fr": "pc", "uc_param_str": ""}
 
 # 夸克返回的常见错误码 → 给用户看的说明
@@ -50,6 +53,9 @@ class SaveResult:
     file_count: int
     title: str | None
     done: bool  # False 表示任务已提交，但轮询期间还没完成（夸克会在后台继续）
+    folder: str | None = None  # 自动分类后存入的目录（如 /QueryPilot/电视剧/国产剧/漫长的季节 (2023)）
+    category: str | None = None  # 如「国产剧」「欧美电影」
+    basis: str | None = None  # 分类依据，如「TMDB + 豆瓣 + LLM」
 
 
 class QuarkSaver:
@@ -61,13 +67,19 @@ class QuarkSaver:
         timeout: float = 10.0,
         poll_interval: float = 1.0,
         poll_times: int = 10,
+        classifier=None,
+        root_dir: str = "QueryPilot",
     ) -> None:
+        """`classifier`：`await classifier(title, files) -> Category`，为 None 时不分类，
+        直接存到 `to_pdir_fid`；分类或建目录失败时也退回 `to_pdir_fid`。"""
         self._cookie = cookie
         self._to_pdir_fid = to_pdir_fid or "0"
         self._client = client or httpx.AsyncClient(timeout=timeout)
         self._timeout = timeout
         self._poll_interval = poll_interval
         self._poll_times = poll_times
+        self._classifier = classifier
+        self._root_dir = root_dir
 
     def __repr__(self) -> str:  # 防止对象被打印时带出 cookie
         return f"QuarkSaver(to_pdir_fid={self._to_pdir_fid!r})"
@@ -90,10 +102,13 @@ class QuarkSaver:
             raise SaveError(ERROR_TEXT.get(code, f"{default}（夸克错误码 {code}）"))
         return body.get("data") or {}
 
-    async def save(self, share_id: str, pwd: str | None = None) -> SaveResult:
+    async def save(
+        self, share_id: str, pwd: str | None = None, to_path: str | None = None
+    ) -> SaveResult:
+        """`to_path`：指定网盘目标目录路径（不存在就创建），给出时跳过自动分类。"""
         headers = self._headers(share_id)
         try:
-            return await self._save(share_id, pwd, headers)
+            return await self._save(share_id, pwd, headers, to_path)
         except httpx.HTTPError as e:
             # 只记录异常类型，不记录请求（请求头里有 cookie）
             logger.warning("转存请求失败 share=%s error=%s", share_id, type(e).__name__)
@@ -101,7 +116,9 @@ class QuarkSaver:
         except ValueError:
             raise SaveError("夸克返回了无法解析的内容") from None
 
-    async def _save(self, share_id: str, pwd: str | None, headers: dict) -> SaveResult:
+    async def _save(
+        self, share_id: str, pwd: str | None, headers: dict, to_path: str | None = None
+    ) -> SaveResult:
         # 1) 分享页 token
         resp = await self._client.post(
             TOKEN_URL,
@@ -130,15 +147,34 @@ class QuarkSaver:
         if not items:
             raise SaveError("分享里没有可转存的文件")
         title = (data.get("share") or {}).get("title")
+        title = title if isinstance(title, str) else None
 
-        # 3) 提交转存任务
+        # 3) 目标目录：指定路径优先，否则自动分类（失败就存到默认目录）
+        to_fid, folder, category, basis = self._to_pdir_fid, None, None, None
+        try:
+            if to_path:
+                to_fid, folder = await self._ensure_dir(to_path, headers), to_path
+            elif self._classifier is not None:
+                names = await self._file_names(share_id, stoken, items, headers)
+                place = await decide_folder(
+                    self._classifier, title or (names[0] if names else share_id), names,
+                    self._root_dir,
+                )
+                to_fid = await self._ensure_dir(place.path, headers)
+                folder, category, basis = place.path, place.label, place.basis
+        except LoginExpiredError:
+            raise
+        except (SaveError, httpx.HTTPError, ValueError, KeyError) as e:
+            logger.warning("目标目录准备失败（%s），存到默认目录", type(e).__name__)
+
+        # 4) 提交转存任务
         resp = await self._client.post(
             SAVE_URL,
             params=COMMON_PARAMS,
             json={
                 "fid_list": [f["fid"] for f in items],
                 "fid_token_list": [f["share_fid_token"] for f in items],
-                "to_pdir_fid": self._to_pdir_fid,
+                "to_pdir_fid": to_fid,
                 "pwd_id": share_id,
                 "stoken": stoken,
                 "pdir_fid": "0",
@@ -150,7 +186,7 @@ class QuarkSaver:
         if not task_id:
             raise SaveError("提交转存失败")
 
-        # 4) 轮询任务状态：status 2 = 完成
+        # 5) 轮询任务状态：status 2 = 完成
         for i in range(self._poll_times):
             resp = await self._client.get(
                 TASK_URL,
@@ -159,8 +195,48 @@ class QuarkSaver:
             )
             task = self._check(resp.json(), "转存失败")
             if task.get("status") == 2:
-                return SaveResult(task_id, len(items), title if isinstance(title, str) else None,
-                                  done=True)
+                return SaveResult(task_id, len(items), title, True, folder, category, basis)
             await asyncio.sleep(self._poll_interval)
-        return SaveResult(task_id, len(items), title if isinstance(title, str) else None,
-                          done=False)
+        return SaveResult(task_id, len(items), title, False, folder, category, basis)
+
+    async def _file_names(
+        self, share_id: str, stoken: str, items: list[dict], headers: dict
+    ) -> list[str]:
+        """分类用的文件名：顶层只有一个文件夹时再看一层（多数分享是「片名/各集」结构）。"""
+        names = [str(f.get("file_name") or "") for f in items]
+        if len(items) == 1 and items[0].get("dir"):
+            try:
+                resp = await self._client.get(
+                    DETAIL_URL,
+                    params={"pwd_id": share_id, "stoken": stoken, "pdir_fid": items[0]["fid"],
+                            "force": 0, "_page": 1, "_size": 100},
+                    headers=headers, timeout=self._timeout,
+                )
+                sub = (resp.json().get("data") or {}).get("list") or []
+                names += [str(f.get("file_name") or "") for f in sub if isinstance(f, dict)]
+            except (httpx.HTTPError, ValueError):
+                pass
+        return [n for n in names if n]
+
+    async def _ensure_dir(self, path: str, headers: dict) -> str:
+        """按路径找到网盘目录的 fid，不存在就逐级创建。"""
+        resp = await self._client.post(
+            PATH_LIST_URL, params=COMMON_PARAMS,
+            json={"file_path": [path], "namespace": "0"},
+            headers=headers, timeout=self._timeout,
+        )
+        body = resp.json()
+        if body.get("code") == 31001:
+            raise LoginExpiredError(ERROR_TEXT[31001])
+        found = body.get("data") if isinstance(body.get("data"), list) else []
+        if found and isinstance(found[0], dict) and found[0].get("fid"):
+            return str(found[0]["fid"])
+        resp = await self._client.post(
+            MKDIR_URL, params=COMMON_PARAMS,
+            json={"pdir_fid": "0", "file_name": "", "dir_path": path, "dir_init_lock": False},
+            headers=headers, timeout=self._timeout,
+        )
+        fid = self._check(resp.json(), "创建目录失败").get("fid")
+        if not fid:
+            raise SaveError("创建目录失败")
+        return str(fid)
