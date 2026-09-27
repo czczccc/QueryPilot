@@ -12,6 +12,9 @@ const linkActions = document.getElementById("link-actions");
 const copyBtn = document.getElementById("copy-btn");
 const resultList = document.getElementById("result-list");
 const emptyState = document.getElementById("empty-state");
+const agentPanel = document.getElementById("agent-panel");
+const agentTitle = document.getElementById("agent-title");
+const agentSteps = document.getElementById("agent-steps");
 
 let currentLinks = [];
 let hideDead = true;
@@ -250,68 +253,121 @@ document.getElementById("min-res").addEventListener("change", (e) => {
   if (currentLinks.length) renderLinks(currentLinks);
 });
 
-async function doSearch(query, refresh = false) {
+const TOOL_TEXT = {
+  recall_memory: (a, o) =>
+    "查记忆：记住 " + (o.remembered_valid || 0) + " 条有效链接，其中 " +
+    (o.fresh || 0) + " 条近期验证过",
+  search: (a, o) =>
+    "搜索 " + (a.queries || []).map((q) => "「" + q + "」").join("") +
+    (a.keyword ? "（网盘站关键词：" + a.keyword + "）" : "") +
+    " → 找到 " + (o.found || 0) + " 条，新增候选 " + (o.new_candidates || 0) + " 条" +
+    (o.known_invalid_skipped ? "，其中已知失效 " + o.known_invalid_skipped + " 条" : ""),
+  verify: (a, o) =>
+    "验证 " + (o.verified || 0) + " 条 → 有效 " + (o.valid || 0) + "、失效 " +
+    (o.invalid || 0) + "、待确认 " + (o.unknown || 0) + "；满足要求累计 " +
+    (o.matching_total || 0) + " 条",
+  finish: (a) => "结束：" + (a.reason || ""),
+};
+
+function renderStep(step) {
+  const pending = agentSteps.querySelector(".pending");
+  if (pending) pending.remove();
+  const li = document.createElement("li");
+  const fn = TOOL_TEXT[step.tool];
+  const obs = step.observation || {};
+  setText(li, obs.error ? step.tool + " 出错：" + obs.error : fn ? fn(step.args || {}, obs) : step.tool);
+  const took = document.createElement("span");
+  took.className = "took";
+  setText(took, (step.duration_ms / 1000).toFixed(1) + "s");
+  li.appendChild(took);
+  if (step.thought) {
+    const t = document.createElement("span");
+    t.className = "thought";
+    setText(t, "💭 " + step.thought);
+    li.appendChild(t);
+  }
+  agentSteps.appendChild(li);
+  if (step.tool !== "finish") {
+    const next = document.createElement("li");
+    next.className = "pending";
+    setText(next, "…正在决定下一步");
+    agentSteps.appendChild(next);
+  }
+}
+
+function renderResult(data) {
+  const pending = agentSteps.querySelector(".pending");
+  if (pending) pending.remove();
+  setText(agentTitle, "搜索过程（" + (data.planner === "llm" ? "AI 规划" : "规则规划") +
+    "，" + data.steps.length + " 步）· " + data.stop_reason);
+
+  renderParsed(data.parsed, data.douban);
+  renderMetrics(data.metrics, data.providers);
+
+  if (data.links.length === 0) {
+    resultList.innerHTML = "";
+    linkActions.hidden = true;
+    emptyState.hidden = false;
+    setText(emptyState, "没有找到夸克网盘链接。建议换一种写法（别名、英文名、加 4K/全集 等）后重试。");
+  } else {
+    emptyState.hidden = true;
+    renderLinks(data.links);
+    linkActions.hidden = false;
+  }
+  resultsSection.hidden = false;
+}
+
+let currentSource = null;
+
+function doSearch(query, refresh = false) {
   lastQuery = query;
   hideFormError();
   resultsSection.hidden = true;
-  showStatus("正在解析资源、搜索网盘链接并验证可达性…通常需要 20~60 秒，请耐心等待", "loading");
+  if (currentSource) currentSource.close();
+
+  agentPanel.hidden = false;
+  agentSteps.innerHTML = "";
+  setText(agentTitle, "搜索过程");
+  const first = document.createElement("li");
+  first.className = "pending";
+  setText(first, "…正在理解你要找的资源");
+  agentSteps.appendChild(first);
+  showStatus("agent 正在搜索并验证链接，通常需要 20~90 秒，过程会实时显示在下方", "loading");
   submitBtn.disabled = true;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 120000);
+  const url = "/api/agent/stream?query=" + encodeURIComponent(query) + (refresh ? "&refresh=true" : "");
+  const source = new EventSource(url);
+  currentSource = source;
+  let finished = false;
 
-  try {
-    const resp = await fetch("/api/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, refresh }),
-      signal: controller.signal,
-    });
-
-    if (resp.status === 422) {
-      showFormError("输入不合法：长度需为 2–200 个字符。");
-      hideStatus();
-      return;
-    }
-    if (resp.status === 503) {
-      hideStatus();
-      showStatus("所有搜索源暂不可用，请稍后重试。", "error");
-      return;
-    }
-    if (!resp.ok) {
-      hideStatus();
-      showStatus("搜索失败（HTTP " + resp.status + "），请稍后重试。", "error");
-      return;
-    }
-
-    const data = await resp.json();
-    hideStatus();
-
-    renderParsed(data.parsed, data.douban);
-    renderMetrics(data.metrics, data.providers);
-
-    if (data.links.length === 0) {
-      resultList.innerHTML = "";
-      linkActions.hidden = true;
-      emptyState.hidden = false;
-      setText(emptyState, "没有找到夸克网盘链接。建议换一种写法（别名、英文名、加 4K/全集 等）后重试。");
-    } else {
-      emptyState.hidden = true;
-      renderLinks(data.links);
-      linkActions.hidden = false;
-    }
-    resultsSection.hidden = false;
-  } catch (err) {
-    hideStatus();
-    if (err.name === "AbortError") {
-      showStatus("搜索超时（超过 120 秒），请稍后重试或换一个更精确的资源名。", "error");
-    } else {
-      showStatus("网络错误，无法连接服务，请稍后重试。", "error");
-    }
-  } finally {
+  const done = () => {
+    finished = true;
+    source.close();
     clearTimeout(timer);
     submitBtn.disabled = false;
-  }
+  };
+  const timer = setTimeout(() => {
+    if (finished) return;
+    done();
+    showStatus("搜索超时（超过 150 秒），请稍后重试或换一个更精确的资源名。", "error");
+  }, 150000);
+
+  source.addEventListener("step", (e) => renderStep(JSON.parse(e.data)));
+  source.addEventListener("result", (e) => {
+    done();
+    hideStatus();
+    renderResult(JSON.parse(e.data));
+  });
+  source.addEventListener("error", (e) => {
+    if (finished) return;
+    done();
+    agentSteps.querySelectorAll(".pending").forEach((el) => el.remove());
+    let detail = "搜索失败或请求过于频繁，请稍后重试。";
+    if (e.data) {
+      try { detail = JSON.parse(e.data).detail || detail; } catch (_) { /* 保持默认提示 */ }
+    }
+    showStatus(detail, "error");
+  });
 }
 
 form.addEventListener("submit", (e) => {

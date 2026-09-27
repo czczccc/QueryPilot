@@ -13,14 +13,15 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.config import load_settings
-from app.models import QuarkSearchResponse, SearchRequest
+from app.models import AgentSearchResponse, AgentStep, QuarkSearchResponse, SearchRequest
 from app.providers.tavily import TavilyProvider
 from app.security import RateLimiter, install_request_id_factory, set_request_id
+from app.services.agent import SearchAgent
 from app.services.intent import DeepSeekParser
 from app.services.memory import LinkStore
 from app.services.search import QuarkSearchService, SearchUnavailableError
@@ -73,9 +74,14 @@ def create_app(
     service: QuarkSearchService | None = None,
     rate_limit_per_minute: int | None = None,
     reverify_interval_hours: float | None = None,
+    agent: SearchAgent | None = None,
 ) -> FastAPI:
-    """创建应用；传入 service 便于测试注入假实现。"""
+    """创建应用；传入 service / agent 便于测试注入假实现。"""
     resolved = service or build_default_service()
+    resolved_agent = agent or SearchAgent(
+        resolved,
+        api_key=_settings.deepseek_api_key if service is None else "",
+    )
     limiter = RateLimiter(
         rate=rate_limit_per_minute if rate_limit_per_minute is not None else 10
     )
@@ -101,9 +107,10 @@ def create_app(
         lifespan=lifespan,
         title="QueryPilot",
         description="AI 搜索与链接验证引擎：自然语言输入，多引擎聚合检索，严格验证结果可用性。",
-        version="0.6.0",
+        version="0.7.0",
     )
     app.state.search_service = resolved
+    app.state.agent = resolved_agent
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
     @app.middleware("http")
@@ -145,7 +152,7 @@ def create_app(
     @app.get("/health")
     async def health() -> dict:
         """健康检查：只证明应用进程可响应，不探测外部 API。"""
-        return {"status": "ok", "version": "0.6.0"}
+        return {"status": "ok", "version": "0.7.0"}
 
     @app.get("/api/memory/stats")
     async def memory_stats() -> dict:
@@ -164,6 +171,61 @@ def create_app(
             return await app.state.search_service.search(req)
         except SearchUnavailableError:
             raise HTTPException(status_code=503, detail="所有搜索源暂不可用，请稍后重试")
+
+    @app.post("/api/agent/search", response_model=AgentSearchResponse)
+    async def api_agent_search(
+        req: SearchRequest,
+        _: None = Depends(rate_limit_dep),
+    ) -> AgentSearchResponse:
+        """agent 搜索：多轮「规划 → 搜索/验证 → 观察」，响应附带每一步轨迹。"""
+        try:
+            return await app.state.agent.run(req)
+        except SearchUnavailableError:
+            raise HTTPException(status_code=503, detail="所有搜索源暂不可用，请稍后重试")
+
+    @app.get("/api/agent/stream")
+    async def api_agent_stream(
+        query: str,
+        refresh: bool = False,
+        _: None = Depends(rate_limit_dep),
+    ) -> StreamingResponse:
+        """SSE 流式 agent 搜索：每完成一步推送 `step` 事件，最后推送 `result`。"""
+        try:
+            req = SearchRequest(query=query, refresh=refresh)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="输入长度需为 2–200 个字符")
+
+        queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+
+        async def emit(step: AgentStep) -> None:
+            await queue.put(("step", step.model_dump_json()))
+
+        async def run() -> None:
+            try:
+                result = await app.state.agent.run(req, emit=emit)
+                await queue.put(("result", result.model_dump_json()))
+            except SearchUnavailableError:
+                await queue.put(("error", '{"detail":"所有搜索源暂不可用，请稍后重试"}'))
+            except Exception:
+                logger.exception("agent 流式搜索异常")
+                await queue.put(("error", '{"detail":"服务器内部错误，请稍后重试"}'))
+            finally:
+                await queue.put(None)
+
+        async def events() -> AsyncIterator[str]:
+            task = asyncio.create_task(run())
+            try:
+                while (item := await queue.get()) is not None:
+                    yield f"event: {item[0]}\ndata: {item[1]}\n\n"
+            finally:
+                if not task.done():  # 客户端断开：取消后台搜索
+                    task.cancel()
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     return app
 

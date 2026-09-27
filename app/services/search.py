@@ -80,14 +80,13 @@ class QuarkSearchService:
     def store(self) -> LinkStore | None:
         return self._store
 
-    async def search(self, req: SearchRequest) -> QuarkSearchResponse:
-        started = time.monotonic()
-        request_id = uuid.uuid4().hex
+    # ---------------- 可复用的搜索原语（编排与 agent 共用） ----------------
 
-        # 豆瓣链接识别：拿到片名/年份后作为搜索查询
+    async def prepare(self, raw_query: str) -> tuple[ParsedResource, bool, DoubanMeta | None]:
+        """豆瓣链接识别 + 意图解析，返回 `(解析结果, 是否降级, 豆瓣元信息)`。"""
         douban_meta: DoubanMeta | None = None
-        query = req.query
-        douban_id = extract_douban_id(req.query)
+        query = raw_query
+        douban_id = extract_douban_id(raw_query)
         if douban_id:
             meta = await fetch_douban_meta(douban_id, self._client, self._timeout)
             if meta:
@@ -102,23 +101,47 @@ class QuarkSearchService:
                     kind=meta.get("kind"),
                 )
                 logger.info("豆瓣链接识别: %s -> %s", douban_id, query)
-
         outcome = await self._parser.parse(query)
-        parsed = outcome.parsed
+        return outcome.parsed, outcome.fallback_used, douban_meta
 
-        providers: dict[str, ProviderStatus] = {
-            "tavily": ProviderStatus(name="tavily"),
-        }
+    def new_providers(self) -> dict[str, ProviderStatus]:
+        providers = {"tavily": ProviderStatus(name="tavily")}
         if self._use_qkyunso:
             providers["qkyunso"] = ProviderStatus(name="qkyunso")
         if self._use_bing:
             providers["bing"] = ProviderStatus(name="bing")
+        return providers
+
+    async def recall(self, key: str) -> list[QuarkLink]:
+        return await self._store.recall(key) if self._store else []
+
+    async def known_invalid(self, links: list[QuarkLink]) -> set[str]:
+        """近期已确认失效的分享码（记忆关闭时为空）。"""
+        if not self._store:
+            return set()
+        return await self._store.known_invalid([x.share for x in links if not x.from_memory])
+
+    async def remember(
+        self, key: str, query: str, links: list[QuarkLink], from_memory: bool
+    ) -> None:
+        if self._store:
+            await self._store.save(key, links)
+            await self._store.log_search(
+                key, query, sum(1 for x in links if x.state == "valid"), from_memory
+            )
+
+    async def search(self, req: SearchRequest) -> QuarkSearchResponse:
+        """固定流水线：记忆 → 三引擎并发召回 → 去重 → 跳过已知失效 → 验证 → 排序。"""
+        started = time.monotonic()
+        request_id = uuid.uuid4().hex
+        parsed, fallback_used, douban_meta = await self.prepare(req.query)
+        providers = self.new_providers()
 
         # 记忆：先取该资源下记住的有效链接
         key = resource_key(parsed.resource)
-        remembered = await self._store.recall(key) if self._store else []
+        remembered = await self.recall(key)
         fresh_after = time.time() - FRESH_HOURS * 3600
-        fresh = [m for m in remembered if (m.last_checked or 0) >= fresh_after]
+        fresh = [m for m in remembered if is_fresh(m, fresh_after)]
         served_from_memory = (
             self._store is not None and not req.refresh and len(fresh) >= MEMORY_FAST_MIN
         )
@@ -128,7 +151,9 @@ class QuarkSearchService:
             for status in providers.values():
                 status.status = "skipped"
         else:
-            links = await self._run_engines(parsed, providers)
+            links = await self.collect(
+                parsed.search_suggestions, parsed.resource, providers
+            )
             if (
                 not links
                 and not remembered
@@ -137,35 +162,20 @@ class QuarkSearchService:
                 raise SearchUnavailableError()
 
         # 记忆在前：去重时保留记忆版本（带历史质量与验证时间）
-        uniq: dict[str, QuarkLink] = {}
-        for link in [*remembered, *links]:
-            uniq.setdefault(link.share, link)
-        candidates = list(uniq.values())
-
-        # 近期已确认失效的链接直接跳过，不占验证名额
-        skipped = await self._store.known_invalid(
-            [c.share for c in candidates if not c.from_memory]
-        ) if self._store else set()
+        candidates = dedupe([*remembered, *links])
+        skipped = await self.known_invalid(candidates)
         final = [c for c in candidates if c.share not in skipped][:MAX_VERIFY]
 
         # 新鲜的记忆链接不再复验，其余并发验证
-        await self._verify([
-            link for link in final
-            if not (link.from_memory and (link.last_checked or 0) >= fresh_after)
-        ])
-        _sort_links(final)
-
-        if self._store:
-            await self._store.save(key, final)
-            await self._store.log_search(
-                key, req.query, sum(1 for f in final if f.state == "valid"), served_from_memory
-            )
+        await self.verify([link for link in final if not is_fresh(link, fresh_after)])
+        sort_links(final)
+        await self.remember(key, req.query, final, served_from_memory)
 
         metrics = SearchMetrics(
             duration_ms=int((time.monotonic() - started) * 1000),
             raw_result_count=len(links),
             deduplicated_result_count=len(final),
-            fallback_used=outcome.fallback_used,
+            fallback_used=fallback_used,
             memory_hits=sum(1 for f in final if f.from_memory),
             skipped_invalid=len(skipped),
             served_from_memory=served_from_memory,
@@ -180,26 +190,32 @@ class QuarkSearchService:
             douban=douban_meta,
         )
 
-    async def _run_engines(
-        self, parsed: ParsedResource, providers: dict[str, ProviderStatus]
+    async def collect(
+        self,
+        queries: list[str],
+        keyword: str,
+        providers: dict[str, ProviderStatus],
     ) -> list[QuarkLink]:
-        """三个引擎并发执行；单引擎失败只标记状态，不中断整体。"""
+        """三个引擎并发召回：Tavily 用 `queries`，云搜/Bing 用 `keyword`。
+
+        单引擎失败只标记状态，不中断整体。
+        """
 
         async def run_tavily() -> list[QuarkLink]:
-            return await self._tavily_pipeline(parsed.search_suggestions, providers["tavily"])
+            return await self._tavily_pipeline(queries, providers["tavily"])
 
         async def run_qkyunso() -> list[QuarkLink]:
-            return await search_qkyunso(parsed.resource, self._client, self._timeout)
+            return await search_qkyunso(keyword, self._client, self._timeout)
 
         async def run_bing() -> list[QuarkLink]:
-            return await search_bing(parsed.resource, self._client, self._timeout)
+            return await search_bing(keyword, self._client, self._timeout)
 
         engines: list[tuple[str, Callable[[], Awaitable[list[QuarkLink]]]]] = [
             ("tavily", run_tavily)
         ]
-        if self._use_qkyunso:
+        if "qkyunso" in providers:
             engines.append(("qkyunso", run_qkyunso))
-        if self._use_bing:
+        if "bing" in providers:
             engines.append(("bing", run_bing))
 
         async def guarded(
@@ -209,7 +225,7 @@ class QuarkSearchService:
             try:
                 found = await fn()
                 if name != "tavily":  # tavily 在流水线内自行累计 result_count
-                    providers[name].result_count = len(found)
+                    providers[name].result_count += len(found)
                 return found
             except Exception:
                 logger.exception("%s 引擎异常", name)
@@ -225,7 +241,7 @@ class QuarkSearchService:
         # 按固定引擎顺序拼接，保证去重结果确定
         return [link for found in per_engine for link in found]
 
-    async def _verify(self, links: list[QuarkLink]) -> None:
+    async def verify(self, links: list[QuarkLink]) -> None:
         """并发验证有效性并识别质量（限制 8 并发，避免打满夸克服务）。"""
         sem = asyncio.Semaphore(8)
 
@@ -245,7 +261,7 @@ class QuarkSearchService:
         if not self._store:
             return 0
         stale = await self._store.stale_valid(older_than_hours, limit)
-        await self._verify(stale)
+        await self.verify(stale)
         died = 0
         for link in stale:
             if link.state == "unknown":
@@ -298,7 +314,20 @@ class QuarkSearchService:
         return links
 
 
-def _sort_links(links: list[QuarkLink]) -> None:
+def is_fresh(link: QuarkLink, fresh_after: float) -> bool:
+    """记忆链接在新鲜期内验证过，可直接复用不复验。"""
+    return link.from_memory and (link.last_checked or 0) >= fresh_after
+
+
+def dedupe(links: list[QuarkLink]) -> list[QuarkLink]:
+    """按分享码去重，保留先出现的版本。"""
+    uniq: dict[str, QuarkLink] = {}
+    for link in links:
+        uniq.setdefault(link.share, link)
+    return list(uniq.values())
+
+
+def sort_links(links: list[QuarkLink]) -> None:
     """有效优先，未知居中，失效最后；同状态按质量分（高→低），再按置信度。"""
     state_rank = {"valid": 0, "unknown": 1, "invalid": 2}
     conf_rank = {"高": 0, "中": 1, "低": 2}
