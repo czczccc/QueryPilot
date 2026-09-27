@@ -20,25 +20,25 @@ _E = r"(?![0-9a-z])"
 _BD = r"(?<![0-9])"
 
 RESOLUTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("2160p", re.compile(rf"{_BD}(?:2160p|4k|3840x2160){_E}|{_B}uhd{_E}|4k超清|超高清", re.I)),
-    ("1080p", re.compile(rf"{_BD}(?:1080[pi]|1920x1080){_E}|{_B}fhd{_E}|全高清", re.I)),
-    ("720p", re.compile(rf"{_BD}(?:720p|1280x720){_E}", re.I)),
-    ("SD", re.compile(rf"{_BD}(?:480p|360p|576p){_E}|{_B}dvdrip{_E}|标清", re.I)),
+    ("2160p", re.compile(rf"{_BD}(?:2160p|4k|3840x2160){_E}|{_B}uhd{_E}|4k超清|超高清", re.IGNORECASE)),
+    ("1080p", re.compile(rf"{_BD}(?:1080[pi]|1920x1080){_E}|{_B}fhd{_E}|全高清", re.IGNORECASE)),
+    ("720p", re.compile(rf"{_BD}(?:720p|1280x720){_E}", re.IGNORECASE)),
+    ("SD", re.compile(rf"{_BD}(?:480p|360p|576p){_E}|{_B}dvdrip{_E}|标清", re.IGNORECASE)),
 ]
-HDR_RE = re.compile(rf"{_B}(?:hdr10\+?|hdr|dv|dovi|dolby[ ._-]?vision){_E}|杜比视界", re.I)
+HDR_RE = re.compile(rf"{_B}(?:hdr10\+?|hdr|dv|dovi|dolby[ ._-]?vision){_E}|杜比视界", re.IGNORECASE)
 CODEC_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("H.265", re.compile(rf"{_B}(?:hevc|x265|h\.?265){_E}", re.I)),
-    ("H.264", re.compile(rf"{_B}(?:avc|x264|h\.?264){_E}", re.I)),
-    ("AV1", re.compile(rf"{_B}av1{_E}", re.I)),
+    ("H.265", re.compile(rf"{_B}(?:hevc|x265|h\.?265){_E}", re.IGNORECASE)),
+    ("H.264", re.compile(rf"{_B}(?:avc|x264|h\.?264){_E}", re.IGNORECASE)),
+    ("AV1", re.compile(rf"{_B}av1{_E}", re.IGNORECASE)),
 ]
 SOURCE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("REMUX", re.compile(rf"{_B}remux{_E}|原盘", re.I)),
-    ("BluRay", re.compile(rf"{_B}(?:blu-?ray|bdrip|bd)(?![a-z])|蓝光", re.I)),
-    ("WEB-DL", re.compile(rf"{_B}(?:web-?dl|webrip|web){_E}", re.I)),
-    ("HDTV", re.compile(rf"{_B}hdtv{_E}", re.I)),
+    ("REMUX", re.compile(rf"{_B}remux{_E}|原盘", re.IGNORECASE)),
+    ("BluRay", re.compile(rf"{_B}(?:blu-?ray|bdrip|bd)(?![a-z])|蓝光", re.IGNORECASE)),
+    ("WEB-DL", re.compile(rf"{_B}(?:web-?dl|webrip|web){_E}", re.IGNORECASE)),
+    ("HDTV", re.compile(rf"{_B}hdtv{_E}", re.IGNORECASE)),
 ]
 # 枪版/抢先版：TS 只在去掉扩展名的文件名里匹配，避免与 .ts 扩展名冲突
-LOW_QUALITY_RE = re.compile(rf"{_B}(?:hd-?ts|ts|hd-?tc|tc|cam|hdcam){_E}|枪版|抢先版", re.I)
+LOW_QUALITY_RE = re.compile(rf"{_B}(?:hd-?ts|ts|hd-?tc|tc|cam|hdcam){_E}|枪版|抢先版", re.IGNORECASE)
 SUB_NAME_RE = re.compile(r"中字|字幕|简中|繁中|双语|中英")
 
 GB = 1024**3

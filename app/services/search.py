@@ -23,6 +23,7 @@ from app.models import (
 from app.providers.base import ProviderError, SearchProvider
 from app.services.douban import extract_douban_id, fetch_douban_meta
 from app.services.intent import IntentParser
+from app.services.quality import parse_quality
 from app.services.quark import (
     BLOCKED_DOMAINS,
     UA,
@@ -33,7 +34,6 @@ from app.services.quark import (
     search_qkyunso,
     verify_quark_files,
 )
-from app.services.quality import parse_quality
 
 logger = logging.getLogger(__name__)
 
