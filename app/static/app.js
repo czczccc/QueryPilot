@@ -20,6 +20,9 @@ const agentTimer = document.getElementById("agent-timer");
 const agentToggle = document.getElementById("agent-toggle");
 const skeleton = document.getElementById("skeleton");
 const toastsEl = document.getElementById("toasts");
+const maybeBox = document.getElementById("maybe-box");
+const maybeList = document.getElementById("maybe-list");
+const maybeCount = document.getElementById("maybe-count");
 
 let currentLinks = [];
 let hideDead = true;
@@ -263,89 +266,111 @@ function renderLinks(links) {
   resultList.innerHTML = "";
   renderCount(links, visible);
 
-  if (visible.length === 0) {
-    renderEmpty("当前筛选下没有链接", "共有 " + links.length + " 条结果被筛掉了。可以关掉「只看有效且相关」或调低清晰度要求再看看。");
+  // 待核对（uncertain）的单独折叠到「可能相关」，主列表只放确认相关的
+  const main = visible.filter((l) => l.relevance !== "uncertain");
+  const maybe = maybeLinks(links);
+  if (main.length === 0) {
+    if (maybe.length) {
+      renderEmpty("没有确认相关的链接", "下面有 " + maybe.length + " 条「可能相关」的资源，没能确认是不是这部，请展开自己核对。");
+    } else {
+      renderEmpty("当前筛选下没有链接", "共有 " + links.length + " 条结果被筛掉了。可以关掉「只看有效且相关」或调低清晰度要求再看看。");
+    }
   } else {
     emptyState.hidden = true;
   }
+  main.forEach((l, i) => resultList.appendChild(linkCard(l, i)));
 
-  visible.forEach((l, i) => {
-    const li = el("li", "result-card state-" + (l.state || "unknown"));
-    li.style.setProperty("--i", String(Math.min(i, 12)));
+  maybeList.innerHTML = "";
+  maybeBox.hidden = maybe.length === 0;
+  setText(maybeCount, String(maybe.length));
+  if (!maybe.length) maybeBox.open = false;
+  maybe.forEach((l, i) => maybeList.appendChild(linkCard(l, i)));
+}
 
-    const head = el("div", "rc-head");
-    head.appendChild(el("h3", "rc-title", l.name));
-    const [stateText, stateCls] = STATE_MAP[l.state] || STATE_MAP.unknown;
-    head.appendChild(el("span", "state-pill " + stateCls, stateText));
-    li.appendChild(head);
+// 可能相关：没能确认是这部的（只看有效时只留有效的），同样受清晰度筛选
+function maybeLinks(links) {
+  const saved = hideDead;
+  hideDead = false;
+  const pool = visibleLinks(links);
+  hideDead = saved;
+  return pool.filter((l) => l.relevance === "uncertain" && (!hideDead || l.state === "valid"));
+}
 
-    const badges = el("div", "badges");
-    badges.appendChild(badge(l.conf + "置信", "badge-" + (l.conf === "高" ? "high" : l.conf === "低" ? "low" : "mid")));
-    for (const b of qualityBadges(l.quality)) badges.appendChild(b);
-    if (l.state === "valid" && l.relevance === "mismatch") {
-      badges.appendChild(badge("片名不符", "badge-dead", l.relevance_note));
-    } else if (l.state === "valid" && l.relevance === "uncertain") {
-      badges.appendChild(badge("待核对", "badge-unknown", l.relevance_note || "没能确认是不是这部作品"));
-    }
-    if (l.copy_count) badges.appendChild(badge(l.copy_count + " 次复制", "badge-accent"));
-    if (l.from_memory) {
-      badges.appendChild(badge("记忆", "badge-tag",
-        l.last_checked ? "上次验证：" + new Date(l.last_checked * 1000).toLocaleString() : ""));
-    }
-    li.appendChild(badges);
+function linkCard(l, i) {
+  const li = el("li", "result-card state-" + (l.state || "unknown"));
+  li.style.setProperty("--i", String(Math.min(i, 12)));
 
-    const box = el("div", "link-box");
-    const url = el("a", "share-url", "https://pan.quark.cn/s/" + l.share);
-    url.href = "https://pan.quark.cn/s/" + l.share;
-    url.target = "_blank";
-    url.rel = "noopener noreferrer";
-    box.appendChild(url);
-    box.appendChild(el("span", "pwd", l.pwd ? "提取码 " + l.pwd : "无提取码"));
-    li.appendChild(box);
+  const head = el("div", "rc-head");
+  head.appendChild(el("h3", "rc-title", l.name));
+  const [stateText, stateCls] = STATE_MAP[l.state] || STATE_MAP.unknown;
+  head.appendChild(el("span", "state-pill " + stateCls, stateText));
+  li.appendChild(head);
 
-    const meta = el("div", "meta");
-    if (l.time) meta.appendChild(el("span", "", l.time));
-    meta.appendChild(el("span", "", "来源：" + l.source));
-    li.appendChild(meta);
+  const badges = el("div", "badges");
+  badges.appendChild(badge(l.conf + "置信", "badge-" + (l.conf === "高" ? "high" : l.conf === "低" ? "low" : "mid")));
+  for (const b of qualityBadges(l.quality)) badges.appendChild(b);
+  if (l.state === "valid" && l.relevance === "mismatch") {
+    badges.appendChild(badge("片名不符", "badge-dead", l.relevance_note));
+  } else if (l.state === "valid" && l.relevance === "uncertain") {
+    badges.appendChild(badge("待核对", "badge-unknown", l.relevance_note || "没能确认是不是这部作品"));
+  }
+  if (l.copy_count) badges.appendChild(badge(l.copy_count + " 次复制", "badge-accent"));
+  if (l.from_memory) {
+    badges.appendChild(badge("记忆", "badge-tag",
+      l.last_checked ? "上次验证：" + new Date(l.last_checked * 1000).toLocaleString() : ""));
+  }
+  li.appendChild(badges);
 
-    if (l.share_title || (l.files_preview && l.files_preview.length)) {
-      const parts = [];
-      if (l.share_title) parts.push("分享标题：" + l.share_title);
-      if (l.files_preview && l.files_preview.length) parts.push("内容：" + l.files_preview.join("、"));
-      const fp = el("div", "files-preview", parts.join("　|　"));
-      fp.title = parts.join("\n");
-      li.appendChild(fp);
-    }
+  const box = el("div", "link-box");
+  const url = el("a", "share-url", "https://pan.quark.cn/s/" + l.share);
+  url.href = "https://pan.quark.cn/s/" + l.share;
+  url.target = "_blank";
+  url.rel = "noopener noreferrer";
+  box.appendChild(url);
+  box.appendChild(el("span", "pwd", l.pwd ? "提取码 " + l.pwd : "无提取码"));
+  li.appendChild(box);
 
-    if (l.state === "invalid") li.classList.add("result-dead");
+  const meta = el("div", "meta");
+  if (l.time) meta.appendChild(el("span", "", l.time));
+  meta.appendChild(el("span", "", "来源：" + l.source));
+  li.appendChild(meta);
 
-    const row = el("div", "row-actions");
-    const copyOne = el("button", "secondary-btn small accent", "复制链接");
-    copyOne.type = "button";
-    copyOne.addEventListener("click", () => {
-      const link = shareLink(l);
-      copyText(link).then(() => {
-        flashButton(copyOne, "已复制 ✓");
-        toast("已复制" + (l.pwd ? "（含提取码）" : "") + "：" + link);
-      }).catch(() => toast("复制失败，请手动选中链接复制", "error"));
-      // 反馈：被复制过的链接下次排序更靠前（失败不影响使用）
-      fetch("/api/feedback", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ share: l.share }),
-      }).catch(() => {});
-    });
-    row.appendChild(copyOne);
-    const open = el("a", "secondary-btn small", "打开");
-    open.href = url.href;
-    open.target = "_blank";
-    open.rel = "noopener noreferrer";
-    row.appendChild(open);
-    if (saveEnabled && l.state === "valid") row.appendChild(saveButton(l));
-    li.appendChild(row);
+  if (l.share_title || (l.files_preview && l.files_preview.length)) {
+    const parts = [];
+    if (l.share_title) parts.push("分享标题：" + l.share_title);
+    if (l.files_preview && l.files_preview.length) parts.push("内容：" + l.files_preview.join("、"));
+    const fp = el("div", "files-preview", parts.join("　|　"));
+    fp.title = parts.join("\n");
+    li.appendChild(fp);
+  }
 
-    resultList.appendChild(li);
+  if (l.state === "invalid") li.classList.add("result-dead");
+
+  const row = el("div", "row-actions");
+  const copyOne = el("button", "secondary-btn small accent", "复制链接");
+  copyOne.type = "button";
+  copyOne.addEventListener("click", () => {
+    const link = shareLink(l);
+    copyText(link).then(() => {
+      flashButton(copyOne, "已复制 ✓");
+      toast("已复制" + (l.pwd ? "（含提取码）" : "") + "：" + link);
+    }).catch(() => toast("复制失败，请手动选中链接复制", "error"));
+    // 反馈：被复制过的链接下次排序更靠前（失败不影响使用）
+    fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ share: l.share }),
+    }).catch(() => {});
   });
+  row.appendChild(copyOne);
+  const open = el("a", "secondary-btn small", "打开");
+  open.href = url.href;
+  open.target = "_blank";
+  open.rel = "noopener noreferrer";
+  row.appendChild(open);
+  if (saveEnabled && l.state === "valid") row.appendChild(saveButton(l));
+  li.appendChild(row);
+  return li;
 }
 
 copyBtn.addEventListener("click", () => {
@@ -487,6 +512,8 @@ function renderResult(data) {
 
   if (data.links.length === 0) {
     resultList.innerHTML = "";
+    maybeList.innerHTML = "";
+    maybeBox.hidden = true;
     currentLinks = [];
     linkActions.hidden = true;
     renderEmpty("没有找到夸克网盘链接", "建议换一种写法（别名、英文名、加 4K / 全集 等）后重试，或者在上方追问「再找找」。");
@@ -1102,10 +1129,250 @@ function subEditor(sub) {
 
   const foot = el("div", "sub-edit-foot");
   const left = el("div", "sub-edit-left");
+  SUB_TOOLS.forEach((make) => { const b = make(sub); if (b) left.appendChild(b); });
   left.append(pause, complete, del);
   foot.append(left, save);
   panel.append(grid, foot);
   return panel;
+}
+
+// 设置面板左下角的工具按钮；以后加新工具（比如洗版）往这里追加一个函数
+const SUB_TOOLS = [organizeButton];
+
+function organizeButton(sub) {
+  if (!meState.login) return null; // 整理要用自己的夸克登录
+  const btn = el("button", "secondary-btn small", "整理网盘目录");
+  btn.type = "button";
+  btn.title = "把这个订阅存过的文件移到同一个目录、按标准命名；重复版本可以勾选删除";
+  btn.addEventListener("click", () => openOrganizeDialog(sub));
+  return btn;
+}
+
+function tidyRow(title, sub, extra) {
+  const li = el("li", "tidy-row");
+  const text = el("span", "tidy-text");
+  text.append(el("span", "tidy-name", title));
+  if (sub) text.appendChild(el("span", "tidy-sub", sub));
+  li.appendChild(text);
+  if (extra) li.appendChild(el("span", "tidy-size", extra));
+  return li;
+}
+
+function tidyGroup(title, count, cls) {
+  const sec = el("section", "tidy-group " + (cls || ""));
+  const h = el("h3", "tidy-head");
+  h.append(title, el("span", "tidy-count", String(count)));
+  sec.appendChild(h);
+  const ul = el("ul", "tidy-list");
+  sec.appendChild(ul);
+  return { sec, ul };
+}
+
+// 整理网盘目录：先预览（不改动），移动/改名直接执行，删除只删用户逐个勾选并二次确认的
+function openOrganizeDialog(sub) {
+  const dlg = el("dialog", "sub-dialog tidy-dialog");
+  const head = el("div", "sd-head");
+  head.appendChild(el("p", "sd-title", "整理《" + sub.resource + "》的网盘目录"));
+  const x = el("button", "ghost-btn small icon-only", "✕");
+  x.type = "button";
+  x.setAttribute("aria-label", "关闭");
+  head.appendChild(x);
+  const target = el("p", "sd-hint", "正在读取网盘目录…");
+  const body = el("div", "tidy-body");
+  body.appendChild(el("div", "cand cand-skel"));
+  body.appendChild(el("div", "cand cand-skel"));
+  const confirmBox = el("div", "tidy-confirm");
+  confirmBox.hidden = true;
+  const foot = el("div", "sd-foot");
+  const cancel = el("button", "secondary-btn small", "取消");
+  cancel.type = "button";
+  const run = el("button", "primary-btn small", "执行整理");
+  run.type = "button";
+  run.disabled = true;
+  foot.append(cancel, run);
+  dlg.append(head, target, body, confirmBox, foot);
+  document.body.appendChild(dlg);
+
+  let plan = null;
+  let finished = false;
+  const close = () => {
+    dlg.close();
+    dlg.remove();
+    if (finished) loadSubs();
+  };
+  x.addEventListener("click", close);
+  cancel.addEventListener("click", close);
+  dlg.addEventListener("cancel", close);
+
+  const checked = () => [...body.querySelectorAll(".tidy-del input:checked")].map((c) => c.value);
+  const moveCount = () => plan.moves.filter((m) => m.from !== plan.target).length;
+  const renameCount = () => plan.moves.filter((m) => m.to_name !== m.name).length;
+  const refreshRun = () => {
+    const parts = [];
+    if (moveCount()) parts.push("移动 " + moveCount());
+    if (renameCount()) parts.push("改名 " + renameCount());
+    const del = checked().length;
+    if (del) parts.push("删除 " + del);
+    run.disabled = !parts.length;
+    setText(run, parts.length ? "执行整理（" + parts.join(" · ") + "）" : "没有要执行的操作");
+    confirmBox.hidden = true;
+    foot.hidden = false;
+  };
+
+  function showError(text, retry) {
+    body.innerHTML = "";
+    const p = el("div", "tidy-empty error");
+    p.appendChild(el("p", "", text));
+    if (retry) {
+      const again = el("button", "secondary-btn small", "重试");
+      again.type = "button";
+      again.addEventListener("click", load);
+      p.appendChild(again);
+    }
+    body.appendChild(p);
+    setText(target, "");
+  }
+
+  function renderPlan() {
+    body.innerHTML = "";
+    setText(target, "整理到：" + plan.target);
+    target.title = plan.target;
+    const moves = plan.moves.filter((m) => m.from !== plan.target);
+    const renames = plan.moves.filter((m) => m.from === plan.target && m.to_name !== m.name);
+    if (!moves.length && !renames.length && !plan.deletes.length) {
+      body.appendChild(el("div", "tidy-empty", "目录已经很整齐了，没有需要移动、改名或删除的文件。"));
+    }
+    if (moves.length) {
+      const g = tidyGroup("移动到整理目录", moves.length, "is-move");
+      moves.forEach((m) => g.ul.appendChild(tidyRow(m.to_name,
+        "从 " + m.from + (m.to_name !== m.name ? "，原名 " + m.name : ""), formatSize(m.size))));
+      body.appendChild(g.sec);
+    }
+    if (renames.length) {
+      const g = tidyGroup("改名", renames.length, "is-rename");
+      renames.forEach((m) => g.ul.appendChild(tidyRow(m.to_name, "原名 " + m.name, formatSize(m.size))));
+      body.appendChild(g.sec);
+    }
+    if (plan.deletes.length) {
+      const g = tidyGroup("建议删除", plan.deletes.length, "is-delete");
+      g.sec.appendChild(el("p", "tidy-note", "默认都不删。确认不需要的请逐个勾选，删除的文件会进夸克回收站，可以恢复。"));
+      g.sec.appendChild(g.ul); // 说明放在列表上面
+      plan.deletes.forEach((d) => {
+        const li = el("li", "tidy-row tidy-del");
+        const label = el("label", "tidy-check");
+        const cb = el("input");
+        cb.type = "checkbox";
+        cb.value = d.fid;
+        cb.addEventListener("change", () => { li.classList.toggle("on", cb.checked); refreshRun(); });
+        const text = el("span", "tidy-text");
+        text.append(el("span", "tidy-name", d.name), el("span", "tidy-sub", d.reason + " · " + d.folder));
+        label.append(cb, text);
+        li.appendChild(label);
+        if (d.size) li.appendChild(el("span", "tidy-size", formatSize(d.size)));
+        g.ul.appendChild(li);
+      });
+      body.appendChild(g.sec);
+    }
+    if (plan.untouched && plan.untouched.length) {
+      const more = el("details", "tidy-untouched");
+      more.appendChild(el("summary", "", "不处理的文件（" + plan.untouched.length + "）：认不出集号，比如花絮"));
+      const ul = el("ul", "tidy-list");
+      plan.untouched.forEach((u) => ul.appendChild(tidyRow(u.name, u.folder)));
+      more.appendChild(ul);
+      body.appendChild(more);
+    }
+    refreshRun();
+  }
+
+  async function load() {
+    run.disabled = true;
+    body.innerHTML = "";
+    body.append(el("div", "cand cand-skel"), el("div", "cand cand-skel"));
+    setText(target, "正在读取网盘目录…");
+    try {
+      const res = await subApi("/" + sub.id + "/organize");
+      if (res.ok) { plan = res.body; renderPlan(); return; }
+      if (res.status === 401 && meState.login) {
+        showError(res.body.detail || "需要先扫码登录夸克", false);
+        if (await quarkLogin(res.body.detail || "整理网盘目录需要先扫码登录夸克")) load();
+        return;
+      }
+      showError(res.body.detail || "读取网盘目录失败", true);
+    } catch (_) {
+      showError("读取网盘目录失败，请稍后重试", true);
+    }
+  }
+
+  async function execute() {
+    const fids = checked();
+    run.disabled = true;
+    run.classList.add("loading");
+    setText(run, "整理中…");
+    confirmBox.hidden = true;
+    foot.hidden = false;
+    body.querySelectorAll("input").forEach((i) => { i.disabled = true; });
+    let res;
+    try {
+      res = await subApi("/" + sub.id + "/organize", "POST", { delete_fids: fids });
+    } catch (_) {
+      res = { ok: false, status: 0, body: { detail: "连接失败，请稍后重试" } };
+    }
+    run.classList.remove("loading");
+    if (!res.ok) {
+      body.querySelectorAll("input").forEach((i) => { i.disabled = false; });
+      toast(res.body.detail || "整理失败", "error");
+      if (res.status === 401 && meState.login) await quarkLogin(res.body.detail || "夸克登录已失效，请重新扫码");
+      refreshRun();
+      return;
+    }
+    finished = true;
+    const r = res.body;
+    const errors = r.errors || [];
+    body.innerHTML = "";
+    const box = el("div", "tidy-result" + (errors.length ? " has-errors" : ""));
+    box.appendChild(el("span", "tidy-result-ico", errors.length ? "!" : "✓"));
+    const stats = el("div", "tidy-stats");
+    [["移动", r.moved], ["改名", r.renamed], ["删除", r.deleted]].forEach(([k, v]) => {
+      const s = el("div", "tidy-stat");
+      s.append(el("b", "", String(v || 0)), el("span", "", k));
+      stats.appendChild(s);
+    });
+    box.appendChild(stats);
+    box.appendChild(el("p", "tidy-note", "文件都在「" + r.target + "」。这是新功能，请打开夸克网盘确认一下结果" +
+      (r.deleted ? "；删错了可以在夸克回收站里恢复。" : "。")));
+    if (errors.length) {
+      const ul = el("ul", "tidy-errors");
+      errors.slice(0, 10).forEach((e) => ul.appendChild(el("li", "", e)));
+      box.appendChild(ul);
+    }
+    body.appendChild(box);
+    setText(target, "整理完成");
+    run.remove();
+    setText(cancel, "完成");
+  }
+
+  run.addEventListener("click", () => {
+    const n = checked().length;
+    if (!n) { execute(); return; }
+    // 有删除项：二次确认
+    confirmBox.innerHTML = "";
+    confirmBox.appendChild(el("p", "", "确定删除勾选的 " + n + " 个文件？它们会进夸克回收站，可以恢复。"));
+    const back = el("button", "secondary-btn small", "再看看");
+    back.type = "button";
+    back.addEventListener("click", () => { confirmBox.hidden = true; foot.hidden = false; });
+    const yes = el("button", "secondary-btn small danger-solid", "确认删除并整理");
+    yes.type = "button";
+    yes.addEventListener("click", execute);
+    const row = el("div", "tidy-confirm-actions");
+    row.append(back, yes);
+    confirmBox.appendChild(row);
+    confirmBox.hidden = false;
+    foot.hidden = true;
+    yes.focus();
+  });
+
+  dlg.showModal();
+  load();
 }
 
 function autoSaveSwitch(sub) {
@@ -1201,6 +1468,11 @@ function subItem(sub) {
   body.appendChild(subProgress(sub));
   const rules = rulesSummary(sub);
   if (rules) body.appendChild(el("span", "sub-rules", rules));
+  if (sub.folder) {
+    const where = el("span", "sub-folder", "存到：" + sub.folder);
+    where.title = sub.folder;
+    body.appendChild(where);
+  }
 
   const row = el("div", "sub-row");
   row.appendChild(autoSaveSwitch(sub));
