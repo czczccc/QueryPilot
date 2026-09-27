@@ -79,6 +79,17 @@ CREATE TABLE IF NOT EXISTS quark_accounts (
     created      REAL NOT NULL,
     last_used    REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS auto_saves (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscription_id INTEGER NOT NULL,
+    share           TEXT NOT NULL,
+    ok              INTEGER NOT NULL,
+    file_count      INTEGER NOT NULL DEFAULT 0,
+    folder          TEXT,
+    message         TEXT,
+    ts              REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auto_saves_sub ON auto_saves(subscription_id, ts);
 CREATE TABLE IF NOT EXISTS prefs (
     client_id TEXT PRIMARY KEY,
     data      TEXT NOT NULL,
@@ -92,6 +103,8 @@ _MIGRATIONS = [
     ("links", "files_preview", "TEXT"),
     ("links", "copy_count", "INTEGER NOT NULL DEFAULT 0"),
     ("quark_accounts", "user_id", "TEXT"),
+    ("subscriptions", "auto_save", "INTEGER NOT NULL DEFAULT 0"),
+    ("subscriptions", "auto_save_status", "TEXT"),
 ]
 
 _PUNCT_RE = re.compile(r"[\s\-_·:：,，.。!！?？'\"“”‘’()（）\[\]【】《》<>]+")
@@ -310,6 +323,7 @@ class LinkStore:
             id=row["id"], query=row["query"], resource=row["resource"], created=row["created"],
             last_checked=row["last_checked"], best_episodes=row["best_episodes"],
             best_score=row["best_score"], best_resolution=row["best_resolution"],
+            auto_save=bool(row["auto_save"]), auto_save_status=row["auto_save_status"],
         )
 
     def _list_subscriptions(self, client_id: str | None) -> list[tuple[str, Subscription]]:
@@ -331,6 +345,8 @@ class LinkStore:
                 "DELETE FROM notifications WHERE subscription_id = ? AND client_id = ?",
                 (sub_id, client_id),
             )
+            if cur.rowcount:
+                self._conn.execute("DELETE FROM auto_saves WHERE subscription_id = ?", (sub_id,))
             self._conn.commit()
         return cur.rowcount > 0
 
@@ -401,6 +417,27 @@ class LinkStore:
             )
             self._conn.commit()
         return bytes(row["cookie_enc"]), row["nickname"], row["user_id"]
+
+    def _latest_account(self, user_id: str) -> tuple[str, bytes] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT session_hash, cookie_enc FROM quark_accounts WHERE user_id = ?"
+                " ORDER BY last_used DESC LIMIT 1", (user_id,),
+            ).fetchone()
+        return (row["session_hash"], bytes(row["cookie_enc"])) if row else None
+
+    def _exec(self, sql: str, args: tuple) -> int:
+        with self._lock:
+            cur = self._conn.execute(sql, args)
+            self._conn.commit()
+        return cur.rowcount
+
+    def _get_subscription(self, client_id: str, sub_id: int) -> Subscription | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM subscriptions WHERE id = ? AND client_id = ?", (sub_id, client_id)
+            ).fetchone()
+        return self._row_to_sub(row) if row else None
 
     def _delete_account(self, sh: str) -> None:
         with self._lock:
@@ -490,6 +527,56 @@ class LinkStore:
     async def get_account(self, session_hash: str) -> tuple[bytes, str | None, str | None] | None:
         """(加密凭证, 昵称, 账号 id)。"""
         return await asyncio.to_thread(self._get_account, session_hash, time.time())
+
+    async def latest_account(self, user_id: str) -> tuple[str, bytes] | None:
+        """某个账号最近使用的登录凭证：(会话哈希, 密文)；解密时会话哈希是 AAD。"""
+        return await asyncio.to_thread(self._latest_account, user_id)
+
+    async def set_auto_save(self, client_id: str, sub_id: int, on: bool) -> Subscription | None:
+        """打开 / 关闭某个订阅的自动转存（打开时清掉之前的失败状态）。"""
+        n = await asyncio.to_thread(
+            self._exec,
+            "UPDATE subscriptions SET auto_save = ?, auto_save_status = NULL"
+            " WHERE id = ? AND client_id = ?", (int(on), sub_id, client_id),
+        )
+        return await asyncio.to_thread(self._get_subscription, client_id, sub_id) if n else None
+
+    async def set_auto_save_status(self, sub_id: int, status: str | None) -> None:
+        await asyncio.to_thread(
+            self._exec, "UPDATE subscriptions SET auto_save_status = ? WHERE id = ?",
+            (status, sub_id),
+        )
+
+    async def clear_auto_save_status(self, client_id: str, status: str) -> int:
+        """重新登录后：把这个人所有因为登录失效而暂停的自动转存恢复。"""
+        return await asyncio.to_thread(
+            self._exec, "UPDATE subscriptions SET auto_save_status = NULL"
+            " WHERE client_id = ? AND auto_save_status = ?", (client_id, status),
+        )
+
+    async def log_auto_save(
+        self, sub_id: int, share: str, ok: bool, file_count: int, folder: str | None,
+        message: str,
+    ) -> None:
+        await asyncio.to_thread(
+            self._exec,
+            "INSERT INTO auto_saves (subscription_id, share, ok, file_count, folder, message, ts)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (sub_id, share, int(ok), file_count, folder, message, time.time()),
+        )
+
+    async def auto_save_log(self, client_id: str, sub_id: int, limit: int = 20) -> list[dict]:
+        def run() -> list[dict]:
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT a.share, a.ok, a.file_count, a.folder, a.message, a.ts FROM auto_saves a"
+                    " JOIN subscriptions s ON s.id = a.subscription_id"
+                    " WHERE a.subscription_id = ? AND s.client_id = ? ORDER BY a.ts DESC, a.id DESC"
+                    " LIMIT ?", (sub_id, client_id, limit),
+                ).fetchall()
+            return [{**dict(r), "ok": bool(r["ok"])} for r in rows]
+
+        return await asyncio.to_thread(run)
 
     async def delete_account(self, session_hash: str) -> None:
         await asyncio.to_thread(self._delete_account, session_hash)

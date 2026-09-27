@@ -179,6 +179,13 @@ class Subscription(BaseModel):
     best_episodes: int = 0  # 目前见过的最多集数（有效且相关的链接里）
     best_score: int = 0  # 目前见过的最高质量分
     best_resolution: str | None = None
+    auto_save: bool = False  # 发现新集时自动转存到自己的夸克网盘（需要扫码登录）
+    # 自动转存暂停的原因：login_expired（夸克登录失效，重新扫码后自动恢复）/ no_login；正常为 None
+    auto_save_status: str | None = None
+
+
+class AutoSaveRequest(BaseModel):
+    auto_save: bool
 
 
 class Notification(BaseModel):
