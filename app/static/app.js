@@ -853,6 +853,7 @@ function subMedia(sub) {
 const SUBS_TABS = {
   tv: { count: () => subsCache.filter((s) => subMedia(s) === "tv").length, empty: "还没有订阅剧集。" },
   movie: { count: () => subsCache.filter((s) => subMedia(s) === "movie").length, empty: "还没有订阅电影。" },
+  calendar: { count: () => 0, empty: "" },
   history: { count: () => historyCache.length, empty: "还没有完成的订阅。集齐或手动完成的订阅会出现在这里，可以一键重新订阅。" },
 };
 
@@ -865,6 +866,7 @@ function renderSubsTab() {
     setText(b.querySelector(".seg-n"), n ? String(n) : "");
   });
   subsList.innerHTML = "";
+  if (subsTab === "calendar") { renderCalendar(); return; }
   const items = subsTab === "history"
     ? historyCache.map(historyItem)
     : subsCache.filter((s) => subMedia(s) === subsTab).map(subItem);
@@ -879,6 +881,119 @@ subsTabs.addEventListener("click", (e) => {
   try { localStorage.setItem("qp_subs_tab", subsTab); } catch (_) { /* 忽略 */ }
   renderSubsTab();
 });
+
+// ---- 追剧日历：按周列出订阅剧集的播出日和每集状态 ----
+const CAL_STATUS = {
+  saved: ["已存", "ok", "网盘里已经有这一集"],
+  available: ["有资源", "info", "已经有资源，还没存进网盘"],
+  no_resource: ["暂无资源", "danger", "已经播出，但还没搜到资源"],
+  upcoming: ["未播出", "neutral", "还没到播出日"],
+};
+const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+let calWeek = 0; // 相对本周偏移几周
+
+function isoDate(d) {
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+
+function weekRange(offset) {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7) + offset * 7); // 周一
+  return Array.from({ length: 7 }, (_, i) => { const x = new Date(d); x.setDate(d.getDate() + i); return x; });
+}
+
+// 点日历里的一集：切到剧集标签页并高亮对应的订阅卡片
+function jumpToSub(id) {
+  subsTab = "tv";
+  renderSubsTab();
+  const li = subsList.querySelector('[data-sub-id="' + id + '"]');
+  if (!li) return;
+  li.scrollIntoView({ behavior: "smooth", block: "center" });
+  li.classList.remove("flash");
+  void li.offsetWidth;
+  li.classList.add("flash");
+}
+
+function calItem(ep) {
+  const [label, tone, tip] = CAL_STATUS[ep.status] || CAL_STATUS.upcoming;
+  const item = el("button", "cal-ep tone-" + tone);
+  item.type = "button";
+  item.title = tip + "，点击查看订阅";
+  const text = el("span", "cal-ep-text");
+  text.append(el("b", "cal-ep-title", ep.resource),
+    el("span", "cal-ep-no", "S" + String(ep.season || 1).padStart(2, "0") + "E" + String(ep.episode).padStart(2, "0") +
+      (ep.name && !/^第\s*\d+\s*集$/.test(ep.name) ? " · " + ep.name : "")));
+  item.append(posterEl(ep.poster, ep.resource, "tiny"), text, el("span", "cal-ep-state", label));
+  item.addEventListener("click", () => jumpToSub(ep.subscription_id));
+  return item;
+}
+
+async function renderCalendar() {
+  const days = weekRange(calWeek);
+  const start = isoDate(days[0]);
+  const end = isoDate(days[6]);
+  const wrap = el("li", "cal-wrap");
+  const nav = el("div", "cal-nav");
+  const prev = el("button", "ghost-btn small", "‹ 上一周");
+  prev.type = "button";
+  const next = el("button", "ghost-btn small", "下一周 ›");
+  next.type = "button";
+  const label = el("span", "cal-range", (days[0].getMonth() + 1) + "/" + days[0].getDate() + " – " +
+    (days[6].getMonth() + 1) + "/" + days[6].getDate());
+  const center = el("div", "cal-center");
+  center.appendChild(label);
+  if (calWeek !== 0) {
+    const now = el("button", "link-btn", "回到本周");
+    now.type = "button";
+    now.addEventListener("click", () => { calWeek = 0; renderSubsTab(); });
+    center.appendChild(now);
+  }
+  prev.addEventListener("click", () => { calWeek -= 1; renderSubsTab(); });
+  next.addEventListener("click", () => { calWeek += 1; renderSubsTab(); });
+  nav.append(prev, center, next);
+  const legend = el("div", "cal-legend");
+  Object.values(CAL_STATUS).forEach(([t, tone]) => legend.appendChild(el("span", "cal-key tone-" + tone, t)));
+  const grid = el("div", "cal-grid");
+  grid.appendChild(el("div", "cal-loading", "加载中…"));
+  wrap.append(nav, legend, grid);
+  subsList.appendChild(wrap);
+
+  let data = null;
+  try {
+    const resp = await fetch("/api/calendar?" + cidParam() + "&start=" + start + "&end=" + end);
+    data = resp.ok ? await resp.json() : null;
+  } catch (_) { data = null; }
+  if (subsTab !== "calendar" || !wrap.isConnected) return; // 已经切走了
+  grid.innerHTML = "";
+  if (!data) {
+    grid.appendChild(el("div", "cal-empty", "日历加载失败，请稍后重试。"));
+    return;
+  }
+  const byDay = {};
+  data.episodes.forEach((ep) => { (byDay[ep.air_date] = byDay[ep.air_date] || []).push(ep); });
+  days.forEach((d, i) => {
+    const key = isoDate(d);
+    const col = el("div", "cal-day" + (key === data.today ? " is-today" : "") + (key < data.today ? " is-past" : ""));
+    const head = el("div", "cal-day-head");
+    head.append(el("span", "cal-wd", key === data.today ? "今天" : WEEKDAYS[i]), el("span", "cal-date", (d.getMonth() + 1) + "/" + d.getDate()));
+    const list = el("div", "cal-eps");
+    col.append(head, list);
+    const eps = byDay[key] || [];
+    if (!eps.length) list.appendChild(el("span", "cal-none", "没有播出"));
+    eps.forEach((ep) => list.appendChild(calItem(ep)));
+    col.classList.toggle("is-blank", !eps.length);
+    grid.appendChild(col);
+  });
+  if (!data.episodes.length) {
+    const tv = subsCache.filter((x) => x.media === "tv");
+    const tip = !tv.length ? "还没有订阅剧集，订阅后这里会按播出日排好每一集。"
+      : !tv.some((x) => x.tmdb_id) ? "日历需要 TMDB 的播出日期：请在服务器 .env 里配置 TMDB_API_KEY，并重新订阅剧集（只用豆瓣识别的剧没有日历）。"
+        : "这一周没有订阅的剧集播出。播出日期来自 TMDB，只用豆瓣识别的剧不会出现在日历里。";
+    wrap.insertBefore(el("p", "cal-empty", tip), grid);
+    grid.hidden = true;
+  }
+}
 
 // ---- 订阅卡片的各个部件 ----
 function posterEl(src, title, cls) {
@@ -962,6 +1077,7 @@ function versionStrip(sub) {
   const goal = RES_RANK[sub.upgrade_to || "2160p"];
   const below = (res) => sub.upgrade && res && RES_RANK[res] < goal;
   if (sub.media === "movie") return null; // 电影的清晰度写在进度那一行
+  if (!Object.keys(versions).length && !sub.upgrade) return null; // 还没有清晰度记录（老订阅）
   const total = sub.total_episodes;
   const saved = new Set(sub.saved_episodes || []);
   if (!total || !saved.size || total - sub.start_episode + 1 > 60) return null;
@@ -1524,6 +1640,7 @@ function saveLogButton(sub, log) {
 // 一条订阅：海报 + 标题与状态 + 进度 + 规则 + 自动转存 + 设置面板
 function subItem(sub) {
   const li = el("li", "sub-item" + (sub.state === "paused" ? " is-paused" : ""));
+  li.dataset.subId = String(sub.id);
   const card = el("div", "sub-card");
   const body = el("div", "sub-body");
 
