@@ -7,6 +7,7 @@
 import asyncio
 import contextlib
 import hmac
+import json
 import logging
 import secrets
 import time
@@ -36,6 +37,7 @@ from app.models import (
 )
 from app.providers.tavily import TavilyProvider
 from app.security import RateLimiter, install_request_id_factory, set_request_id
+from app.services import llm
 from app.services.agent import SearchAgent
 from app.services.classify import Classifier
 from app.services.cookie_box import CookieBox, session_hash
@@ -46,6 +48,7 @@ from app.services.quark_login import LoginError, QuarkQrLogin, qr_svg
 from app.services.quark_save import LoginExpiredError, QuarkSaver, SaveError
 from app.services.search import QuarkSearchService, SearchUnavailableError
 from app.services.subscriptions import SubscriptionWatcher
+from app.services.usage import SYSTEM, QuotaConfig, QuotaGuard, UsageStore
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -96,12 +99,20 @@ async def _reverify_loop(service: QuarkSearchService, interval_hours: float) -> 
             logger.exception("记忆复验异常")
 
 
-async def _subscribe_loop(watcher: SubscriptionWatcher, interval_hours: float) -> None:
-    """后台定期检查追剧订阅；单轮失败只记日志。"""
+async def _subscribe_loop(
+    watcher: SubscriptionWatcher, interval_hours: float, quota: QuotaGuard | None = None
+) -> None:
+    """后台定期检查追剧订阅；单轮失败只记日志。LLM 用量记到 system，也受全站预算约束。"""
     while True:
         await asyncio.sleep(interval_hours * 3600)
         try:
-            notes = await watcher.run_once()
+            allowed = True
+            if quota is not None:
+                allowed = (await quota.check(SYSTEM, SYSTEM, True)).reason != "site_budget"
+            with llm.scope(allowed=allowed) as meter:
+                notes = await watcher.run_once()
+            if quota is not None:
+                await quota.record(SYSTEM, SYSTEM, meter, searched=False)
             logger.info("订阅检查完成，新通知 %d 条", notes)
         except Exception:
             logger.exception("订阅检查异常")
@@ -119,16 +130,32 @@ def create_app(
     cookie_box: CookieBox | None = None,
     quark_client: httpx.AsyncClient | None = None,
     classifier=None,
+    quota: QuotaGuard | None = None,
 ) -> FastAPI:
     """创建应用；传入 service / agent 便于测试注入假实现。"""
     resolved = service or build_default_service()
     resolved_agent = agent or SearchAgent(
         resolved,
         api_key=_settings.deepseek_api_key if service is None else "",
+        cache_minutes=_settings.search_cache_minutes if service is None else 0,
     )
-    limiter = RateLimiter(
-        rate=rate_limit_per_minute if rate_limit_per_minute is not None else 10
+    per_minute = (
+        rate_limit_per_minute if rate_limit_per_minute is not None
+        else _settings.rate_limit_per_minute
     )
+    limiter = RateLimiter(rate=per_minute or 10**9)
+    # 额度与用量：测试注入的 service 默认不开，生产按 .env
+    if quota is None and service is None:
+        quota = QuotaGuard(
+            UsageStore(_settings.memory_db_path or ":memory:"),
+            QuotaConfig(
+                anon_daily_ai=_settings.anon_daily_ai,
+                user_daily_ai=_settings.user_daily_ai,
+                site_daily_tokens=_settings.site_daily_tokens,
+                ip_daily_searches=_settings.ip_daily_searches,
+            ),
+        )
+    trust_proxy = _settings.trust_proxy if service is None else False
 
     interval = (
         reverify_interval_hours
@@ -157,7 +184,7 @@ def create_app(
         if interval > 0:
             tasks.append(asyncio.create_task(_reverify_loop(resolved, interval)))
         if watcher is not None and sub_interval > 0:
-            tasks.append(asyncio.create_task(_subscribe_loop(watcher, sub_interval)))
+            tasks.append(asyncio.create_task(_subscribe_loop(watcher, sub_interval, quota)))
         try:
             yield
         finally:
@@ -175,6 +202,7 @@ def create_app(
     app.state.search_service = resolved
     app.state.agent = resolved_agent
     app.state.watcher = watcher
+    app.state.quota = quota
     # 一键转存：cookie 与口令都配置了才开启（测试可注入）
     # 转存自动分类：有 LLM key 用 LLM 判断，否则规则；SAVE_CLASSIFY=false 关闭
     if classifier is None and service is None and _settings.save_classify:
@@ -221,9 +249,16 @@ def create_app(
         )
         return response
 
+    def client_ip(request: Request) -> str:
+        """真实客户端 IP：TRUST_PROXY 开启时取 X-Forwarded-For 的第一个地址。"""
+        if trust_proxy:
+            forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+            if forwarded:
+                return forwarded[:64]
+        return request.client.host if request.client else "unknown"
+
     def rate_limit_dep(request: Request) -> None:
-        client_ip = request.client.host if request.client else "unknown"
-        if not limiter.allow(client_ip):
+        if not limiter.allow(client_ip(request)):
             raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
 
     @app.exception_handler(Exception)
@@ -328,6 +363,40 @@ def create_app(
             return None
         return sh, cookie, row[1]
 
+    async def _identity(request: Request) -> tuple[str, str, bool]:
+        """(额度身份, IP 身份, 是否登录)：登录用户按账号，匿名按 IP（client_id 可随意伪造，不作依据）。"""
+        ip_subject = f"ip:{client_ip(request)}"
+        user = await _user_cookie(request)
+        if user is not None:
+            return f"user:{user[0]}", ip_subject, True
+        return ip_subject, ip_subject, False
+
+    async def _quota_start(request: Request):
+        """搜索前检查额度；IP 当天超限直接 429，其余情况返回 (身份, IP 身份, 决定)。"""
+        if quota is None:
+            return None
+        subject, ip_subject, logged_in = await _identity(request)
+        decision = await quota.check(subject, ip_subject, logged_in)
+        if decision.blocked:
+            raise HTTPException(status_code=429, detail=decision.message())
+        return subject, ip_subject, decision
+
+    async def _quota_end(ctx, meter: llm.Meter, result=None) -> None:
+        if ctx is None:
+            return
+        await quota.record(ctx[0], ctx[1], meter, decision=ctx[2])
+        if result is not None:
+            result.quota = ctx[2].to_dict()
+
+    @app.get("/api/quota")
+    async def quota_status(request: Request) -> dict:
+        """当前访客今天的 AI 搜索额度（前端显示剩余次数）。"""
+        if quota is None:
+            return {"enabled": False}
+        subject, ip_subject, logged_in = await _identity(request)
+        decision = await quota.check(subject, ip_subject, logged_in)
+        return {"enabled": True, **decision.to_dict()}
+
     @app.get("/api/save/status")
     async def save_status(request: Request) -> dict:
         """前端据此决定转存按钮怎么走（不透露任何配置内容）。
@@ -416,8 +485,15 @@ def create_app(
             raise HTTPException(status_code=401, detail="转存口令不正确")
         else:
             raise HTTPException(status_code=404, detail="一键转存未开启")
+        ctx = None
+        if quota is not None:
+            subject, ip_subject, logged_in = await _identity(request)
+            ctx = (subject, ip_subject,
+                   await quota.check(subject, ip_subject, logged_in))
+        allowed = ctx is None or ctx[2].reason != "site_budget"
         try:
-            result = await saver_obj.save(req.share, req.pwd)
+            with llm.scope(allowed=allowed) as meter:
+                result = await saver_obj.save(req.share, req.pwd)
         except LoginExpiredError as e:
             if user is None:
                 return SaveResponse(ok=False, message=str(e))
@@ -426,6 +502,9 @@ def create_app(
             return SaveResponse(ok=False, message="夸克登录已过期，请重新扫码登录")
         except SaveError as e:
             return SaveResponse(ok=False, message=str(e))
+        finally:
+            if ctx is not None:
+                await quota.record(ctx[0], ctx[1], meter, searched=False)
         name = f"《{result.title}》" if result.title else f"{result.file_count} 个文件"
         where = f"「{result.folder}」" if result.folder else "你的夸克网盘"
         if result.done:
@@ -440,26 +519,37 @@ def create_app(
     @app.post("/api/search", response_model=QuarkSearchResponse)
     async def api_search(
         req: SearchRequest,
+        request: Request,
         _: None = Depends(rate_limit_dep),
     ) -> QuarkSearchResponse:
+        ctx = await _quota_start(request)
         try:
-            return await app.state.search_service.search(req)
+            with llm.scope(allowed=ctx is None or ctx[2].ai) as meter:
+                result = await app.state.search_service.search(req)
+            await _quota_end(ctx, meter, result)
+            return result
         except SearchUnavailableError:
             raise HTTPException(status_code=503, detail="所有搜索源暂不可用，请稍后重试")
 
     @app.post("/api/agent/search", response_model=AgentSearchResponse)
     async def api_agent_search(
         req: SearchRequest,
+        request: Request,
         _: None = Depends(rate_limit_dep),
     ) -> AgentSearchResponse:
         """agent 搜索：多轮「规划 → 搜索/验证 → 观察」，响应附带每一步轨迹。"""
+        ctx = await _quota_start(request)
         try:
-            return await app.state.agent.run(req)
+            with llm.scope(allowed=ctx is None or ctx[2].ai) as meter:
+                result = await app.state.agent.run(req)
+            await _quota_end(ctx, meter, result)
+            return result
         except SearchUnavailableError:
             raise HTTPException(status_code=503, detail="所有搜索源暂不可用，请稍后重试")
 
     @app.get("/api/agent/stream")
     async def api_agent_stream(
+        request: Request,
         query: str,
         refresh: bool = False,
         client_id: str | None = None,
@@ -474,6 +564,7 @@ def create_app(
         except ValueError:
             raise HTTPException(status_code=422, detail="输入长度需为 2–200 个字符")
 
+        ctx = await _quota_start(request)
         queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
 
         async def emit(step: AgentStep) -> None:
@@ -481,7 +572,11 @@ def create_app(
 
         async def run() -> None:
             try:
-                result = await app.state.agent.run(req, emit=emit)
+                if ctx is not None and ctx[2].reason:  # 先告诉前端本次降级了
+                    await queue.put(("quota", json.dumps(ctx[2].to_dict(), ensure_ascii=False)))
+                with llm.scope(allowed=ctx is None or ctx[2].ai) as meter:
+                    result = await app.state.agent.run(req, emit=emit)
+                await _quota_end(ctx, meter, result)
                 await queue.put(("result", result.model_dump_json()))
             except SearchUnavailableError:
                 await queue.put(("error", '{"detail":"所有搜索源暂不可用，请稍后重试"}'))

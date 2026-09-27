@@ -41,6 +41,14 @@ class Settings:
     douban_lookup: bool = True  # 分类时是否查豆瓣
     cookie_secret: str = field(default="", repr=False)  # 扫码登录凭证的加密密钥，空则自动生成密钥文件
     quark_login: bool = True  # 是否开放夸克扫码登录（多人各自转存到自己的网盘）  # 转存到的网盘目录 fid，0 为根目录
+    # 防滥用（0 表示不限制）
+    rate_limit_per_minute: int = 10  # 同一 IP 每分钟请求数
+    ip_daily_searches: int = 100  # 同一 IP 每天搜索总次数
+    anon_daily_ai: int = 3  # 未登录每天 AI 搜索次数，用完降级为规则模式
+    user_daily_ai: int = 30  # 登录用户每天 AI 搜索次数
+    site_daily_tokens: int = 1_000_000  # 全站每天 LLM token 预算，到顶全站降级
+    search_cache_minutes: float = 60.0  # 同一句搜索多久内直接复用结果
+    trust_proxy: bool = False  # 部署在 Nginx 等反代后面时开启，按 X-Forwarded-For 取真实 IP
     extra: dict = field(default_factory=dict)
 
 
@@ -87,4 +95,11 @@ def load_settings() -> Settings:
         douban_lookup=os.getenv("DOUBAN_LOOKUP", "true").strip().lower() not in ("0", "false", "no"),
         save_root_dir=os.getenv("SAVE_ROOT_DIR", "QueryPilot").strip() or "QueryPilot",
         quark_save_dir_fid=os.getenv("QUARK_SAVE_DIR_FID", "0").strip() or "0",
+        rate_limit_per_minute=_int("RATE_LIMIT_PER_MINUTE", 10),
+        ip_daily_searches=_int("IP_DAILY_SEARCHES", 100),
+        anon_daily_ai=_int("ANON_DAILY_AI_SEARCHES", 3),
+        user_daily_ai=_int("USER_DAILY_AI_SEARCHES", 30),
+        site_daily_tokens=_int("SITE_DAILY_TOKEN_BUDGET", 1_000_000),
+        search_cache_minutes=_float("SEARCH_CACHE_MINUTES", 60.0),
+        trust_proxy=os.getenv("TRUST_PROXY", "false").strip().lower() in ("1", "true", "yes"),
     )
