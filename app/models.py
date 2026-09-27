@@ -168,6 +168,8 @@ class SubscribeRequest(BaseModel):
     client_id: str = Field(min_length=8, max_length=64)
     query: str = Field(min_length=2, max_length=200)  # 定期检查时用的搜索词
     resource: str = Field(min_length=1, max_length=100)  # 资源名（记忆库主键来源）
+    # 订阅同时打开自动转存（需要登录）；没搜到资源也能订阅，等有资源时自动存
+    auto_save: bool = False
 
 
 class Subscription(BaseModel):

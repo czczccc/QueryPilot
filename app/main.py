@@ -361,11 +361,19 @@ def create_app(
         user = await _user_cookie(request)
         if login_enabled and user is None:
             raise HTTPException(status_code=401, detail="订阅追剧需要先扫码登录夸克")
+        if req.auto_save and user is None:
+            raise HTTPException(status_code=401, detail="自动转存需要先扫码登录夸克")
         owner = f"u:{user[3]}" if user else req.client_id
         baseline = await app.state.watcher.baseline(req.resource)
         sub = await store.add_subscription(owner, req.query, req.resource, baseline)
         if sub is None:
             raise HTTPException(status_code=409, detail="订阅数已达上限（20 个）")
+        if req.auto_save:
+            sub = await store.set_auto_save(owner, sub.id, True) or sub
+            if _cooldown_ok(sub.id):  # 立即在后台检查一次：已有资源就马上存
+                task = asyncio.create_task(_sync_check(owner, sub))
+                _bg_tasks.add(task)
+                task.add_done_callback(_bg_tasks.discard)
         return sub
 
     @app.get("/api/subscriptions", response_model=list[Subscription])

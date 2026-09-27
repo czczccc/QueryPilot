@@ -103,7 +103,7 @@ def test_auto_save_only_new_episodes_then_pause_and_resume():
         import asyncio
         notes = asyncio.run(check())
         kinds = [k for k, _, _ in notes]
-        assert kinds == ["episodes", "auto_saved"]
+        assert kinds == ["found", "auto_saved"]
         assert "2 个新文件" in notes[1][1] and "跳过已有的 1 个" in notes[1][1]
         [req] = drive.saved
         # 展开分享里的文件夹，只存第 2、3 集，直接存进分类目录
@@ -157,7 +157,7 @@ def test_auto_save_needs_login_and_off_by_default():
 
         import asyncio
         notes = asyncio.run(check())
-        assert [k for k, _, _ in notes] == ["episodes"] and drive.saved == []
+        assert [k for k, _, _ in notes] == ["found"] and drive.saved == []
 
 
 def test_turning_on_or_check_now_fills_existing_episodes():
@@ -204,9 +204,82 @@ def test_check_now_saves_synchronously():
         asyncio.run(store.set_auto_save(OWNER, sub["id"], True))
         r = client.post(f"/api/subscriptions/{sub['id']}/check", params=CID)
         kinds = [n["kind"] for n in r.json()["notifications"]]
-        assert kinds == ["episodes", "auto_saved"]
+        assert kinds == ["found", "auto_saved"]
         assert drive.saved[0]["fid_list"] == ["f2", "f3"]
         assert client.post("/api/subscriptions/999/check", params=CID).status_code == 404
         client.post("/api/quark/logout")
         assert client.post(f"/api/subscriptions/{sub['id']}/check",
                            params=CID).status_code == 401
+
+
+async def test_subscribe_without_results_then_saved_when_found():
+    """订阅时没搜到：之后出现资源就通知并自动转存（剧集）。"""
+    from tests.test_subscriptions import setup
+
+    s = shares("ep", 1)
+    files: dict[str, list[str]] = {}
+    store, tavily, watcher = setup(files, [])
+    saved: list[str] = []
+
+    async def saver(client_id, sub, link):
+        saved.append(link.share)
+        return [("auto_saved", "已转存", link.share)]
+
+    watcher.auto_saver = saver
+    sub = await store.add_subscription("c" * 8, "流浪地球2", "流浪地球2", (0, 0, None))
+    sub.auto_save = True
+    assert await watcher.check("c" * 8, sub) == [] and saved == []
+
+    tavily.default = s
+    files[s[0]] = eps(2)
+    notes = await watcher.check("c" * 8, sub)
+    assert [k for k, _, _ in notes] == ["found", "auto_saved"]
+    assert "目前 2 集" in notes[0][1] and saved == [s[0]]
+
+
+async def test_movie_saved_once_when_resolution_met_then_only_notify():
+    """电影：清晰度不满足先不存；第一次满足时存一次；之后更高清只提醒不重复存。"""
+    from tests.test_subscriptions import setup
+
+    s = shares("mv", 1)
+    files = {s[0]: ["流浪地球2.720p.mkv"]}
+    store, _, watcher = setup(files, s)
+    saved: list[str] = []
+
+    async def saver(client_id, sub, link):
+        saved.append(link.share)
+        await store.log_auto_save(sub.id, link.share, True, 1, None, "已转存")
+        return [("auto_saved", "已转存", link.share)]
+
+    watcher.auto_saver = saver
+    sub = await store.add_subscription("c" * 8, "流浪地球2 1080p", "流浪地球2", (0, 0, None))
+    sub.auto_save = True
+    notes = await watcher.check("c" * 8, sub)
+    assert [k for k, _, _ in notes] == ["found"] and "目前" not in notes[0][1]
+    assert saved == []  # 720p 不满足 1080p 要求
+
+    files[s[0]] = ["流浪地球2.1080p.mkv"]
+    notes = await watcher.check("c" * 8, sub)
+    assert "auto_saved" in [k for k, _, _ in notes] and saved == [s[0]]
+
+    files[s[0]] = ["流浪地球2.2160p.mkv"]
+    notes = await watcher.check("c" * 8, sub)
+    assert [k for k, _, _ in notes] == ["quality"] and saved == [s[0]]
+
+
+def test_subscribe_with_auto_save():
+    drive = Drive(episodes=3)
+    drive.have = []
+    app, _, _, _ = make(drive)
+    with TestClient(app) as client:
+        assert client.post("/api/subscriptions",
+                           json={**BODY, "auto_save": True}).status_code == 401
+        login(client)
+        sub = client.post("/api/subscriptions", json={**BODY, "auto_save": True}).json()
+        assert sub["auto_save"] is True
+        import time
+        for _ in range(100):
+            if drive.saved:
+                break
+            time.sleep(0.02)
+        assert drive.saved[0]["fid_list"] == ["f1", "f2", "f3"]

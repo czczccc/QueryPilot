@@ -17,6 +17,7 @@ import httpx
 
 from app.models import QuarkLink, SearchRequest, Subscription
 from app.services.memory import LinkStore, resource_key
+from app.services.quality import meets_requirement
 
 logger = logging.getLogger(__name__)
 
@@ -82,14 +83,23 @@ class SubscriptionWatcher:
             SearchRequest(query=sub.query, refresh=True, client_id=client_id), fresh_hours=0
         )
         episodes, score, res, most, best = snapshot(resp.links)
+        movie = most is not None and most.quality.video_count <= 1  # 单个视频文件按电影处理
         notes: list[tuple[str, str, str | None]] = []
         if most and episodes > sub.best_episodes:
-            before = f"（之前 {sub.best_episodes} 集）" if sub.best_episodes else ""
-            notes.append((
-                "episodes",
-                f"《{sub.resource}》更新到 {episodes} 集{before}：{_link_text(most)}",
-                most.share,
-            ))
+            if sub.best_episodes == 0:  # 订阅时还没有资源（或只搜到过无效的）
+                count = "" if movie else f"，目前 {episodes} 集"
+                notes.append((
+                    "found", f"《{sub.resource}》有资源了{count}：{_link_text(most)}", most.share,
+                ))
+            else:
+                notes.append((
+                    "episodes",
+                    (
+                        f"《{sub.resource}》更新到 {episodes} 集（之前 {sub.best_episodes} 集）："
+                        f"{_link_text(most)}"
+                    ),
+                    most.share,
+                ))
             sub.best_episodes = episodes
         if best and score > sub.best_score:
             if sub.best_score:  # 第一次拿到质量分只作为起点，不打扰
@@ -103,9 +113,22 @@ class SubscriptionWatcher:
             sub.best_resolution = res
         if sub.auto_save and self.auto_saver is not None:
             links = {lk.share: lk for lk in (most, best) if lk is not None}
-            shares = [n[2] for n in notes if n[2] in links]
-            if sync_save and (most or best):
-                shares.insert(0, (most or best).share)
+            if movie:
+                # 电影：第一次出现满足清晰度要求的有效资源时存一次；之后更高清只提醒，不重复存
+                shares: list[str] = []
+                if not await self._store.has_auto_saved(sub.id):
+                    ok = [lk for lk in resp.links if lk.state == "valid" and lk.quality
+                          and lk.relevance != "mismatch"
+                          and meets_requirement(lk.quality, resp.required_resolution)]
+                    if ok:
+                        pick = max(ok, key=lambda lk: lk.quality.score)
+                        links[pick.share] = pick
+                        shares = [pick.share]
+            else:
+                # 剧集：新集 / 更高清 / 立即检查时，把网盘缺的集补齐（已有的跳过）
+                shares = [n[2] for n in notes if n[2] in links]
+                if sync_save and most:
+                    shares.insert(0, most.share)
             for share in dict.fromkeys(shares):
                 try:
                     notes += await self.auto_saver(client_id, sub, links[share])
