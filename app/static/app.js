@@ -481,6 +481,8 @@ function renderResult(data) {
   subscribeBtn.hidden = subsPanel.hidden;
   subscribeBtn.disabled = false;
   setText(subscribeBtn, "订阅更新");
+  subscribeBtn.classList.remove("done");
+  renderSubscribeBox(data);
 
   if (data.links.length === 0) {
     resultList.innerHTML = "";
@@ -766,7 +768,10 @@ async function loadSubs() {
     const subs = await subsResp.json();
     const notes = await notifResp.json();
     subsPanel.hidden = false;
-    if (lastResult) subscribeBtn.hidden = false;
+    if (lastResult) {
+      subscribeBtn.hidden = false;
+      if (subscribeBox.hidden) renderSubscribeBox(lastResult);
+    }
 
     const unread = notes.filter((n) => !n.read).length;
     subsUnread.hidden = unread === 0;
@@ -782,6 +787,43 @@ async function loadSubs() {
     if (subs.length === 0) subsList.appendChild(el("li", "muted", "还没有订阅。"));
     subs.forEach((sub) => subsList.appendChild(subItem(sub)));
   } catch (_) { /* 网络问题：下次再试 */ }
+}
+
+// 订阅卡片右上角的操作按钮；以后要加「编辑」「暂停」等，往这里追加一个函数即可
+const SUB_ACTIONS = [checkNowButton];
+
+// 立即检查：同步重搜，可能要几十秒；同一订阅 2 分钟冷却
+function checkNowButton(sub) {
+  const btn = el("button", "secondary-btn small", "立即检查");
+  btn.type = "button";
+  btn.title = "马上重搜一次" + (sub.auto_save ? "，并补齐网盘里缺的集" : "");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.classList.add("loading");
+    setText(btn, "检查中…");
+    try {
+      const resp = await fetch("/api/subscriptions/" + sub.id + "/check?" + cidParam(), { method: "POST" });
+      const body = await resp.json().catch(() => ({}));
+      if (resp.ok) {
+        const notes = body.notifications || [];
+        if (!notes.length) toast("《" + sub.resource + "》暂时没有变化");
+        else notes.slice(0, 3).forEach((n) => toast(n.message, n.kind === "auto_save_failed" ? "error" : "ok", 5000));
+        loadSubs();
+        return;
+      }
+      if (resp.status === 401 && meState.login) {
+        if (await quarkLogin(body.detail || "检查订阅需要先扫码登录夸克")) loadSubs();
+      } else {
+        toast(body.detail || "检查失败", "error");
+      }
+    } catch (_) {
+      toast("检查失败，请稍后重试", "error");
+    }
+    btn.disabled = false;
+    btn.classList.remove("loading");
+    setText(btn, "立即检查");
+  });
+  return btn;
 }
 
 // 一条订阅：标题与进度、自动转存开关、登录失效提示、转存记录、取消
@@ -801,7 +843,10 @@ function subItem(sub) {
     toast("已取消订阅《" + sub.resource + "》");
     loadSubs();
   });
-  head.append(info, del);
+  const acts = el("div", "sub-actions");
+  SUB_ACTIONS.forEach((make) => { const b = make(sub); if (b) acts.appendChild(b); });
+  acts.appendChild(del);
+  head.append(info, acts);
   li.appendChild(head);
 
   const row = el("div", "sub-row");
@@ -823,8 +868,10 @@ function subItem(sub) {
       });
       const body = await resp.json().catch(() => ({}));
       if (resp.ok) {
-        toast(want ? "已开启《" + sub.resource + "》自动转存" : "已关闭《" + sub.resource + "》自动转存");
+        toast(want ? "已开启《" + sub.resource + "》自动转存，正在后台补齐网盘缺的集，稍后在转存记录里查看"
+          : "已关闭《" + sub.resource + "》自动转存", "ok", want ? 4000 : 2200);
         loadSubs();
+        if (want) setTimeout(loadSubs, 45000);
       } else {
         cb.checked = !want;
         if (resp.status === 401 && meState.login) {
@@ -889,39 +936,101 @@ function subItem(sub) {
   return li;
 }
 
-subscribeBtn.addEventListener("click", async () => {
-  if (!lastResult) return;
-  subscribeBtn.disabled = true;
-  try {
-    const resp = await fetch("/api/subscriptions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client_id: clientId,
-        query: lastResult.history && lastResult.history.length ? lastResult.history[0] : lastResult.query,
-        resource: lastResult.parsed.resource,
-      }),
-    });
-    if (resp.ok) {
+// ---- 订阅：结果页的订阅卡片与共用的订阅请求 ----
+// 订阅的目标：有结果时用识别出的资源名，没结果时直接用搜索词
+function subscribeTarget(data) {
+  const first = data.history && data.history.length ? data.history[0] : data.query;
+  const empty = !data.links || data.links.length === 0;
+  return { query: first, resource: empty ? first : data.parsed.resource, empty };
+}
+
+// 发起订阅；需要登录时引导扫码，成功后重试一次。返回订阅对象或 null
+async function subscribe(target, autoSave) {
+  const body = { client_id: clientId, query: target.query, resource: target.resource };
+  if (autoSave) body.auto_save = true;
+  const resp = await fetch("/api/subscriptions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (resp.ok) {
+    toast("已订阅《" + target.resource + "》" + (autoSave
+      ? "，正在后台检查，有资源会自动转存到你的网盘"
+      : "，有" + (target.empty ? "资源" : "更新") + "时会在「我的订阅」提醒"), "ok", 3500);
+    loadSubs();
+    if (autoSave) setTimeout(loadSubs, 45000); // 后台检查完成后刷新转存记录和通知
+    return data;
+  }
+  if (resp.status === 401 && meState.login) {
+    const why = data.detail || (autoSave ? "自动转存需要先扫码登录夸克" : "订阅追剧需要先扫码登录夸克");
+    if (await quarkLogin(why)) return subscribe(target, autoSave);
+    return null;
+  }
+  toast(data.detail || "订阅失败", "error");
+  return null;
+}
+
+const subscribeBox = document.getElementById("subscribe-box");
+
+function renderSubscribeBox(data) {
+  subscribeBox.innerHTML = "";
+  if (subsPanel.hidden) { // 服务器没开记忆/订阅
+    subscribeBox.hidden = true;
+    return;
+  }
+  const target = subscribeTarget(data);
+  const text = el("div", "sb-text");
+  text.append(
+    el("b", "sb-title", target.empty ? "暂时没有资源，要不要先订阅？" : "追更《" + target.resource + "》"),
+    el("span", "sb-sub", target.empty
+      ? "服务器每 12 小时替你重搜「" + target.query + "」，有资源了第一时间提醒你"
+      : "有新集或更高清的版本时提醒你；剧集可以自动补齐网盘里缺的集"),
+  );
+  const controls = el("div", "sb-controls");
+  let cb = null;
+  if (meState.login) {
+    const sw = el("label", "switch small");
+    cb = el("input");
+    cb.type = "checkbox";
+    const track = el("span", "switch-track");
+    track.setAttribute("aria-hidden", "true");
+    sw.append(cb, track, target.empty ? "有资源时自动转存" : "自动转存");
+    if (!meState.logged_in) sw.title = "需要先扫码登录夸克";
+    controls.appendChild(sw);
+  }
+  const go = el("button", target.empty ? "primary-btn small" : "secondary-btn", target.empty ? "有资源时通知我" : "订阅");
+  go.type = "button";
+  go.addEventListener("click", async () => {
+    go.disabled = true;
+    const sub = await subscribe(target, !!(cb && cb.checked));
+    if (sub) {
+      go.className = "secondary-btn done";
+      setText(go, "已订阅 ✓");
+      if (cb) cb.disabled = true;
+      subscribeBtn.disabled = true;
       setText(subscribeBtn, "已订阅 ✓");
       subscribeBtn.classList.add("done");
-      toast("已订阅《" + lastResult.parsed.resource + "》，有更新会在「我的订阅」提醒");
-      loadSubs();
     } else {
-      const body = await resp.json().catch(() => ({}));
-      setText(subscribeBtn, "订阅更新");
-      subscribeBtn.disabled = false;
-      if (resp.status === 401 && meState.login) {
-        // 订阅需要登录：扫码成功后自动再订阅一次
-        if (await quarkLogin(body.detail || "订阅追剧需要先扫码登录夸克")) subscribeBtn.click();
-        return;
-      }
-      toast(body.detail || "订阅失败", "error");
+      go.disabled = false;
     }
-  } catch (_) {
-    toast("订阅失败", "error");
-    subscribeBtn.disabled = false;
-  }
+  });
+  controls.appendChild(go);
+  const icon = el("span", "sb-icon");
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = "🔔";
+  subscribeBox.append(icon, text, controls);
+  subscribeBox.classList.toggle("is-empty", target.empty);
+  subscribeBox.hidden = false;
+}
+
+// 工具栏上的「订阅更新」：滚到订阅卡片并高亮
+subscribeBtn.addEventListener("click", () => {
+  if (subscribeBox.hidden) return;
+  subscribeBox.scrollIntoView({ behavior: "smooth", block: "center" });
+  subscribeBox.classList.remove("flash");
+  void subscribeBox.offsetWidth;
+  subscribeBox.classList.add("flash");
 });
 
 subsPanel.addEventListener("toggle", async () => {
