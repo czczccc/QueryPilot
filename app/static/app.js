@@ -110,7 +110,7 @@ function hideStatus() {
   statusEl.textContent = "";
 }
 
-function toast(text, kind) {
+function toast(text, kind, ms) {
   const t = el("div", "toast " + (kind || "ok"));
   t.setAttribute("role", kind === "error" ? "alert" : "status");
   t.append(el("span", "toast-ico", kind === "error" ? "!" : "✓"), el("span", "", text));
@@ -119,7 +119,7 @@ function toast(text, kind) {
   setTimeout(() => {
     t.classList.add("leaving");
     setTimeout(() => t.remove(), 260);
-  }, kind === "error" ? 4000 : 2200);
+  }, ms || (kind === "error" ? 4000 : 2200));
 }
 
 function copyText(text) {
@@ -859,14 +859,48 @@ function saveButton(l) {
       }
       setText(btn, ok ? "已转存 ✓" : "转存失败");
       btn.classList.toggle("done", ok);
-      toast(body.message || body.detail || (ok ? "已转存" : "转存失败"), ok ? "ok" : "error");
+      const msg = body.message || body.detail || (ok ? "已转存" : "转存失败");
+      toast(ok ? "转存成功" + (body.folder ? "，已放进「" + body.folder + "」" : "") : msg,
+        ok ? "ok" : "error");
+      showSaveResult(btn, ok, body, msg);
       if (!ok) btn.disabled = false;
     } catch (_) {
       setText(btn, "转存失败");
+      showSaveResult(btn, false, {}, "网络出错，转存没有完成，请稍后重试");
       btn.disabled = false;
     }
   });
   return btn;
+}
+
+// 转存结果常驻在卡片里：存到了哪个目录、识别成什么类别、依据是什么
+function showSaveResult(btn, ok, body, msg) {
+  const card = btn.closest(".result-card");
+  if (!card) return;
+  let box = card.querySelector(".save-result");
+  if (!box) {
+    box = el("div", "save-result");
+    box.setAttribute("role", "status");
+    card.appendChild(box);
+  }
+  box.innerHTML = "";
+  box.className = "save-result " + (ok ? "ok" : "error");
+  if (!ok) {
+    box.append(el("span", "save-ico", "!"), el("span", "save-main", msg));
+    return;
+  }
+  const basis = (msg.match(/依据：([^）)]+)/) || [])[1];
+  const pending = /后台处理/.test(msg);
+  const main = el("span", "save-main");
+  main.append(pending ? "已提交转存，夸克正在后台处理 · 目录 " : "已存入 ");
+  main.append(el("b", "save-folder", body.folder || "你的夸克网盘默认目录"));
+  box.append(el("span", "save-ico", "✓"), main);
+  const tags = el("span", "save-tags");
+  if (body.category) tags.appendChild(badge("识别为 " + body.category, "badge-accent"));
+  if (basis) tags.appendChild(badge("依据 " + basis, "badge-tag"));
+  if (!body.category) tags.appendChild(badge("未自动分类", "badge-tag", "没识别出类别，存到了默认目录"));
+  if (body.file_count) tags.appendChild(badge(body.file_count + " 个文件", "badge-tag"));
+  box.appendChild(tags);
 }
 
 function postSave(l, token) {
@@ -938,6 +972,20 @@ document.addEventListener("keydown", (e) => {
 fetch("/api/save/status")
   .then((r) => r.json())
   .then((d) => { saveStatus = d; saveEnabled = !!d.enabled; renderAccount(); })
+  .catch(() => {});
+
+
+// ---- 首页：记忆库统计 ----
+fetch("/api/memory/stats")
+  .then((r) => r.json())
+  .then((d) => {
+    if (!d.enabled || !d.valid) return;
+    const line = document.getElementById("memory-stats");
+    line.innerHTML = "";
+    line.append("已为大家验证并记住 ", el("b", "", String(d.valid)), " 条有效链接 · 累计搜索 ",
+      el("b", "", String(d.searches || 0)), " 次");
+    line.hidden = false;
+  })
   .catch(() => {});
 
 
