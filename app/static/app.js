@@ -784,9 +784,11 @@ async function loadTrending() {
   try {
     const resp = await fetch("/api/trending");
     if (!resp.ok) return;
-    const items = trendingItems(await resp.json());
+    const data = await resp.json();
+    const items = trendingItems(data);
     renderTrending(items);
-    if (items.length) {
+    // 内置兜底列表（source=default）不缓存，下次打开再试真的热门
+    if (items.length && data.source !== "default") {
       try { localStorage.setItem(TRENDING_KEY, JSON.stringify({ at: Date.now(), items })); } catch (_) { /* 忽略 */ }
     }
   } catch (_) { /* 网络问题：保留写死的示例 */ }
