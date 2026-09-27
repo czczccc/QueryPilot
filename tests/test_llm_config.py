@@ -137,9 +137,9 @@ async def test_rule_planner_does_not_repeat_keyword_engines():
     calls: list[tuple[str, bool]] = []
     real = service.collect
 
-    async def spy(queries, keyword, providers, keyword_engines=True):
+    async def spy(queries, keyword, providers, keyword_engines=True, **kw):
         calls.append((keyword, keyword_engines))
-        return await real(queries, keyword, providers, keyword_engines)
+        return await real(queries, keyword, providers, keyword_engines, **kw)
 
     service.collect = spy
     await SearchAgent(service).run(SearchRequest(query="流浪地球2"))
