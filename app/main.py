@@ -61,6 +61,7 @@ from app.services.quark_save import LoginExpiredError, QuarkSaver, SaveError, Ti
 from app.services.relevance import seasons_in
 from app.services.search import QuarkSearchService, SearchUnavailableError
 from app.services.subscriptions import RES_TEXT, SubscriptionWatcher, strip_season
+from app.services.trending import Trending
 from app.services.usage import SYSTEM, QuotaConfig, QuotaGuard, UsageStore
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -164,6 +165,7 @@ def create_app(
     invite_codes: tuple[str, ...] | None = None,
     admin_token: str | None = None,
     media_lookup: MetadataLookup | None = None,
+    trending: Trending | None = None,
     search_on_subscribe: bool | None = None,
 ) -> FastAPI:
     """创建应用；传入 service / agent 便于测试注入假实现。"""
@@ -245,6 +247,12 @@ def create_app(
         media_lookup = MetadataLookup(
             tmdb_key=_settings.tmdb_api_key, tmdb_base=_settings.tmdb_api_base,
             douban=_settings.douban_lookup,
+        )
+    if trending is None:
+        trending = Trending(
+            tmdb_key=_settings.tmdb_api_key if service is None else "",
+            tmdb_base=_settings.tmdb_api_base,
+            douban=_settings.douban_lookup and service is None,
         )
     if watcher is not None:
         watcher.lookup = media_lookup
@@ -371,6 +379,13 @@ def create_app(
         """订阅与通知的归属：登录用户按账号（换浏览器也在），否则按浏览器标识。"""
         user = await _user_cookie(request)
         return f"u:{user[3]}" if user else client_id
+
+    @app.get("/api/trending")
+    async def trending_media() -> dict:
+        """首页热门影视（搜索框占位和「试试」）：TMDB 本周热门 → 豆瓣热门 → 内置列表，缓存 6 小时。
+
+        返回 {"source": "tmdb"|"douban"|"default", "items": [{title, year, media, poster}]}。"""
+        return await trending()
 
     @app.get("/api/media/search", response_model=list[MediaCandidate])
     async def media_search(
