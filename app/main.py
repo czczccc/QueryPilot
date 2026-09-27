@@ -31,6 +31,7 @@ from app.models import (
     FeedbackRequest,
     MediaCandidate,
     Notification,
+    OrganizeRequest,
     QuarkLink,
     QuarkSearchResponse,
     SaveRequest,
@@ -46,13 +47,14 @@ from app.providers.tavily import TavilyProvider
 from app.security import RateLimiter, install_request_id_factory, set_request_id
 from app.services import llm
 from app.services.agent import SearchAgent
-from app.services.classify import Classifier, episode_no
+from app.services.classify import Category, Classifier, episode_no, safe_name
 from app.services.cookie_box import CookieBox, session_hash
 from app.services.intent import DeepSeekParser
 from app.services.memory import LinkStore, resource_key
 from app.services.metadata import MetadataLookup
+from app.services.organize import TidyPlan, kind_of, plan_tidy
 from app.services.quark_login import LoginError, QuarkQrLogin, qr_svg
-from app.services.quark_save import LoginExpiredError, QuarkSaver, SaveError
+from app.services.quark_save import LoginExpiredError, QuarkSaver, SaveError, Tidy
 from app.services.relevance import seasons_in
 from app.services.search import QuarkSearchService, SearchUnavailableError
 from app.services.subscriptions import SubscriptionWatcher, strip_season
@@ -602,12 +604,72 @@ def create_app(
         """这个订阅最近的自动转存记录。"""
         return await _store_or_404().auto_save_log(await _owner(request, client_id), sub_id)
 
+    async def _account_saver(owner: str) -> tuple[QuarkSaver, str] | None:
+        """订阅者扫码登录的凭证 → (转存器, 会话哈希)；没有或解不开返回 None。"""
+        account = await resolved.store.latest_account(owner[2:])
+        cookie = cookie_box.decrypt(account[1], account[0].encode()) if account else None
+        if cookie is None:
+            return None
+        return QuarkSaver(cookie, "0", client=quark_http, classifier=classifier,
+                          root_dir=root_dir), account[0]
+
+    def _is_movie(sub: Subscription, link: QuarkLink | None = None) -> bool:
+        if sub.media:
+            return sub.media == "movie"
+        return bool(link and link.quality and link.quality.video_count <= 1)
+
+    async def _sub_folder(owner: str, sub: Subscription, movie: bool) -> str:
+        """订阅的目标目录：第一次按条目（不是分享标题）算出来后锁定，之后永不重新分类。"""
+        if sub.folder:
+            return sub.folder
+        title = strip_season(sub.resource)
+        cat = None
+        if classifier is not None:
+            try:
+                cat = await classifier(f"{title} {sub.year or ''}".strip(), [])
+            except (httpx.HTTPError, ValueError, KeyError):  # 分类失败就用默认目录
+                logger.warning("订阅目录分类失败 id=%s", sub.id)
+        if cat is None:
+            cat = Category(kind="movie" if movie else "tv", region="other", title=title)
+        cat.title, cat.year = title, sub.year or cat.year
+        if movie:
+            cat.kind = "movie"
+        elif cat.kind == "movie":
+            cat.kind = "tv"
+        name = safe_name(f"{title} ({cat.year})" if cat.year else title)
+        path = cat.folder(root_dir)
+        if not path.endswith("/" + name):
+            path += "/" + name
+        if not movie:
+            path += f"/Season {sub.season or 1:02d}"
+        sub.folder = path
+        await resolved.store.edit_subscription(owner, sub.id, folder=path)
+        return path
+
+    async def _legacy_episodes(
+        saver: QuarkSaver, sub: Subscription, folders: list[str]
+    ) -> set[int]:
+        """以前存到别的目录（分类没锁定时）的集，也算已存，避免目录一变就重复存。"""
+        headers = saver.drive_headers()
+        found: set[int] = set()
+        for folder in folders:
+            fid = await saver.find_dir(folder, headers)
+            if fid is None:
+                continue
+            for e in await saver.list_tree(fid, folder, headers):
+                if not e["dir"] and kind_of(e["file_name"]) in ("video", "archive"):
+                    ep = episode_no(e["file_name"], sub.season, any_ext=True)
+                    if ep is not None:
+                        found.add(ep)
+        return found
+
     async def auto_save(
         owner: str, sub: Subscription, link: QuarkLink, wanted: set[int] | None = None
     ) -> list[tuple]:
         """订阅检查发现新集时调用：用订阅者扫码登录的凭证只转存网盘里还没有的集。
 
-        `wanted`：只要这些集号（订阅范围内缺的）；转存后按目标目录清点已有的集写回订阅。
+        存进订阅锁定的目录；每集只存一个最好的版本、展平分享里的嵌套文件夹、不存压缩包，
+        存完改成「片名 S01E06」。`wanted`：只要这些集号（订阅范围内缺的）。
         """
         store = resolved.store
         if not (login_enabled and owner.startswith("u:")):
@@ -623,24 +685,35 @@ def create_app(
             return [("auto_save_paused", message, link.share)]
 
         expired = f"{name}有更新，但你的夸克登录已失效，自动转存已暂停，重新扫码登录后自动恢复"
-        account = await store.latest_account(owner[2:])
-        cookie = cookie_box.decrypt(account[1], account[0].encode()) if account else None
-        if cookie is None:
+        got = await _account_saver(owner)
+        if got is None:
             return await pause("login_expired", expired)
-        saver = QuarkSaver(cookie, "0", client=quark_http, classifier=classifier,
-                           root_dir=root_dir)
+        saver, sh = got
+        movie = _is_movie(sub, link)
         allowed = True
         if quota is not None:
             allowed = (await quota.check(SYSTEM, SYSTEM, True)).reason != "site_budget"
         try:
             with llm.scope(allowed=allowed) as meter:
-                keep = None
-                if wanted is not None:
-                    def keep(name: str) -> bool:
-                        return episode_no(name, sub.season) in wanted
-                result = await saver.save(link.share, link.pwd, only_new=True, keep=keep)
+                first = sub.folder is None
+                folder = await _sub_folder(owner, sub, movie)
+                if first and not movie:
+                    old = [f for f in await store.saved_folders(sub.id) if f != folder]
+                    sub.saved_episodes = sorted(
+                        set(sub.saved_episodes) | await _legacy_episodes(saver, sub, old))
+                saved = set(sub.saved_episodes)
+
+                def keep(file_name: str) -> bool:
+                    if movie:
+                        return True
+                    ep = episode_no(file_name, sub.season, any_ext=True)
+                    return ep not in saved and (wanted is None or ep in wanted)
+
+                tidy = Tidy(strip_season(sub.resource), movie, sub.season, sub.year)
+                result = await saver.save(link.share, link.pwd, to_path=folder, only_new=True,
+                                          keep=keep, tidy=tidy)
         except LoginExpiredError:
-            await store.delete_account(account[0])
+            await store.delete_account(sh)
             return await pause("login_expired", expired)
         except SaveError as e:
             message = f"{name}自动转存失败：{e}"
@@ -652,7 +725,8 @@ def create_app(
         if sub.auto_save_status:
             sub.auto_save_status = None
             await store.set_auto_save_status(sub.id, None)
-        have = {episode_no(n, sub.season) for n in result.present} - {None}
+        have = {episode_no(n, sub.season, any_ext=True) for n in result.present
+                if kind_of(n) in ("video", "archive")} - {None}
         sub.saved_episodes = sorted(set(sub.saved_episodes) | have)
         where = f"「{result.folder}」" if result.folder else "你的夸克网盘"
         if result.file_count == 0:
@@ -663,6 +737,94 @@ def create_app(
         await store.log_auto_save(sub.id, link.share, True, result.file_count, result.folder,
                                   message)
         return [("auto_saved", message, link.share)] if result.file_count else []
+
+    async def _tidy_plan(owner: str, sub: Subscription) -> tuple[QuarkSaver, dict, TidyPlan]:
+        got = await _account_saver(owner)
+        if got is None:
+            raise HTTPException(status_code=401, detail="夸克登录已失效，请重新扫码登录")
+        saver = got[0]
+        headers = saver.drive_headers()
+        movie = _is_movie(sub)
+        target = await _sub_folder(owner, sub, movie)
+        root = "/" + (safe_name(root_dir) or "QueryPilot")
+        # 只扫本站存过的目录（都在 QueryPilot 根目录下），不碰网盘里别的东西
+        folders = [f for f in dict.fromkeys([target, *await resolved.store.saved_folders(sub.id)])
+                   if f == root or f.startswith(root + "/")]
+        entries: list[dict] = []
+        try:
+            for folder in folders:
+                fid = await saver.find_dir(folder, headers)
+                if fid is not None:
+                    entries += await saver.list_tree(fid, folder, headers)
+        except LoginExpiredError:
+            raise HTTPException(status_code=401, detail="夸克登录已失效，请重新扫码登录") from None
+        except (SaveError, httpx.HTTPError, ValueError):
+            raise HTTPException(status_code=502, detail="读取网盘目录失败，请稍后重试") from None
+        seen: set[str] = set()
+        entries = [e for e in entries if not (e["fid"] in seen or seen.add(e["fid"]))]
+        plan = plan_tidy(entries, target, strip_season(sub.resource), movie, sub.season,
+                         sub.year)
+        return saver, headers, plan
+
+    async def _owned_sub(request: Request, client_id: str, sub_id: int) -> tuple[str, Subscription]:
+        if login_enabled and await _user_cookie(request) is None:
+            raise HTTPException(status_code=401, detail="请先扫码登录夸克")
+        owner = await _owner(request, client_id)
+        sub = await _store_or_404().get_subscription(owner, sub_id)
+        if sub is None or not owner.startswith("u:"):
+            raise HTTPException(status_code=404, detail="订阅不存在")
+        return owner, sub
+
+    @app.get("/api/subscriptions/{sub_id}/organize")
+    async def organize_preview(
+        sub_id: int, request: Request, client_id: str = ClientId,
+        _: None = Depends(rate_limit_dep),
+    ) -> dict:
+        """整理预览：扫这个订阅存过的目录，列出将移动 / 重命名的文件和建议删除的文件。
+
+        不做任何改动。建议删除的（重复版本、压缩包、空文件夹）要用户在界面上勾选确认。
+        """
+        owner, sub = await _owned_sub(request, client_id, sub_id)
+        _, _, plan = await _tidy_plan(owner, sub)
+        return plan.as_dict()
+
+    @app.post("/api/subscriptions/{sub_id}/organize")
+    async def organize_apply(
+        sub_id: int, req: OrganizeRequest, request: Request, client_id: str = ClientId,
+        _: None = Depends(rate_limit_dep),
+    ) -> dict:
+        """执行整理：按服务器重新算出的计划移动到锁定目录并重命名；
+        只删除 `delete_fids` 里列出、且确实在「建议删除」里的文件（进夸克回收站，可恢复）。"""
+        owner, sub = await _owned_sub(request, client_id, sub_id)
+        saver, headers, plan = await _tidy_plan(owner, sub)
+        done = {"moved": 0, "renamed": 0, "deleted": 0, "errors": []}
+        try:
+            target_fid = await saver.ensure_dir(plan.target, headers)
+            to_move = [m["fid"] for m in plan.moves if m["from"] != plan.target]
+            if to_move:
+                await saver.move(to_move, target_fid, headers)
+                done["moved"] = len(to_move)
+            for m in plan.moves:
+                if m["to_name"] != m["name"]:
+                    try:
+                        await saver.rename(m["fid"], m["to_name"], headers)
+                        done["renamed"] += 1
+                    except SaveError as e:
+                        done["errors"].append(f"{m['name']}：{e}")
+            allowed = {d["fid"] for d in plan.deletes}
+            chosen = [f for f in dict.fromkeys(req.delete_fids) if f in allowed]
+            if chosen:
+                await saver.delete(chosen, headers)
+                done["deleted"] = len(chosen)
+        except LoginExpiredError:
+            raise HTTPException(status_code=401, detail="夸克登录已失效，请重新扫码登录") from None
+        except (SaveError, httpx.HTTPError, ValueError) as e:
+            done["errors"].append(str(e) if isinstance(e, SaveError) else "连接夸克失败")
+        eps = {episode_no(m["to_name"], sub.season, any_ext=True) for m in plan.moves} - {None}
+        if eps:
+            sub.saved_episodes = sorted(set(sub.saved_episodes) | eps)
+            await resolved.store.update_subscription(owner, sub, [])
+        return {**done, "target": plan.target}
 
     if watcher is not None:
         watcher.auto_saver = auto_save

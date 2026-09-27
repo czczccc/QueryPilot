@@ -116,9 +116,10 @@ def episode_key(name: str) -> str | None:
     return None
 
 
-def episode_no(name: str, season: int | None = None) -> int | None:
-    """文件名里的集号；文件名明确写了别的季（如订第 2 季遇到 S01E05）返回 None。"""
-    if not VIDEO_EXT.search(name):
+def episode_no(name: str, season: int | None = None, any_ext: bool = False) -> int | None:
+    """文件名里的集号；文件名明确写了别的季（如订第 2 季遇到 S01E05）返回 None。
+    `any_ext`：不限视频文件（字幕、压缩包也认集号）。"""
+    if not any_ext and not VIDEO_EXT.search(name):
         return None
     base = name.rsplit("/", 1)[-1]
     for i, pat in enumerate(EP_PATTERNS):

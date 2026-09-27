@@ -139,6 +139,7 @@ _MIGRATIONS = [
     ("subscriptions", "exclude_words", "TEXT"),
     ("subscriptions", "saved_episodes", "TEXT"),
     ("subscriptions", "meta_checked", "REAL"),
+    ("subscriptions", "folder", "TEXT"),
 ]
 
 # 订阅 v2 的可编辑字段：Subscription 属性名 → 列名
@@ -147,7 +148,7 @@ SUB_FIELDS = {
     "douban_id": "douban_id", "poster": "poster", "total_episodes": "total_episodes",
     "start_episode": "start_episode", "manual_total": "manual_total",
     "resolution": "resolution", "include": "include_words", "exclude": "exclude_words",
-    "auto_save": "auto_save",
+    "auto_save": "auto_save", "folder": "folder",
 }
 
 _PUNCT_RE = re.compile(r"[\s\-_·:：,，.。!！?？'\"“”‘’()（）\[\]【】《》<>]+")
@@ -392,7 +393,7 @@ class LinkStore:
             total_episodes=row["total_episodes"], start_episode=row["start_episode"] or 1,
             manual_total=bool(row["manual_total"]), resolution=row["resolution"],
             include=row["include_words"], exclude=row["exclude_words"],
-            saved_episodes=json.loads(row["saved_episodes"] or "[]"),
+            saved_episodes=json.loads(row["saved_episodes"] or "[]"), folder=row["folder"],
         )
 
     def _list_subscriptions(self, client_id: str | None) -> list[tuple[str, Subscription]]:
@@ -535,7 +536,7 @@ class LinkStore:
     def _archive(self, client_id: str, sub: Subscription, reason: str, now: float) -> int:
         data = sub.model_dump(include={
             "media", "season", "year", "tmdb_id", "douban_id", "poster", "total_episodes",
-            "start_episode", "resolution", "include", "exclude", "auto_save",
+            "start_episode", "resolution", "include", "exclude", "auto_save", "folder",
         })
         data["saved_count"] = len(set(sub.saved_episodes))
         with self._lock:
@@ -764,6 +765,18 @@ class LinkStore:
                     "SELECT 1 FROM auto_saves WHERE subscription_id = ? AND ok = 1"
                     " AND file_count > 0 LIMIT 1", (sub_id,),
                 ).fetchone() is not None
+
+        return await asyncio.to_thread(run)
+
+    async def saved_folders(self, sub_id: int) -> list[str]:
+        """这个订阅以前自动转存到过的目录（整理时一起扫）。"""
+        def run() -> list[str]:
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT DISTINCT folder FROM auto_saves WHERE subscription_id = ? "
+                    "AND folder IS NOT NULL AND ok = 1", (sub_id,),
+                ).fetchall()
+            return [r["folder"] for r in rows]
 
         return await asyncio.to_thread(run)
 

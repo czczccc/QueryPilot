@@ -19,7 +19,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from app.services.classify import decide_folder, episode_key
+from app.services.classify import decide_folder, episode_key, episode_no
+from app.services.organize import _suffix, kind_of, pick_files, standard_name
 from app.services.quark import DETAIL_URL, TOKEN_URL, UA
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,10 @@ TASK_URL = "https://drive-pc.quark.cn/1/clouddrive/task"
 PATH_LIST_URL = "https://drive-pc.quark.cn/1/clouddrive/file/info/path_list"
 MKDIR_URL = "https://drive-pc.quark.cn/1/clouddrive/file"
 LIST_URL = "https://drive-pc.quark.cn/1/clouddrive/file/sort"
+# 以下三个网盘文件操作接口来自夸克网页版前端与社区工具，未在真实账号上验证
+MOVE_URL = "https://drive-pc.quark.cn/1/clouddrive/file/move"
+RENAME_URL = "https://drive-pc.quark.cn/1/clouddrive/file/rename"
+DELETE_URL = "https://drive-pc.quark.cn/1/clouddrive/file/delete"
 COMMON_PARAMS = {"pr": "ucpro", "fr": "pc", "uc_param_str": ""}
 
 # 夸克返回的常见错误码 → 给用户看的说明
@@ -47,6 +52,18 @@ class SaveError(Exception):
 
 class LoginExpiredError(SaveError):
     """cookie 已失效（夸克错误码 31001）。"""
+
+
+@dataclass
+class Tidy:
+    """订阅转存的整理方式：展平分享里的嵌套文件夹、每集只存一个最好的版本、
+    不存压缩包和无关文件（没有视频时除外），存完重命名成「片名 S01E06.mkv」。"""
+
+    title: str  # 标准片名（不用分享标题）
+    movie: bool = False
+    season: int | None = None
+    year: str | None = None
+    rename: bool = True
 
 
 @dataclass
@@ -110,16 +127,18 @@ class QuarkSaver:
     async def save(
         self, share_id: str, pwd: str | None = None, to_path: str | None = None,
         only_new: bool = False, keep: Callable[[str], bool] | None = None,
+        tidy: Tidy | None = None,
     ) -> SaveResult:
         """`to_path`：指定网盘目标目录路径（不存在就创建），给出时跳过自动分类。
 
         `only_new`：只存目标目录里还没有的集（按「季x集」比对，认不出集数的按文件名），
         用于订阅自动转存，避免同一集存两遍；读不到目标目录时报错而不是盲存。
         `keep`：only_new 时再按文件名筛一遍（如只要订阅范围内缺的集）。
+        `tidy`：订阅转存的整理方式（见 `Tidy`），需要同时给 only_new。
         """
         headers = self._headers(share_id)
         try:
-            return await self._save(share_id, pwd, headers, to_path, only_new, keep)
+            return await self._save(share_id, pwd, headers, to_path, only_new, keep, tidy)
         except httpx.HTTPError as e:
             # 只记录异常类型，不记录请求（请求头里有 cookie）
             logger.warning("转存请求失败 share=%s error=%s", share_id, type(e).__name__)
@@ -130,6 +149,7 @@ class QuarkSaver:
     async def _save(
         self, share_id: str, pwd: str | None, headers: dict, to_path: str | None = None,
         only_new: bool = False, keep: Callable[[str], bool] | None = None,
+        tidy: Tidy | None = None,
     ) -> SaveResult:
         # 1) 分享页 token
         resp = await self._client.post(
@@ -179,18 +199,31 @@ class QuarkSaver:
         except (SaveError, httpx.HTTPError, ValueError, KeyError) as e:
             logger.warning("目标目录准备失败（%s），存到默认目录", type(e).__name__)
 
-        # 3.5) 只存新的集：顶层是单个文件夹时展开一层逐个比对，直接存进目标目录
+        # 3.5) 只存新的集：展开分享里的文件夹逐个比对，直接存进目标目录
         pdir, skipped, present = "0", 0, []
         if only_new:
-            if len(items) == 1 and items[0].get("dir"):
+            if tidy is not None:  # 整理模式：递归展平，每集挑一个最好的版本
+                items = await self._walk_share(share_id, stoken, items, headers)
+                items, _ = pick_files(items, tidy.movie, tidy.season)
+            elif len(items) == 1 and items[0].get("dir"):
                 pdir = str(items[0]["fid"])
                 items = await self._sub_items(share_id, stoken, pdir, headers)
             have_names, have_eps = await self._existing(to_fid, headers)
-            fresh = [
-                f for f in items
-                if str(f.get("file_name") or "") not in have_names
-                and (episode_key(str(f.get("file_name") or "")) or "") not in have_eps
-            ]
+
+            def is_new(f: dict) -> bool:
+                name = str(f.get("file_name") or "")
+                if name in have_names:
+                    return False
+                if tidy is None:
+                    return (episode_key(name) or "") not in have_eps
+                if tidy.movie:  # 电影目录里已经有视频了：不重复存
+                    return not any(kind_of(n) == "video" for n in have_names)
+                # 按集号比（重命名过的「片名 S01E06」、压缩包也认得出）
+                have = {episode_no(n, tidy.season, any_ext=True) for n in have_names
+                        if kind_of(n) in ("video", "archive")}
+                return episode_no(name, tidy.season, any_ext=True) not in have - {None}
+
+            fresh = [f for f in items if is_new(f)]
             skipped = len(items) - len(fresh)
             if keep is not None:
                 fresh = [f for f in fresh if keep(str(f.get("file_name") or ""))]
@@ -199,26 +232,37 @@ class QuarkSaver:
             if not items:
                 return SaveResult("", 0, title, True, folder, category, basis, skipped, present)
 
-        # 4) 提交转存任务
-        resp = await self._client.post(
-            SAVE_URL,
-            params=COMMON_PARAMS,
-            json={
-                "fid_list": [f["fid"] for f in items],
-                "fid_token_list": [f["share_fid_token"] for f in items],
-                "to_pdir_fid": to_fid,
-                "pwd_id": share_id,
-                "stoken": stoken,
-                "pdir_fid": pdir,
-                "scene": "link",
-            },
-            headers=headers, timeout=self._timeout,
-        )
-        task_id = self._check(resp.json(), "提交转存失败").get("task_id")
-        if not task_id:
-            raise SaveError("提交转存失败")
+        # 4) 提交转存任务（展平时文件来自分享里不同的文件夹，按所在文件夹分批提交）
+        groups: dict[str, list[dict]] = {}
+        for f in items:
+            groups.setdefault(str(f.get("_pdir") or pdir), []).append(f)
+        task_id, done = "", True
+        for parent, batch in groups.items():
+            resp = await self._client.post(
+                SAVE_URL,
+                params=COMMON_PARAMS,
+                json={
+                    "fid_list": [f["fid"] for f in batch],
+                    "fid_token_list": [f["share_fid_token"] for f in batch],
+                    "to_pdir_fid": to_fid,
+                    "pwd_id": share_id,
+                    "stoken": stoken,
+                    "pdir_fid": parent,
+                    "scene": "link",
+                },
+                headers=headers, timeout=self._timeout,
+            )
+            task_id = self._check(resp.json(), "提交转存失败").get("task_id")
+            if not task_id:
+                raise SaveError("提交转存失败")
+            # 5) 轮询任务状态：status 2 = 完成
+            done = await self._wait_task(task_id, headers) and done
+        if tidy is not None and tidy.rename and done:
+            await self._rename_saved(to_fid, items, tidy, headers)
+        return SaveResult(task_id, len(items), title, done, folder, category, basis, skipped,
+                          present)
 
-        # 5) 轮询任务状态：status 2 = 完成
+    async def _wait_task(self, task_id: str, headers: dict) -> bool:
         for i in range(self._poll_times):
             resp = await self._client.get(
                 TASK_URL,
@@ -227,11 +271,118 @@ class QuarkSaver:
             )
             task = self._check(resp.json(), "转存失败")
             if task.get("status") == 2:
-                return SaveResult(task_id, len(items), title, True, folder, category, basis,
-                                  skipped, present)
+                return True
             await asyncio.sleep(self._poll_interval)
-        return SaveResult(task_id, len(items), title, False, folder, category, basis, skipped,
-                          present)
+        return False
+
+    async def _walk_share(
+        self, share_id: str, stoken: str, items: list[dict], headers: dict, depth: int = 3,
+    ) -> list[dict]:
+        """把分享里的文件夹逐层展开成文件列表（每个文件记下所在的分享文件夹 `_pdir`）。"""
+        out: list[dict] = []
+        todo = [(f, "0", 0) for f in items]
+        while todo:
+            f, parent, level = todo.pop(0)
+            if f.get("dir"):
+                if level < depth:
+                    subs = await self._sub_items(share_id, stoken, str(f["fid"]), headers)
+                    todo += [(g, str(f["fid"]), level + 1) for g in subs]
+            else:
+                out.append({**f, "_pdir": parent})
+        return out
+
+    async def _rename_saved(
+        self, to_fid: str, items: list[dict], tidy: Tidy, headers: dict
+    ) -> None:
+        """存完改成标准文件名；失败不影响转存结果（接口未验证，出错只记日志）。"""
+        try:
+            listed = {str(f.get("file_name") or ""): f for f in await self._list_dir(to_fid, headers)}
+            taken = set(listed)
+            for f in items:
+                name = str(f.get("file_name") or "")
+                got = listed.get(name)
+                if not got or not got.get("fid"):
+                    continue
+                ep = None if tidy.movie else episode_no(name, tidy.season, any_ext=True)
+                new = standard_name(tidy.title, _suffix(name), tidy.season, ep, tidy.year)
+                if new == name or new in taken:
+                    continue
+                await self.rename(str(got["fid"]), new, headers)
+                taken.add(new)
+        except LoginExpiredError:
+            raise
+        except (SaveError, httpx.HTTPError, ValueError) as e:
+            logger.warning("转存后重命名失败（%s），保留原文件名", type(e).__name__)
+
+    # ---------------- 网盘文件操作（整理已有目录用） ----------------
+
+    def drive_headers(self) -> dict[str, str]:
+        return {"User-Agent": UA, "Content-Type": "application/json",
+                "Referer": "https://pan.quark.cn/", "Origin": "https://pan.quark.cn",
+                "Cookie": self._cookie}
+
+    async def find_dir(self, path: str, headers: dict) -> str | None:
+        """按路径找网盘目录 fid，不存在返回 None（不创建）。"""
+        resp = await self._client.post(
+            PATH_LIST_URL, params=COMMON_PARAMS,
+            json={"file_path": [path], "namespace": "0"}, headers=headers, timeout=self._timeout,
+        )
+        body = resp.json()
+        if body.get("code") == 31001:
+            raise LoginExpiredError(ERROR_TEXT[31001])
+        found = body.get("data") if isinstance(body.get("data"), list) else []
+        if found and isinstance(found[0], dict) and found[0].get("fid"):
+            return str(found[0]["fid"])
+        return None
+
+    async def list_tree(self, fid: str, path: str, headers: dict, depth: int = 3) -> list[dict]:
+        """目录下所有文件和文件夹（含子目录，最多 `depth` 层），每项带 folder / path。"""
+        out: list[dict] = []
+        todo = [(fid, path, 0)]
+        while todo:
+            cur, cur_path, level = todo.pop(0)
+            for f in await self._list_dir(cur, headers):
+                name = str(f.get("file_name") or "")
+                if not name or not f.get("fid"):
+                    continue
+                is_dir = bool(f.get("dir")) or f.get("file_type") == 0
+                entry = {"fid": str(f["fid"]), "file_name": name, "size": f.get("size") or 0,
+                         "dir": is_dir, "folder": cur_path, "path": f"{cur_path}/{name}"}
+                out.append(entry)
+                if is_dir and level < depth:
+                    todo.append((entry["fid"], entry["path"], level + 1))
+        return out
+
+    async def ensure_dir(self, path: str, headers: dict) -> str:
+        return await self._ensure_dir(path, headers)
+
+    async def move(self, fids: list[str], to_fid: str, headers: dict) -> None:
+        resp = await self._client.post(
+            MOVE_URL, params=COMMON_PARAMS,
+            json={"action_type": 1, "to_pdir_fid": to_fid, "filelist": fids, "exclude_fids": []},
+            headers=headers, timeout=self._timeout,
+        )
+        task_id = self._check(resp.json(), "移动文件失败").get("task_id")
+        if task_id:
+            await self._wait_task(task_id, headers)
+
+    async def rename(self, fid: str, name: str, headers: dict) -> None:
+        resp = await self._client.post(
+            RENAME_URL, params=COMMON_PARAMS, json={"fid": fid, "file_name": name},
+            headers=headers, timeout=self._timeout,
+        )
+        self._check(resp.json(), "重命名失败")
+
+    async def delete(self, fids: list[str], headers: dict) -> None:
+        """删除（进夸克回收站，可在网盘里恢复）。只在用户确认后调用。"""
+        resp = await self._client.post(
+            DELETE_URL, params=COMMON_PARAMS,
+            json={"action_type": 2, "filelist": fids, "exclude_fids": []},
+            headers=headers, timeout=self._timeout,
+        )
+        task_id = self._check(resp.json(), "删除失败").get("task_id")
+        if task_id:
+            await self._wait_task(task_id, headers)
 
     async def _sub_items(
         self, share_id: str, stoken: str, dir_fid: str, headers: dict

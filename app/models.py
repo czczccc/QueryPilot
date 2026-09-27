@@ -220,6 +220,8 @@ class Subscription(BaseModel):
     include: str | None = None
     exclude: str | None = None
     saved_episodes: list[int] = Field(default_factory=list)  # 网盘里已有的集（按转存时的目录清点）
+    # 第一次自动转存时确定并锁定的网盘目录（按条目：类型/地区/片名 (年份)/Season 01），之后不再重新分类
+    folder: str | None = None
 
     @property
     def wanted(self) -> list[int]:
@@ -251,6 +253,12 @@ class SubscriptionUpdate(BaseModel):
 
 
 AutoSaveRequest = SubscriptionUpdate  # 兼容旧名
+
+
+class OrganizeRequest(BaseModel):
+    """执行整理：移动 / 重命名按服务器重新算出的计划做；删除只删这里列出、且在计划的建议删除里的。"""
+
+    delete_fids: list[str] = Field(default_factory=list, max_length=500)
 
 
 class SubscriptionHistory(BaseModel):
