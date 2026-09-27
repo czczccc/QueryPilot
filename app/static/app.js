@@ -16,6 +16,7 @@ const emptyState = document.getElementById("empty-state");
 let currentLinks = [];
 let hideDead = true;
 let minRes = "";
+let lastQuery = "";
 
 const RES_RANK = { SD: 1, "720p": 2, "1080p": 3, "2160p": 4 };
 const RES_LABEL = { SD: "标清", "720p": "720p", "1080p": "1080p", "2160p": "4K" };
@@ -127,9 +128,24 @@ function renderMetrics(metrics, providers) {
     providers.map((p) => p.name + ": " + p.status).join("；"),
   ];
   if (metrics.fallback_used) parts.push("已使用基础查询（AI 解析暂不可用）");
+  if (metrics.memory_hits) parts.push("记忆复用 " + metrics.memory_hits + " 条");
+  if (metrics.skipped_invalid) parts.push("跳过已知失效 " + metrics.skipped_invalid + " 条");
   const p = document.createElement("p");
   setText(p, parts.join("　·　"));
   metricsEl.appendChild(p);
+
+  if (metrics.served_from_memory) {
+    const note = document.createElement("p");
+    setText(note, "这些结果来自之前搜索并验证过的记忆，已跳过全网搜索。");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "secondary-btn small";
+    setText(btn, "重新全网搜索");
+    btn.addEventListener("click", () => doSearch(lastQuery, true));
+    note.appendChild(document.createTextNode(" "));
+    note.appendChild(btn);
+    metricsEl.appendChild(note);
+  }
 }
 
 function renderLinks(links) {
@@ -163,6 +179,15 @@ function renderLinks(links) {
     setText(stateBadge, stateText);
     head.appendChild(stateBadge);
     for (const b of qualityBadges(l.quality)) head.appendChild(b);
+    if (l.from_memory) {
+      const mem = document.createElement("span");
+      mem.className = "badge badge-tag";
+      setText(mem, "记忆");
+      if (l.last_checked) {
+        mem.title = "上次验证：" + new Date(l.last_checked * 1000).toLocaleString();
+      }
+      head.appendChild(mem);
+    }
     li.appendChild(head);
 
     const url = document.createElement("a");
@@ -225,7 +250,8 @@ document.getElementById("min-res").addEventListener("change", (e) => {
   if (currentLinks.length) renderLinks(currentLinks);
 });
 
-async function doSearch(query) {
+async function doSearch(query, refresh = false) {
+  lastQuery = query;
   hideFormError();
   resultsSection.hidden = true;
   showStatus("正在解析资源、搜索网盘链接并验证可达性…通常需要 20~60 秒，请耐心等待", "loading");
@@ -238,7 +264,7 @@ async function doSearch(query) {
     const resp = await fetch("/api/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query, refresh }),
       signal: controller.signal,
     });
 

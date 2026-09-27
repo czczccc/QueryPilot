@@ -4,9 +4,12 @@
 方便本地调试与国内服务器 Docker 部署。
 """
 
+import asyncio
+import contextlib
 import logging
 import time
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -19,6 +22,7 @@ from app.models import QuarkSearchResponse, SearchRequest
 from app.providers.tavily import TavilyProvider
 from app.security import RateLimiter, install_request_id_factory, set_request_id
 from app.services.intent import DeepSeekParser
+from app.services.memory import LinkStore
 from app.services.search import QuarkSearchService, SearchUnavailableError
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -43,18 +47,32 @@ def build_default_service() -> QuarkSearchService:
         api_key=_settings.tavily_api_key,
         timeout=_settings.request_timeout_seconds,
     )
+    store = LinkStore(_settings.memory_db_path) if _settings.memory_db_path else None
     return QuarkSearchService(
         parser=parser,
         tavily=provider,
         use_qkyunso=True,
         use_bing=True,
         timeout=_settings.request_timeout_seconds,
+        store=store,
     )
+
+
+async def _reverify_loop(service: QuarkSearchService, interval_hours: float) -> None:
+    """后台定期复验记忆中的旧有效链接；单轮失败只记日志。"""
+    while True:
+        await asyncio.sleep(interval_hours * 3600)
+        try:
+            died = await service.reverify_stale(older_than_hours=interval_hours)
+            logger.info("记忆复验完成，新增失效 %d 条", died)
+        except Exception:
+            logger.exception("记忆复验异常")
 
 
 def create_app(
     service: QuarkSearchService | None = None,
     rate_limit_per_minute: int | None = None,
+    reverify_interval_hours: float | None = None,
 ) -> FastAPI:
     """创建应用；传入 service 便于测试注入假实现。"""
     resolved = service or build_default_service()
@@ -62,10 +80,28 @@ def create_app(
         rate=rate_limit_per_minute if rate_limit_per_minute is not None else 10
     )
 
+    interval = (
+        reverify_interval_hours
+        if reverify_interval_hours is not None
+        else (_settings.reverify_interval_hours if service is None else 0)
+    )
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        task = asyncio.create_task(_reverify_loop(resolved, interval)) if interval > 0 else None
+        try:
+            yield
+        finally:
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
     app = FastAPI(
+        lifespan=lifespan,
         title="QueryPilot",
         description="AI 搜索与链接验证引擎：自然语言输入，多引擎聚合检索，严格验证结果可用性。",
-        version="0.3.0",
+        version="0.6.0",
     )
     app.state.search_service = resolved
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
@@ -109,7 +145,15 @@ def create_app(
     @app.get("/health")
     async def health() -> dict:
         """健康检查：只证明应用进程可响应，不探测外部 API。"""
-        return {"status": "ok", "version": "0.3.0"}
+        return {"status": "ok", "version": "0.6.0"}
+
+    @app.get("/api/memory/stats")
+    async def memory_stats() -> dict:
+        """记忆库统计：有效/失效链接数与累计搜索次数。"""
+        store = app.state.search_service.store
+        if store is None:
+            return {"enabled": False}
+        return {"enabled": True, **(await store.stats())}
 
     @app.post("/api/search", response_model=QuarkSearchResponse)
     async def api_search(

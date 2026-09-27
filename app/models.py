@@ -14,6 +14,7 @@ class SearchRequest(BaseModel):
     """`POST /api/search` 请求体。"""
 
     query: str = Field(min_length=2, max_length=200)
+    refresh: bool = False  # True 时忽略记忆快速返回，强制全网重新搜索
 
 
 class RawSearchResult(BaseModel):
@@ -64,6 +65,8 @@ class QuarkLink(BaseModel):
     http: int | None = None  # 壳页状态码
     state: str = "unknown"  # 严格验证状态：valid / invalid / unknown
     quality: QualityInfo | None = None  # 仅验证有效时填充
+    from_memory: bool = False  # 来自记忆库（之前搜索验证过）
+    last_checked: float | None = None  # 最近一次验证的 Unix 时间戳（记忆库链接）
 
 
 class ProviderStatus(BaseModel):
@@ -83,6 +86,9 @@ class SearchMetrics(BaseModel):
     raw_result_count: int
     deduplicated_result_count: int
     fallback_used: bool = False
+    memory_hits: int = 0  # 从记忆库复用的链接数
+    skipped_invalid: int = 0  # 记忆中近期已失效、直接跳过验证的链接数
+    served_from_memory: bool = False  # 记忆足够，跳过了全网搜索
 
 
 class DoubanMeta(BaseModel):
