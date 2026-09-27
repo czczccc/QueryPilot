@@ -816,6 +816,7 @@ function quarkLogin() {
           if (r.status === "success") {
             saveStatus.logged_in = true;
             saveStatus.nickname = r.nickname;
+            renderAccount();
             finish(true);
           } else if (r.status !== "waiting") {
             clearInterval(timer);
@@ -852,7 +853,10 @@ function saveButton(l) {
       }
       const body = await resp.json().catch(() => ({}));
       const ok = resp.ok && body.ok;
-      if (!ok && /重新扫码|先扫码/.test(body.message || body.detail || "")) saveStatus.logged_in = false;
+      if (!ok && /重新扫码|先扫码/.test(body.message || body.detail || "")) {
+        saveStatus.logged_in = false;
+        renderAccount();
+      }
       setText(btn, ok ? "已转存 ✓" : "转存失败");
       btn.classList.toggle("done", ok);
       toast(body.message || body.detail || (ok ? "已转存" : "转存失败"), ok ? "ok" : "error");
@@ -875,9 +879,65 @@ function postSave(l, token) {
   });
 }
 
+// ---- 顶栏账号：登录夸克 / 已登录 / 退出 ----
+const accountEl = document.getElementById("account");
+const loginBtn = document.getElementById("login-btn");
+const loginLabel = document.getElementById("login-label");
+const accountMenu = document.getElementById("account-menu");
+const accountName = document.getElementById("account-name");
+const logoutBtn = document.getElementById("logout-btn");
+
+function renderAccount() {
+  accountEl.hidden = !saveStatus.login; // 服务器没开扫码登录就不显示
+  const name = saveStatus.nickname || "夸克用户";
+  accountEl.classList.toggle("logged-in", !!saveStatus.logged_in);
+  setText(loginLabel, saveStatus.logged_in ? name : "登录夸克");
+  loginBtn.title = saveStatus.logged_in ? "已登录夸克：" + name : "扫码登录夸克，转存到自己的网盘";
+  setText(accountName, name);
+  if (!saveStatus.logged_in) setMenuOpen(false);
+}
+
+function setMenuOpen(open) {
+  accountMenu.hidden = !open;
+  loginBtn.setAttribute("aria-expanded", String(open));
+}
+
+loginBtn.addEventListener("click", async () => {
+  if (saveStatus.logged_in) {
+    setMenuOpen(accountMenu.hidden);
+    return;
+  }
+  if (await quarkLogin()) toast("登录成功" + (saveStatus.nickname ? "（" + saveStatus.nickname + "）" : "") + "，转存会保存到你的夸克网盘");
+});
+
+logoutBtn.addEventListener("click", async () => {
+  logoutBtn.disabled = true;
+  try {
+    const resp = await fetch("/api/quark/logout", { method: "POST" });
+    if (!resp.ok) throw new Error("logout failed");
+    saveStatus.logged_in = false;
+    saveStatus.nickname = null;
+    renderAccount();
+    toast("已退出登录，服务器上保存的凭证已删除");
+  } catch (_) {
+    toast("退出失败，请稍后重试", "error");
+  }
+  logoutBtn.disabled = false;
+});
+
+document.addEventListener("click", (e) => {
+  if (!accountMenu.hidden && !accountEl.contains(e.target)) setMenuOpen(false);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !accountMenu.hidden) {
+    setMenuOpen(false);
+    loginBtn.focus();
+  }
+});
+
 fetch("/api/save/status")
   .then((r) => r.json())
-  .then((d) => { saveStatus = d; saveEnabled = !!d.enabled; })
+  .then((d) => { saveStatus = d; saveEnabled = !!d.enabled; renderAccount(); })
   .catch(() => {});
 
 

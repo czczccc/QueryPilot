@@ -1287,12 +1287,98 @@ body.scrolled-far .to-top { opacity: 1; transform: none; pointer-events: auto; }
   }
 }
 
+/* ================= 顶栏账号 ================= */
+.topbar-actions { display: flex; align-items: center; gap: 0.5rem; }
+.account { position: relative; }
+.account[hidden] { display: none; }
+
+.account-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  height: 38px;
+  max-width: 220px;
+  padding: 0 0.85rem 0 0.35rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #fff;
+  background: var(--grad);
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  box-shadow: 0 6px 16px -8px rgba(99, 102, 241, 0.8);
+  transition: transform 0.2s var(--ease), box-shadow 0.2s ease;
+}
+
+.account-btn:hover { transform: translateY(-1px); box-shadow: 0 10px 20px -8px rgba(99, 102, 241, 0.9); }
+.account-btn:active { transform: scale(0.96); }
+
+.account-avatar {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.2);
+  font-size: 0.85rem;
+}
+
+.account-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 已登录：换成低调的胶囊，显示昵称 */
+.account.logged-in .account-btn {
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: none;
+  font-weight: 500;
+}
+
+.account.logged-in .account-avatar { color: #fff; background: var(--grad); }
+
+.account.logged-in .account-btn::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin-left: 0.1rem;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-soft);
+}
+
+.account-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  width: 240px;
+  padding: 0.9rem;
+  background: var(--surface-solid);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  animation: fade-down 0.25s var(--ease);
+}
+
+.account-menu[hidden] { display: none; }
+.account-menu-name { margin: 0; font-size: 0.88rem; overflow-wrap: anywhere; }
+.account-menu-hint { margin: 0.2rem 0 0.75rem; font-size: 0.78rem; color: var(--muted); }
+.account-menu .secondary-btn { width: 100%; justify-content: center; }
+.account-menu .secondary-btn:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+
+@media (max-width: 600px) {
+  .account-btn { max-width: 150px; }
+}
+
 /* ================= 夸克扫码登录弹窗 ================= */
 .qr-dialog {
-  border: 1px solid var(--border); border-radius: 16px; padding: 1.25rem;
+  border: 1px solid var(--border); border-radius: 18px; padding: 1.4rem 1.4rem 1.2rem;
   text-align: center; max-width: 320px; background: var(--surface-solid); color: var(--text);
+  box-shadow: var(--shadow-lg);
 }
-.qr-dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+.qr-dialog[open] { animation: toast-in 0.3s var(--ease); }
+.qr-dialog::backdrop { background: rgba(10, 12, 20, 0.5); backdrop-filter: blur(4px); }
 .qr-box { display: flex; justify-content: center; }
 .qr-box svg { width: 220px; height: 220px; background: #fff; border-radius: 8px; }
 .qr-tip { color: var(--muted); font-size: 0.85rem; }
