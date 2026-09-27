@@ -140,9 +140,9 @@ async def llm_judge(
         ],
     }
     try:
-        resp = await client.post(
-            llm.CHAT_URL,
-            json={
+        message = await llm.chat(
+            client,
+            {
                 "model": llm.MODEL,
                 "messages": [
                     {"role": "system", "content": LLM_PROMPT},
@@ -151,11 +151,10 @@ async def llm_judge(
                 "temperature": 0,
                 "response_format": {"type": "json_object"},
             },
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=timeout,
+            api_key,
+            timeout,
         )
-        resp.raise_for_status()
-        results = json.loads(resp.json()["choices"][0]["message"]["content"])["results"]
+        results = json.loads(message["content"])["results"]
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
         logger.warning("LLM 相关性判定失败（%s），保持待定", type(exc).__name__)
         return 0

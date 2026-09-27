@@ -17,6 +17,7 @@ class Settings:
     deepseek_api_key: str = field(default="", repr=False)  # 也可用 LLM_API_KEY
     llm_base_url: str = ""  # 兼容 OpenAI 格式的第三方服务地址，空为 DeepSeek 官方
     llm_model: str = ""  # 模型名，空为 deepseek-v4-flash
+    llm_stream: str = "auto"  # auto：非流式 400 时自动改流式；true / false 强制
     tavily_api_key: str = ""
     app_env: str = "development"
     log_level: str = "INFO"
@@ -56,6 +57,7 @@ def load_settings() -> Settings:
         deepseek_api_key=(os.getenv("LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY", "")).strip(),
         llm_base_url=os.getenv("LLM_BASE_URL", "").strip(),
         llm_model=os.getenv("LLM_MODEL", "").strip(),
+        llm_stream=os.getenv("LLM_STREAM", "auto").strip().lower() or "auto",
         tavily_api_key=os.getenv("TAVILY_API_KEY", ""),
         app_env=os.getenv("APP_ENV", "development"),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
