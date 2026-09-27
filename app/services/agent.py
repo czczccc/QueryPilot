@@ -52,6 +52,9 @@ MAX_QUERIES_PER_SEARCH = 4
 
 Emit = Callable[[AgentStep], Awaitable[None]]
 
+# LLM 规划可能出现的错误：网络/HTTP、坏 JSON、缺字段、类型不对
+PLANNER_ERRORS = (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError)
+
 
 @dataclass
 class Action:
@@ -328,7 +331,7 @@ class DeepSeekPlanner:
             fn = call["function"]
             args = json.loads(fn.get("arguments") or "{}")
             if not isinstance(args, dict):
-                raise ValueError("工具参数不是对象")
+                raise TypeError("工具参数不是对象")
             self._queue.append((call["id"], Action(fn["name"], args, thought)))
 
 
@@ -379,7 +382,7 @@ class SearchAgent:
                 break
             try:
                 action = await planner.decide(state, last)
-            except Exception as exc:  # LLM 不可用/输出异常：规则规划器接管剩余步骤
+            except PLANNER_ERRORS as exc:  # LLM 不可用/输出异常：规则规划器接管剩余步骤
                 logger.warning("LLM 规划失败（%s），切换规则规划", type(exc).__name__)
                 planner = RulePlanner()
                 action = await planner.decide(state, last)
