@@ -217,9 +217,11 @@ class QuarkSearchService:
         queries: list[str],
         keyword: str,
         providers: dict[str, ProviderStatus],
+        keyword_engines: bool = True,
     ) -> list[QuarkLink]:
         """各引擎并发召回：Tavily 用 `queries`，云搜/Bing/Telegram/资源站用 `keyword`。
 
+        `keyword_engines=False` 时只跑 Tavily（关键词和上一轮相同，按关键词搜的引擎结果不会变）。
         单引擎失败只标记状态，不中断整体。
         """
 
@@ -241,14 +243,14 @@ class QuarkSearchService:
         engines: list[tuple[str, Callable[[], Awaitable[list[QuarkLink]]]]] = [
             ("tavily", run_tavily)
         ]
-        if "qkyunso" in providers:
-            engines.append(("qkyunso", run_qkyunso))
-        if "bing" in providers:
-            engines.append(("bing", run_bing))
-        if "telegram" in providers:
-            engines.append(("telegram", run_telegram))
-        if "sites" in providers:
-            engines.append(("sites", run_sites))
+        for name, fn in (
+            ("qkyunso", run_qkyunso),
+            ("bing", run_bing),
+            ("telegram", run_telegram),
+            ("sites", run_sites),
+        ):
+            if keyword_engines and name in providers:
+                engines.append((name, fn))
 
         async def guarded(
             name: str, fn: Callable[[], Awaitable[list[QuarkLink]]]

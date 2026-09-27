@@ -338,20 +338,18 @@ class DeepSeekPlanner:
         return action
 
     async def _ask(self) -> None:
-        resp = await self._client.post(
-            llm.CHAT_URL,
-            json={
+        message = await llm.chat(
+            self._client,
+            {
                 "model": self._model,
                 "messages": self._messages,
                 "tools": TOOLS,
                 "tool_choice": "required",
                 "temperature": 0.2,
             },
-            headers={"Authorization": f"Bearer {self._api_key}"},
-            timeout=self._timeout,
+            self._api_key,
+            self._timeout,
         )
-        resp.raise_for_status()
-        message = resp.json()["choices"][0]["message"]
         calls = message.get("tool_calls") or []
         if not calls:
             raise ValueError("LLM 没有返回工具调用")
@@ -579,10 +577,14 @@ class SearchAgent:
         keyword = str(args.get("keyword") or state.parsed.resource).strip()[:50]
         state.search_calls += 1
         state.used_queries += [q for q in queries if q not in state.used_queries]
-        if keyword not in state.used_keywords:
+        new_keyword = keyword not in state.used_keywords
+        if new_keyword:
             state.used_keywords.append(keyword)
 
-        found = await self._service.collect(queries, keyword, providers)
+        # 关键词没变时，按关键词搜的引擎（云搜/Bing/Telegram/资源站）不再重复请求
+        found = await self._service.collect(
+            queries, keyword, providers, keyword_engines=new_keyword
+        )
         state.raw_count += len(found)
         before = len(state.candidates)
         for link in found:

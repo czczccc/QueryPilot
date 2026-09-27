@@ -137,9 +137,9 @@ async def interpret_llm(
         "followup": text,
     }
     try:
-        resp = await client.post(
-            llm.CHAT_URL,
-            json={
+        message = await llm.chat(
+            client,
+            {
                 "model": llm.MODEL,
                 "messages": [
                     {"role": "system", "content": LLM_PROMPT},
@@ -148,11 +148,10 @@ async def interpret_llm(
                 "temperature": 0,
                 "response_format": {"type": "json_object"},
             },
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=15.0,
+            api_key,
+            15.0,
         )
-        resp.raise_for_status()
-        data = json.loads(resp.json()["choices"][0]["message"]["content"])
+        data = json.loads(message["content"])
         season = data.get("season")
         resolution = data.get("resolution")
         return Refinement(

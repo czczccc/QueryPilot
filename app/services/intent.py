@@ -138,18 +138,16 @@ class DeepSeekParser:
             "temperature": 0.3,
             "response_format": {"type": "json_object"},
         }
-        headers = {"Authorization": f"Bearer {self._api_key}"}
         try:
             if self._client is not None:
-                resp = await self._client.post(llm.CHAT_URL, json=payload, headers=headers)
+                message = await llm.chat(self._client, payload, self._api_key, self._timeout)
             else:
                 async with httpx.AsyncClient(timeout=self._timeout) as client:
-                    resp = await client.post(llm.CHAT_URL, json=payload, headers=headers)
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"]
+                    message = await llm.chat(client, payload, self._api_key, self._timeout)
+            content = message["content"]
             parsed = ParsedResource.model_validate(_coerce(json.loads(content)))
             return ParseOutcome(parsed=parsed, fallback_used=False)
         except (httpx.HTTPError, ValidationError, IntentError, KeyError, IndexError,
                 json.JSONDecodeError) as exc:
-            logger.warning("DeepSeek 资源解析失败（%s），使用规则降级", type(exc).__name__)
+            logger.warning("LLM 资源解析失败（%s），使用规则降级", type(exc).__name__)
             return ParseOutcome(parsed=rule_based_parsed(query), fallback_used=True)
