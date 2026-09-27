@@ -46,7 +46,8 @@ const RES_LABEL = { SD: "标清", "720p": "720p", "1080p": "1080p", "2160p": "4K
 
 function visibleLinks(links) {
   return links.filter((l) => {
-    if (hideDead && (l.state === "invalid" || l.relevance === "mismatch")) return false;
+    // 「只看有效且相关」：只留验证有效、且确认是这部作品的（待核对的不算）
+    if (hideDead && !(l.state === "valid" && l.relevance === "match")) return false;
     if (minRes) {
       const res = l.quality && l.quality.resolution;
       // 未识别出分辨率的有效链接保留（可能是好资源，只是文件名没写）
@@ -242,10 +243,10 @@ function shareLink(l) {
 }
 
 function renderCount(links, visible) {
-  const valid = links.filter((l) => l.state === "valid" && l.relevance !== "mismatch").length;
+  const valid = links.filter((l) => l.state === "valid" && l.relevance === "match").length;
   resultCount.innerHTML = "";
   resultCount.append("显示 ", el("b", "", String(visible.length)), " / " + links.length +
-    " 条，其中有效 " + valid + " 条");
+    " 条，其中有效且相关 " + valid + " 条");
 }
 
 function renderEmpty(title, text) {
