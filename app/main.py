@@ -15,6 +15,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 
 import httpx
@@ -45,6 +46,7 @@ from app.models import (
 )
 from app.providers.tavily import TavilyProvider
 from app.security import RateLimiter, install_request_id_factory, set_request_id
+from app.services import calendar as cal
 from app.services import llm
 from app.services.agent import SearchAgent
 from app.services.classify import Category, Classifier, episode_no, safe_name
@@ -507,6 +509,41 @@ def create_app(
         got = await store.get_history(owner, hid)
         assert got is not None
         return got[0]
+
+    @app.get("/api/calendar")
+    async def episode_calendar(
+        request: Request, client_id: str = ClientId,
+        start: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        end: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        subscription_id: int | None = None,
+    ) -> dict:
+        """追剧日历：订阅的剧集在 [start, end]（默认前 7 天到后 30 天）播出的集和状态。
+
+        状态：saved 已存 / available 有资源未存 / no_resource 已播出但还没资源 / upcoming 未播出。
+        播出日期来自 TMDB（需要 TMDB_API_KEY；只用豆瓣识别的剧没有日历）。"""
+        store = _store_or_404()
+        owner = await _owner(request, client_id)
+        subs = [x for _, x in await store.list_subscriptions(owner)
+                if subscription_id in (None, x.id)]
+        now = cal.today()
+        try:
+            lo = date.fromisoformat(start) if start else now - timedelta(days=7)
+            hi = date.fromisoformat(end) if end else now + timedelta(days=30)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="日期格式应为 YYYY-MM-DD") from None
+        if hi < lo or (hi - lo).days > 120:
+            raise HTTPException(status_code=400, detail="日期范围需在 120 天以内")
+        # 还没有日历的剧（刚订阅、还没检查过）：现查一次
+        fetch = getattr(media_lookup, "schedule", None)
+        todo = [x for x in subs if x.media == "tv" and x.tmdb_id and not x.schedule][:20]
+        if fetch is not None and todo:
+            got = await asyncio.gather(*(fetch(x.tmdb_id, x.season or 1) for x in todo))
+            for x, eps in zip(todo, got, strict=True):
+                if eps:
+                    x.schedule = eps
+                    await store.set_schedule(x.id, eps)
+        return {"today": now.isoformat(), "start": lo.isoformat(), "end": hi.isoformat(),
+                "episodes": cal.build_calendar(subs, lo, hi, now)}
 
     @app.get("/api/subscriptions/history", response_model=list[SubscriptionHistory])
     async def subscription_history(

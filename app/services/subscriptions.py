@@ -271,11 +271,21 @@ class SubscriptionWatcher:
         return None
 
     async def _refresh_meta(self, sub: Subscription) -> None:
-        """剧集总集数随 TMDB / 豆瓣更新（每天最多一次；手动改过总集数的不动）。"""
-        if (self.lookup is None or sub.media != "tv" or sub.manual_total
-                or not (sub.tmdb_id or sub.douban_id)):
+        """剧集总集数与播出日历随 TMDB / 豆瓣更新（每天最多一次；手动改过总集数的不改集数）。"""
+        if self.lookup is None or sub.media != "tv" or not (sub.tmdb_id or sub.douban_id):
             return
         if not await self._store.meta_due(sub.id, 24):
+            return
+        schedule = getattr(self.lookup, "schedule", None)
+        if sub.tmdb_id and schedule is not None:
+            eps = await schedule(sub.tmdb_id, sub.season or 1)
+            if eps:
+                sub.schedule = eps
+                await self._store.set_schedule(sub.id, eps)
+                last = max(e.episode for e in eps)
+                if not sub.manual_total and last > (sub.total_episodes or 0):
+                    sub.total_episodes = last
+        if sub.manual_total:
             return
         # 查询失败时 lookup 自己返回空列表，不影响检查
         infos = await self.lookup(strip_season(sub.resource), sub.year, fresh=True)

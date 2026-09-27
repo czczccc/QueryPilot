@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from app.models import (
+    AirEpisode,
     Notification,
     QualityInfo,
     QuarkLink,
@@ -144,6 +145,7 @@ _MIGRATIONS = [
     ("subscriptions", "upgrade", "INTEGER NOT NULL DEFAULT 0"),
     ("subscriptions", "upgrade_to", "TEXT"),
     ("subscriptions", "versions", "TEXT"),
+    ("subscriptions", "schedule", "TEXT"),  # 播出日历（JSON）
 ]
 
 # 订阅 v2 的可编辑字段：Subscription 属性名 → 列名
@@ -401,6 +403,7 @@ class LinkStore:
             saved_episodes=json.loads(row["saved_episodes"] or "[]"), folder=row["folder"],
             upgrade=bool(row["upgrade"]), upgrade_to=row["upgrade_to"],
             versions={int(k): v for k, v in json.loads(row["versions"] or "{}").items()},
+            schedule=json.loads(row["schedule"] or "[]"),
         )
 
     def _list_subscriptions(self, client_id: str | None) -> list[tuple[str, Subscription]]:
@@ -654,6 +657,11 @@ class LinkStore:
         if bad:
             raise ValueError(f"不能修改的字段：{bad}")
         return await asyncio.to_thread(self._edit_subscription, client_id, sub_id, fields, state)
+
+    async def set_schedule(self, sub_id: int, schedule: list[AirEpisode]) -> None:
+        data = json.dumps([e.model_dump() for e in schedule], ensure_ascii=False)
+        await asyncio.to_thread(
+            self._exec, "UPDATE subscriptions SET schedule = ? WHERE id = ?", (data, sub_id))
 
     async def meta_due(self, sub_id: int, hours: float) -> bool:
         """距上次刷新元数据超过 `hours` 就返回 True 并记下这次刷新时间。"""

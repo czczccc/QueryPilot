@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 
 import httpx
 
+from app.models import AirEpisode
 from app.services.relevance import seasons_in
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,31 @@ async def search_tmdb(
     return [f for f in found if f and f.title]
 
 
+async def tmdb_season(
+    tv_id: str, season: int, api_key: str, client: httpx.AsyncClient,
+    base: str = TMDB_BASE, timeout: float = 8.0,
+) -> list[AirEpisode]:
+    """一季每集的播出日期（TMDB /tv/{id}/season/{n}，含还没播的集）。"""
+    headers, auth = _tmdb_auth(api_key)
+    resp = await client.get(
+        f"{(base or TMDB_BASE).rstrip('/')}/tv/{tv_id}/season/{season}",
+        params={**auth, "language": "zh-CN"}, headers=headers, timeout=timeout,
+    )
+    resp.raise_for_status()
+    out = []
+    for e in resp.json().get("episodes") or []:
+        if not isinstance(e, dict) or not isinstance(e.get("episode_number"), int):
+            continue
+        date = e.get("air_date")
+        out.append(AirEpisode(
+            episode=e["episode_number"],
+            air_date=date if isinstance(date, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", date)
+            else None,
+            name=e.get("name") if isinstance(e.get("name"), str) else None,
+        ))
+    return out
+
+
 # ---------------- 豆瓣 ----------------
 
 async def search_douban(
@@ -214,3 +240,17 @@ class MetadataLookup:
             self._cache.clear()
         self._cache[key] = found
         return found
+
+    async def schedule(self, tmdb_id: str, season: int) -> list[AirEpisode]:
+        """剧集一季的播出日历；没配 TMDB key（豆瓣没有每集日期）或查询失败时为空。"""
+        if not self._tmdb_key or not tmdb_id:
+            return []
+        client = self._client or httpx.AsyncClient(timeout=10.0, follow_redirects=True)
+        try:
+            return await tmdb_season(tmdb_id, season, self._tmdb_key, client, self._tmdb_base)
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning("播出日历查询失败（%s）", type(e).__name__)
+            return []
+        finally:
+            if self._client is None:
+                await client.aclose()
