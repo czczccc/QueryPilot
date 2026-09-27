@@ -116,6 +116,22 @@ def episode_key(name: str) -> str | None:
     return None
 
 
+def episode_no(name: str, season: int | None = None) -> int | None:
+    """文件名里的集号；文件名明确写了别的季（如订第 2 季遇到 S01E05）返回 None。"""
+    if not VIDEO_EXT.search(name):
+        return None
+    base = name.rsplit("/", 1)[-1]
+    for i, pat in enumerate(EP_PATTERNS):
+        m = pat.search(base)
+        if m:
+            if i == 0:
+                if season and int(m.group(1)) != season:
+                    return None
+                return int(m.group(2))
+            return int(m.group(1))
+    return None
+
+
 def safe_name(name: str) -> str:
     """网盘目录名：去掉非法字符，限长。"""
     return BAD_CHARS.sub(" ", name).strip(" .")[:60]

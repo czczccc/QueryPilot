@@ -87,7 +87,7 @@ def load_settings() -> Settings:
         tg_channels=_list("TG_CHANNELS"),
         tg_proxy=os.getenv("TG_PROXY", ""),
         extra_sites=_list("EXTRA_SITES"),
-        subscribe_interval_hours=_float("SUBSCRIBE_INTERVAL_HOURS", 12.0),
+        subscribe_interval_hours=_float("SUBSCRIBE_INTERVAL_HOURS", 6.0),
         notify_webhook=os.getenv("NOTIFY_WEBHOOK", ""),
         quark_cookie=os.getenv("QUARK_COOKIE", "").strip(),
         save_token=os.getenv("SAVE_TOKEN", "").strip(),

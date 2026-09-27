@@ -56,7 +56,7 @@ class Drive:
         return httpx.Response(404)
 
 
-def make(drive: Drive, episodes: int = 3):
+def make(drive: Drive, episodes: int = 3, **kwargs):
     store = LinkStore(":memory:")
     s = shares("ep", 1)
     tavily = ScriptedTavily({}, default=s)
@@ -66,7 +66,7 @@ def make(drive: Drive, episodes: int = 3):
         service=service, agent=SearchAgent(service), rate_limit_per_minute=1000,
         qr_login=FakeLogin(), cookie_box=CookieBox.from_secret("k"),
         quark_client=httpx.AsyncClient(transport=httpx.MockTransport(drive.handler)),
-        classifier=Classifier(),
+        classifier=Classifier(), **kwargs,
     )
     return app, store, files, s
 
@@ -221,7 +221,7 @@ async def test_subscribe_without_results_then_saved_when_found():
     store, tavily, watcher = setup(files, [])
     saved: list[str] = []
 
-    async def saver(client_id, sub, link):
+    async def saver(client_id, sub, link, wanted=None):
         saved.append(link.share)
         return [("auto_saved", "已转存", link.share)]
 
@@ -246,7 +246,7 @@ async def test_movie_saved_once_when_resolution_met_then_only_notify():
     store, _, watcher = setup(files, s)
     saved: list[str] = []
 
-    async def saver(client_id, sub, link):
+    async def saver(client_id, sub, link, wanted=None):
         saved.append(link.share)
         await store.log_auto_save(sub.id, link.share, True, 1, None, "已转存")
         return [("auto_saved", "已转存", link.share)]

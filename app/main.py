@@ -28,8 +28,8 @@ from app.config import load_settings
 from app.models import (
     AgentSearchResponse,
     AgentStep,
-    AutoSaveRequest,
     FeedbackRequest,
+    MediaCandidate,
     Notification,
     QuarkLink,
     QuarkSearchResponse,
@@ -38,21 +38,24 @@ from app.models import (
     SearchRequest,
     SubscribeRequest,
     Subscription,
+    SubscriptionHistory,
+    SubscriptionUpdate,
     UserPrefs,
 )
 from app.providers.tavily import TavilyProvider
 from app.security import RateLimiter, install_request_id_factory, set_request_id
 from app.services import llm
 from app.services.agent import SearchAgent
-from app.services.classify import Classifier
+from app.services.classify import Classifier, episode_no
 from app.services.cookie_box import CookieBox, session_hash
 from app.services.intent import DeepSeekParser
-from app.services.memory import LinkStore
+from app.services.memory import LinkStore, resource_key
 from app.services.metadata import MetadataLookup
 from app.services.quark_login import LoginError, QuarkQrLogin, qr_svg
 from app.services.quark_save import LoginExpiredError, QuarkSaver, SaveError
+from app.services.relevance import seasons_in
 from app.services.search import QuarkSearchService, SearchUnavailableError
-from app.services.subscriptions import SubscriptionWatcher
+from app.services.subscriptions import SubscriptionWatcher, strip_season
 from app.services.usage import SYSTEM, QuotaConfig, QuotaGuard, UsageStore
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -151,6 +154,8 @@ def create_app(
     invite_required: bool | None = None,
     invite_codes: tuple[str, ...] | None = None,
     admin_token: str | None = None,
+    media_lookup: MetadataLookup | None = None,
+    search_on_subscribe: bool | None = None,
 ) -> FastAPI:
     """创建应用；传入 service / agent 便于测试注入假实现。"""
     resolved = service or build_default_service()
@@ -226,14 +231,18 @@ def create_app(
     app.state.quota = quota
     # 一键转存：cookie 与口令都配置了才开启（测试可注入）
     # 转存自动分类：有 LLM key 用 LLM 判断，否则规则；SAVE_CLASSIFY=false 关闭
-    if classifier is None and service is None and _settings.save_classify:
-        classifier = Classifier(
-            api_key=_settings.deepseek_api_key,
-            lookup=MetadataLookup(
-                tmdb_key=_settings.tmdb_api_key, tmdb_base=_settings.tmdb_api_base,
-                douban=_settings.douban_lookup,
-            ),
+    # 影视条目识别（TMDB / 豆瓣）：订阅选条目、刷新总集数、转存分类共用
+    if media_lookup is None and service is None:
+        media_lookup = MetadataLookup(
+            tmdb_key=_settings.tmdb_api_key, tmdb_base=_settings.tmdb_api_base,
+            douban=_settings.douban_lookup,
         )
+    if watcher is not None:
+        watcher.lookup = media_lookup
+    if search_on_subscribe is None:
+        search_on_subscribe = service is None
+    if classifier is None and service is None and _settings.save_classify:
+        classifier = Classifier(api_key=_settings.deepseek_api_key, lookup=media_lookup)
     root_dir = _settings.save_root_dir if service is None else "QueryPilot"
     if saver is None and service is None and _settings.quark_cookie and _settings.save_token:
         saver = QuarkSaver(_settings.quark_cookie, _settings.quark_save_dir_fid,
@@ -352,11 +361,68 @@ def create_app(
         user = await _user_cookie(request)
         return f"u:{user[3]}" if user else client_id
 
+    @app.get("/api/media/search", response_model=list[MediaCandidate])
+    async def media_search(
+        q: str = Query(min_length=1, max_length=100), year: str | None = Query(None, max_length=4),
+        _: None = Depends(rate_limit_dep),
+    ) -> list[MediaCandidate]:
+        """订阅前选影视条目（TMDB 配了 key 才查，豆瓣无需 key）；都查不到返回空列表。"""
+        if media_lookup is None:
+            return []
+        infos = await media_lookup(strip_season(q.strip()), year)
+        return [MediaCandidate(**{k: getattr(i, k) for k in MediaCandidate.model_fields})
+                for i in infos if i.media]
+
+    async def _identify(req: SubscribeRequest) -> dict:
+        """订阅的条目信息：前端选好的优先，缺的用 TMDB / 豆瓣补；都没有就按关键词订阅。"""
+        f: dict = {k: getattr(req, k) for k in (
+            "media", "season", "year", "tmdb_id", "douban_id", "poster", "start_episode",
+            "resolution", "include", "exclude") if getattr(req, k) is not None}
+        if f.get("season") is None:
+            seasons = seasons_in(f"{req.resource} {req.query}")
+            if len(seasons) == 1:
+                f["season"] = min(seasons)
+        if media_lookup is not None:
+            name = strip_season(req.resource.strip())
+            infos = [i for i in await media_lookup(name, req.year) if i.media]
+            ids = {req.tmdb_id, req.douban_id} - {None}
+            if ids:
+                match = next((i for i in infos if i.id in ids), None)
+            else:  # 没选条目时只认片名对得上的，避免认错成别的片
+                key = resource_key(name)
+                match = next((i for i in infos if req.media in (None, i.media) and key in {
+                    resource_key(strip_season(t)) for t in (i.title, i.original_title or "")
+                }), None)
+            if match is not None:
+                f.setdefault("media", match.media)
+                f.setdefault("year", match.year)
+                f.setdefault("poster", match.poster)
+                f.setdefault(f"{match.source}_id", match.id)
+                if match.media == "tv":
+                    f.setdefault("season", 1)
+                    total = match.episodes.get(f["season"])
+                    if total:
+                        f["total_episodes"] = total
+        if f.get("media") == "tv":
+            f.setdefault("season", 1)
+        else:
+            f.pop("season", None)
+        if req.total_episodes:
+            f["total_episodes"], f["manual_total"] = req.total_episodes, True
+        return f
+
+    def _spawn_check(owner: str, sub: Subscription) -> None:
+        if _cooldown_ok(sub.id):
+            task = asyncio.create_task(_sync_check(owner, sub))
+            _bg_tasks.add(task)
+            task.add_done_callback(_bg_tasks.discard)
+
     @app.post("/api/subscriptions", response_model=Subscription)
     async def subscribe(
         req: SubscribeRequest, request: Request, _: None = Depends(rate_limit_dep)
     ) -> Subscription:
-        """订阅：之后定期重搜，有新集数或更高清版本时产生通知。开放扫码登录时需要先登录。"""
+        """订阅一部电影 / 一季剧集：之后定期重搜，有资源、新集、更高清时通知；
+        开了自动转存就把网盘缺的集存进去，集齐后订阅完成、移入订阅历史。开放扫码登录时需要先登录。"""
         store = _store_or_404()
         user = await _user_cookie(request)
         if login_enabled and user is None:
@@ -364,41 +430,120 @@ def create_app(
         if req.auto_save and user is None:
             raise HTTPException(status_code=401, detail="自动转存需要先扫码登录夸克")
         owner = f"u:{user[3]}" if user else req.client_id
-        baseline = await app.state.watcher.baseline(req.resource)
-        sub = await store.add_subscription(owner, req.query, req.resource, baseline)
+        fields = await _identify(req)
+        resource = req.resource.strip()
+        if fields.get("season", 1) > 1 and not seasons_in(resource):
+            resource = f"{resource} 第{fields['season']}季"
+        baseline = await app.state.watcher.baseline(resource)
+        sub = await store.add_subscription(
+            owner, req.query, resource, baseline, auto_save=req.auto_save, **fields
+        )
         if sub is None:
             raise HTTPException(status_code=409, detail="订阅数已达上限（20 个）")
-        if req.auto_save:
-            sub = await store.set_auto_save(owner, sub.id, True) or sub
-            if _cooldown_ok(sub.id):  # 立即在后台检查一次：已有资源就马上存
-                task = asyncio.create_task(_sync_check(owner, sub))
-                _bg_tasks.add(task)
-                task.add_done_callback(_bg_tasks.discard)
+        sub = await store.edit_subscription(owner, sub.id, state="new") or sub
+        if req.auto_save or search_on_subscribe:
+            _spawn_check(owner, sub)  # 立即在后台搜一次：已有资源就马上通知 / 转存
         return sub
 
     @app.get("/api/subscriptions", response_model=list[Subscription])
-    async def list_subscriptions(request: Request, client_id: str = ClientId) -> list[Subscription]:
+    async def list_subscriptions(
+        request: Request, client_id: str = ClientId,
+        media: str | None = Query(None, pattern="^(movie|tv)$"),
+    ) -> list[Subscription]:
         owner = await _owner(request, client_id)
-        return [sub for _, sub in await _store_or_404().list_subscriptions(owner)]
+        subs = [sub for _, sub in await _store_or_404().list_subscriptions(owner)]
+        return [x for x in subs if media is None or x.media == media]
 
     @app.patch("/api/subscriptions/{sub_id}", response_model=Subscription)
-    async def set_auto_save(
-        sub_id: int, req: AutoSaveRequest, request: Request, client_id: str = ClientId,
+    async def edit_subscription(
+        sub_id: int, req: SubscriptionUpdate, request: Request, client_id: str = ClientId,
     ) -> Subscription:
-        """打开 / 关闭订阅的自动转存：发现新集时直接存进自己的夸克网盘（需要扫码登录）。"""
+        """改订阅：自动转存开关、暂停 / 恢复、总集数与起始集、清晰度要求、包含 / 排除词。"""
         store = _store_or_404()
         user = await _user_cookie(request)
         if req.auto_save and user is None:
             raise HTTPException(status_code=401, detail="自动转存需要先扫码登录夸克")
         owner = await _owner(request, client_id)
-        sub = await store.set_auto_save(owner, sub_id, req.auto_save)
+        fields: dict = {}
+        if req.auto_save is not None:
+            fields["auto_save"] = req.auto_save
+        if req.total_episodes is not None:
+            fields["total_episodes"], fields["manual_total"] = req.total_episodes, True
+        if req.start_episode is not None:
+            fields["start_episode"] = req.start_episode
+        for k in ("resolution", "include", "exclude"):
+            v = getattr(req, k)
+            if v is not None:
+                fields[k] = v.strip() or None
+        state = None if req.paused is None else ("paused" if req.paused else "active")
+        sub = await store.edit_subscription(owner, sub_id, state=state, **fields)
         if sub is None:
             raise HTTPException(status_code=404, detail="订阅不存在")
-        if req.auto_save and _cooldown_ok(sub.id):
-            # 打开时立即在后台检查一次，把网盘里缺的现有集补齐
-            task = asyncio.create_task(_sync_check(owner, sub))
-            _bg_tasks.add(task)
-            task.add_done_callback(_bg_tasks.discard)
+        if sub.state != "paused" and (req.auto_save or req.paused is False):
+            # 打开自动转存 / 恢复订阅时立即在后台检查一次，把网盘里缺的集补齐
+            _spawn_check(owner, sub)
+        return sub
+
+    @app.post("/api/subscriptions/{sub_id}/complete", response_model=SubscriptionHistory)
+    async def complete_subscription(
+        sub_id: int, request: Request, client_id: str = ClientId
+    ) -> SubscriptionHistory:
+        """手动完成订阅（如电影已经满意了）：移入订阅历史，可重新订阅。"""
+        store = _store_or_404()
+        owner = await _owner(request, client_id)
+        sub = await store.get_subscription(owner, sub_id)
+        if sub is None:
+            raise HTTPException(status_code=404, detail="订阅不存在")
+        hid = await store.archive_subscription(owner, sub, "手动完成")
+        got = await store.get_history(owner, hid)
+        assert got is not None
+        return got[0]
+
+    @app.get("/api/subscriptions/history", response_model=list[SubscriptionHistory])
+    async def subscription_history(
+        request: Request, client_id: str = ClientId
+    ) -> list[SubscriptionHistory]:
+        """已完成的订阅（最近完成的在前）。"""
+        return await _store_or_404().subscription_history(await _owner(request, client_id))
+
+    @app.delete("/api/subscriptions/history/{hid}")
+    async def delete_history(hid: int, request: Request, client_id: str = ClientId) -> dict:
+        owner = await _owner(request, client_id)
+        if not await _store_or_404().delete_history(owner, hid):
+            raise HTTPException(status_code=404, detail="记录不存在")
+        return {"deleted": True}
+
+    @app.post("/api/subscriptions/history/{hid}/resubscribe", response_model=Subscription)
+    async def resubscribe(
+        hid: int, request: Request, client_id: str = ClientId,
+        _: None = Depends(rate_limit_dep),
+    ) -> Subscription:
+        """按历史里的设置重新订阅（如出了新一季想再追，可以之后再改季 / 集数）。"""
+        store = _store_or_404()
+        user = await _user_cookie(request)
+        if login_enabled and user is None:
+            raise HTTPException(status_code=401, detail="订阅追剧需要先扫码登录夸克")
+        owner = await _owner(request, client_id)
+        got = await store.get_history(owner, hid)
+        if got is None:
+            raise HTTPException(status_code=404, detail="记录不存在")
+        hist, data = got
+        fields = {k: v for k, v in data.items() if k in SubscriptionUpdate.model_fields
+                  or k in ("media", "season", "year", "tmdb_id", "douban_id", "poster",
+                           "total_episodes", "start_episode", "auto_save")}
+        fields.pop("paused", None)
+        if user is None:
+            fields["auto_save"] = False
+        sub = await store.add_subscription(
+            owner, hist.query, hist.resource, await app.state.watcher.baseline(hist.resource),
+            **{k: v for k, v in fields.items() if v is not None},
+        )
+        if sub is None:
+            raise HTTPException(status_code=409, detail="订阅数已达上限（20 个）")
+        await store.delete_history(owner, hid)
+        sub = await store.edit_subscription(owner, sub.id, state="new") or sub
+        if sub.auto_save or search_on_subscribe:
+            _spawn_check(owner, sub)
         return sub
 
     _bg_tasks: set[asyncio.Task] = set()
@@ -455,8 +600,13 @@ def create_app(
         """这个订阅最近的自动转存记录。"""
         return await _store_or_404().auto_save_log(await _owner(request, client_id), sub_id)
 
-    async def auto_save(owner: str, sub: Subscription, link: QuarkLink) -> list[tuple]:
-        """订阅检查发现新集时调用：用订阅者扫码登录的凭证只转存网盘里还没有的集。"""
+    async def auto_save(
+        owner: str, sub: Subscription, link: QuarkLink, wanted: set[int] | None = None
+    ) -> list[tuple]:
+        """订阅检查发现新集时调用：用订阅者扫码登录的凭证只转存网盘里还没有的集。
+
+        `wanted`：只要这些集号（订阅范围内缺的）；转存后按目标目录清点已有的集写回订阅。
+        """
         store = resolved.store
         if not (login_enabled and owner.startswith("u:")):
             return []
@@ -482,7 +632,11 @@ def create_app(
             allowed = (await quota.check(SYSTEM, SYSTEM, True)).reason != "site_budget"
         try:
             with llm.scope(allowed=allowed) as meter:
-                result = await saver.save(link.share, link.pwd, only_new=True)
+                keep = None
+                if wanted is not None:
+                    def keep(name: str) -> bool:
+                        return episode_no(name, sub.season) in wanted
+                result = await saver.save(link.share, link.pwd, only_new=True, keep=keep)
         except LoginExpiredError:
             await store.delete_account(account[0])
             return await pause("login_expired", expired)
@@ -496,6 +650,8 @@ def create_app(
         if sub.auto_save_status:
             sub.auto_save_status = None
             await store.set_auto_save_status(sub.id, None)
+        have = {episode_no(n, sub.season) for n in result.present} - {None}
+        sub.saved_episodes = sorted(set(sub.saved_episodes) | have)
         where = f"「{result.folder}」" if result.folder else "你的夸克网盘"
         if result.file_count == 0:
             message = f"{name}的新内容网盘里都已经有了，没有重复转存"
