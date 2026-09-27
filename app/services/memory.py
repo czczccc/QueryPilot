@@ -91,6 +91,7 @@ _MIGRATIONS = [
     ("links", "share_title", "TEXT"),
     ("links", "files_preview", "TEXT"),
     ("links", "copy_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("quark_accounts", "user_id", "TEXT"),
 ]
 
 _PUNCT_RE = re.compile(r"[\s\-_·:：,，.。!！?？'\"“”‘’()（）\[\]【】《》<>]+")
@@ -374,21 +375,24 @@ class LinkStore:
             )
             self._conn.commit()
 
-    def _put_account(self, sh: str, cookie_enc: bytes, nickname: str | None, now: float) -> None:
+    def _put_account(
+        self, sh: str, cookie_enc: bytes, nickname: str | None, user_id: str | None, now: float
+    ) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT INTO quark_accounts (session_hash, cookie_enc, nickname, created, "
-                "last_used) VALUES (?, ?, ?, ?, ?) ON CONFLICT(session_hash) DO UPDATE SET "
+                "INSERT INTO quark_accounts (session_hash, cookie_enc, nickname, user_id, created, "
+                "last_used) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_hash) DO UPDATE SET "
                 "cookie_enc = excluded.cookie_enc, nickname = excluded.nickname, "
-                "last_used = excluded.last_used",
-                (sh, cookie_enc, nickname, now, now),
+                "user_id = excluded.user_id, last_used = excluded.last_used",
+                (sh, cookie_enc, nickname, user_id, now, now),
             )
             self._conn.commit()
 
-    def _get_account(self, sh: str, now: float) -> tuple[bytes, str | None] | None:
+    def _get_account(self, sh: str, now: float) -> tuple[bytes, str | None, str | None] | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT cookie_enc, nickname FROM quark_accounts WHERE session_hash = ?", (sh,)
+                "SELECT cookie_enc, nickname, user_id FROM quark_accounts WHERE session_hash = ?",
+                (sh,),
             ).fetchone()
             if row is None:
                 return None
@@ -396,7 +400,7 @@ class LinkStore:
                 "UPDATE quark_accounts SET last_used = ? WHERE session_hash = ?", (now, sh)
             )
             self._conn.commit()
-        return bytes(row["cookie_enc"]), row["nickname"]
+        return bytes(row["cookie_enc"]), row["nickname"], row["user_id"]
 
     def _delete_account(self, sh: str) -> None:
         with self._lock:
@@ -475,11 +479,16 @@ class LinkStore:
     async def mark_read(self, client_id: str) -> None:
         await asyncio.to_thread(self._mark_read, client_id)
 
-    async def put_account(self, session_hash: str, cookie_enc: bytes, nickname: str | None) -> None:
-        """保存某个浏览器会话对应的夸克登录凭证（只存密文与会话哈希）。"""
-        await asyncio.to_thread(self._put_account, session_hash, cookie_enc, nickname, time.time())
+    async def put_account(
+        self, session_hash: str, cookie_enc: bytes, nickname: str | None, user_id: str | None = None
+    ) -> None:
+        """保存某个浏览器会话对应的夸克登录凭证（只存密文与会话哈希）及所属账号。"""
+        await asyncio.to_thread(
+            self._put_account, session_hash, cookie_enc, nickname, user_id, time.time()
+        )
 
-    async def get_account(self, session_hash: str) -> tuple[bytes, str | None] | None:
+    async def get_account(self, session_hash: str) -> tuple[bytes, str | None, str | None] | None:
+        """(加密凭证, 昵称, 账号 id)。"""
         return await asyncio.to_thread(self._get_account, session_hash, time.time())
 
     async def delete_account(self, session_hash: str) -> None:

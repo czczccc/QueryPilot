@@ -48,6 +48,9 @@ class Settings:
     user_daily_ai: int = 30  # 登录用户每天 AI 搜索次数
     site_daily_tokens: int = 1_000_000  # 全站每天 LLM token 预算，到顶全站降级
     search_cache_minutes: float = 60.0  # 同一句搜索多久内直接复用结果
+    anon_daily_searches: int = 10  # 未登录每天搜索总次数，用完要求扫码登录（关闭扫码登录时不生效）
+    invite_required: bool = False  # 新用户扫码登录需要邀请码
+    invite_codes: tuple[str, ...] = field(default=(), repr=False)  # .env 里的固定邀请码（可多次使用）
     trust_proxy: bool = False  # 部署在 Nginx 等反代后面时开启，按 X-Forwarded-For 取真实 IP
     extra: dict = field(default_factory=dict)
 
@@ -101,5 +104,8 @@ def load_settings() -> Settings:
         user_daily_ai=_int("USER_DAILY_AI_SEARCHES", 30),
         site_daily_tokens=_int("SITE_DAILY_TOKEN_BUDGET", 1_000_000),
         search_cache_minutes=_float("SEARCH_CACHE_MINUTES", 60.0),
+        anon_daily_searches=_int("ANON_DAILY_SEARCHES", 10),
+        invite_required=os.getenv("INVITE_REQUIRED", "false").strip().lower() in ("1", "true", "yes"),
+        invite_codes=_list("INVITE_CODES"),
         trust_proxy=os.getenv("TRUST_PROXY", "false").strip().lower() in ("1", "true", "yes"),
     )
