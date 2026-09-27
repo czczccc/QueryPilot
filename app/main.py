@@ -52,12 +52,13 @@ from app.services.cookie_box import CookieBox, session_hash
 from app.services.intent import DeepSeekParser
 from app.services.memory import LinkStore, resource_key
 from app.services.metadata import MetadataLookup
-from app.services.organize import TidyPlan, kind_of, plan_tidy
+from app.services.organize import TidyPlan, file_resolution, kind_of, plan_tidy
+from app.services.quality import RESOLUTION_RANK
 from app.services.quark_login import LoginError, QuarkQrLogin, qr_svg
 from app.services.quark_save import LoginExpiredError, QuarkSaver, SaveError, Tidy
 from app.services.relevance import seasons_in
 from app.services.search import QuarkSearchService, SearchUnavailableError
-from app.services.subscriptions import SubscriptionWatcher, strip_season
+from app.services.subscriptions import RES_TEXT, SubscriptionWatcher, strip_season
 from app.services.usage import SYSTEM, QuotaConfig, QuotaGuard, UsageStore
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -381,7 +382,9 @@ def create_app(
         """订阅的条目信息：前端选好的优先，缺的用 TMDB / 豆瓣补；都没有就按关键词订阅。"""
         f: dict = {k: getattr(req, k) for k in (
             "media", "season", "year", "tmdb_id", "douban_id", "poster", "start_episode",
-            "resolution", "include", "exclude") if getattr(req, k) is not None}
+            "resolution", "include", "exclude", "upgrade_to") if getattr(req, k) is not None}
+        if req.upgrade:
+            f["upgrade"] = True
         if f.get("season") is None:
             seasons = seasons_in(f"{req.resource} {req.query}")
             if len(seasons) == 1:
@@ -475,15 +478,17 @@ def create_app(
             fields["total_episodes"], fields["manual_total"] = req.total_episodes, True
         if req.start_episode is not None:
             fields["start_episode"] = req.start_episode
-        for k in ("resolution", "include", "exclude"):
+        for k in ("resolution", "include", "exclude", "upgrade_to"):
             v = getattr(req, k)
             if v is not None:
                 fields[k] = v.strip() or None
+        if req.upgrade is not None:
+            fields["upgrade"] = req.upgrade
         state = None if req.paused is None else ("paused" if req.paused else "active")
         sub = await store.edit_subscription(owner, sub_id, state=state, **fields)
         if sub is None:
             raise HTTPException(status_code=404, detail="订阅不存在")
-        if sub.state != "paused" and (req.auto_save or req.paused is False):
+        if sub.state != "paused" and (req.auto_save or req.paused is False or req.upgrade):
             # 打开自动转存 / 恢复订阅时立即在后台检查一次，把网盘里缺的集补齐
             _spawn_check(owner, sub)
         return sub
@@ -702,14 +707,19 @@ def create_app(
                     sub.saved_episodes = sorted(
                         set(sub.saved_episodes) | await _legacy_episodes(saver, sub, old))
                 saved = set(sub.saved_episodes)
+                if movie:  # 电影「之前已存」= 以前自动转存成功过
+                    saved = {0} if await store.has_auto_saved(sub.id) else set()
+                better = sub.upgradable(movie)  # 洗版：还能升级的已存集
 
                 def keep(file_name: str) -> bool:
                     if movie:
                         return True
                     ep = episode_no(file_name, sub.season, any_ext=True)
-                    return ep not in saved and (wanted is None or ep in wanted)
+                    return (ep not in saved or ep in better) and (wanted is None or ep in wanted)
 
-                tidy = Tidy(strip_season(sub.resource), movie, sub.season, sub.year)
+                default_res = link.quality.resolution if link.quality else None
+                tidy = Tidy(strip_season(sub.resource), movie, sub.season, sub.year,
+                            better=better, default_res=default_res)
                 result = await saver.save(link.share, link.pwd, to_path=folder, only_new=True,
                                           keep=keep, tidy=tidy)
         except LoginExpiredError:
@@ -728,7 +738,16 @@ def create_app(
         have = {episode_no(n, sub.season, any_ext=True) for n in result.present
                 if kind_of(n) in ("video", "archive")} - {None}
         sub.saved_episodes = sorted(set(sub.saved_episodes) | have)
+        upgraded = _record_versions(sub, movie, result.saved, default_res, saved)
         where = f"「{result.folder}」" if result.folder else "你的夸克网盘"
+        if upgraded:
+            label = RES_TEXT.get(upgraded[1], upgraded[1])
+            which = "" if movie else "第 " + "、".join(map(str, upgraded[0])) + " 集"
+            message = (f"{name}{which}换成了更高清的 {label} 版本，存在{where}；旧版本还在，"
+                       f"可以在「整理」里确认删除")
+            await store.log_auto_save(sub.id, link.share, True, result.file_count,
+                                      result.folder, message)
+            return [("upgraded", message, link.share)]
         if result.file_count == 0:
             message = f"{name}的新内容网盘里都已经有了，没有重复转存"
         else:
@@ -737,6 +756,29 @@ def create_app(
         await store.log_auto_save(sub.id, link.share, True, result.file_count, result.folder,
                                   message)
         return [("auto_saved", message, link.share)] if result.file_count else []
+
+    def _record_versions(
+        sub: Subscription, movie: bool, names: list[str], default_res: str | None,
+        before: set[int],
+    ) -> tuple[list[int], str] | None:
+        """记下这次存的各集清晰度；有集是洗版换的（之前就有）时返回 (集号, 新清晰度)。"""
+        upgraded: list[int] = []
+        best = ""
+        for n in names:
+            if kind_of(n) not in ("video", "archive"):
+                continue
+            ep = 0 if movie else episode_no(n, sub.season, any_ext=True)
+            res = file_resolution(n, default_res)
+            if ep is None or res is None:
+                continue
+            old = sub.versions.get(ep)
+            if RESOLUTION_RANK[res] <= RESOLUTION_RANK.get(old or "", 0):
+                continue
+            sub.versions[ep] = res
+            if ep in before:
+                upgraded.append(ep)
+            best = max(best, res, key=lambda r: RESOLUTION_RANK.get(r, 0))
+        return (sorted(upgraded), best) if upgraded else None
 
     async def _tidy_plan(owner: str, sub: Subscription) -> tuple[QuarkSaver, dict, TidyPlan]:
         got = await _account_saver(owner)

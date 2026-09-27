@@ -67,6 +67,22 @@ def standard_name(title: str, ext: str, season: int | None = None,
     return f"{base} ({year}){ext}" if year else f"{base}{ext}"
 
 
+_VERSION_TAG = re.compile(r" (?:2160p|1080p|720p|SD)(?=\.[^.]+$)")
+
+
+def file_resolution(name: str, default: str | None = None) -> str | None:
+    """文件名里的清晰度；文件名没写时用分享整体识别出的（`default`）。"""
+    return required_resolution(name) or default
+
+
+def versioned_name(name: str, res: str | None) -> str:
+    """标准名被旧版本占着时（洗版存了新版本），在扩展名前加清晰度：「片名 S01E06 2160p.mkv」。"""
+    if not res:
+        return name
+    stem, dot, ext = name.rpartition(".")
+    return f"{stem} {res}.{ext}" if dot else f"{name} {res}"
+
+
 def pick_files(
     files: list[dict], movie: bool, season: int | None = None,
 ) -> tuple[list[dict], list[dict]]:
@@ -124,7 +140,8 @@ def plan_tidy(
         name = f["file_name"]
         ep = None if movie else episode_no(name, season, any_ext=True)
         to_name = standard_name(title, _suffix(name), season, ep, year)
-        if f["folder"] != target or to_name != name:
+        # 洗版存的「片名 S01E06 2160p.mkv」已经是标准名，不再改
+        if f["folder"] != target or _VERSION_TAG.sub("", name) != to_name:
             plan.moves.append({"fid": f["fid"], "name": name, "from": f["folder"],
                                "to_name": to_name, "size": f.get("size") or 0})
     for f in rest:

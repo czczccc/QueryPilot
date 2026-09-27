@@ -20,7 +20,15 @@ from dataclasses import dataclass, field
 import httpx
 
 from app.services.classify import decide_folder, episode_key, episode_no
-from app.services.organize import _suffix, kind_of, pick_files, standard_name
+from app.services.organize import (
+    _suffix,
+    file_resolution,
+    kind_of,
+    pick_files,
+    standard_name,
+    versioned_name,
+)
+from app.services.quality import RESOLUTION_RANK
 from app.services.quark import DETAIL_URL, TOKEN_URL, UA
 
 logger = logging.getLogger(__name__)
@@ -65,6 +73,9 @@ class Tidy:
     season: int | None = None
     year: str | None = None
     rename: bool = True
+    # 洗版：{集号: 已存版本的清晰度等级}（电影用 0）。网盘里已有的集，只有新文件清晰度更高才再存
+    better: dict[int, int] = field(default_factory=dict)
+    default_res: str | None = None  # 文件名没写清晰度时用分享整体的
 
 
 @dataclass
@@ -79,6 +90,7 @@ class SaveResult:
     skipped: int = 0  # only_new 时因为网盘里已有同一集而跳过的文件数
     # only_new 时：转存后目标目录里应有的文件名（原有的 + 这次存的），用来清点已有哪些集
     present: list[str] = field(default_factory=list)
+    saved: list[str] = field(default_factory=list)  # 这次存的文件（原文件名）
 
 
 class QuarkSaver:
@@ -217,12 +229,18 @@ class QuarkSaver:
                     return False
                 if tidy is None:
                     return (episode_key(name) or "") not in have_eps
-                if tidy.movie:  # 电影目录里已经有视频了：不重复存
-                    return not any(kind_of(n) == "video" for n in have_names)
+                rank = RESOLUTION_RANK.get(file_resolution(name, tidy.default_res) or "", 0)
+                if tidy.movie:  # 电影目录里已经有视频了：不重复存（洗版且更清晰时除外）
+                    if not any(kind_of(n) == "video" for n in have_names):
+                        return True
+                    return 0 in tidy.better and rank > tidy.better[0]
                 # 按集号比（重命名过的「片名 S01E06」、压缩包也认得出）
                 have = {episode_no(n, tidy.season, any_ext=True) for n in have_names
                         if kind_of(n) in ("video", "archive")}
-                return episode_no(name, tidy.season, any_ext=True) not in have - {None}
+                ep = episode_no(name, tidy.season, any_ext=True)
+                if ep not in have - {None}:
+                    return True
+                return ep in tidy.better and rank > tidy.better[ep]
 
             fresh = [f for f in items if is_new(f)]
             skipped = len(items) - len(fresh)
@@ -261,7 +279,7 @@ class QuarkSaver:
         if tidy is not None and tidy.rename and done:
             await self._rename_saved(to_fid, items, tidy, headers)
         return SaveResult(task_id, len(items), title, done, folder, category, basis, skipped,
-                          present)
+                          present, [str(f.get("file_name") or "") for f in items])
 
     async def _wait_task(self, task_id: str, headers: dict) -> bool:
         for i in range(self._poll_times):
@@ -306,6 +324,8 @@ class QuarkSaver:
                     continue
                 ep = None if tidy.movie else episode_no(name, tidy.season, any_ext=True)
                 new = standard_name(tidy.title, _suffix(name), tidy.season, ep, tidy.year)
+                if new in taken:  # 洗版：旧版本占着标准名，新版本带上清晰度
+                    new = versioned_name(new, file_resolution(name, tidy.default_res))
                 if new == name or new in taken:
                     continue
                 await self.rename(str(got["fid"]), new, headers)
