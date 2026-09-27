@@ -7,7 +7,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.services.classify import Category, Classifier, classify_rules, safe_name
+from app.services.classify import (
+    Category,
+    Classifier,
+    classify_rules,
+    decide_folder,
+    safe_name,
+)
 from app.services.quark_save import QuarkSaver
 from tests.test_agent import ScriptedTavily, make_service, quark_client, shares
 
@@ -123,6 +129,25 @@ async def test_saver_reuses_existing_folder_and_falls_back():
                    classifier=Classifier(), poll_interval=0)
     result = await s.save("abcdef123456")
     assert (result.folder, _save_target(seen)) == (None, "dflt")
+
+
+async def test_explicit_path_skips_classifier():
+    seen: list = []
+
+    async def boom(title, files):
+        raise AssertionError("指定路径时不应分类")
+
+    saver = QuarkSaver("c", client=drive_with_dirs({"/我的/剧": "fx"}, seen), poll_interval=0,
+                       classifier=boom)
+    res = await saver.save("abc", to_path="/我的/剧")
+    assert (res.folder, res.category, _save_target(seen)) == ("/我的/剧", None, "fx")
+
+
+async def test_decide_folder_is_backend_independent():
+    place = await decide_folder(Classifier(), "漫长的季节 (2023)",
+                                [f"E{i:02d}.mkv" for i in range(1, 13)], "根")
+    assert (place.path, place.label, place.basis) == (
+        "/根/电视剧/国产剧/漫长的季节 (2023)", "国产剧", "文件名规则（未查到影视资料）")
 
 
 async def test_no_classifier_keeps_old_behavior():

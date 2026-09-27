@@ -240,3 +240,21 @@ class Classifier:
         if metas:
             return classify_meta(metas[0])
         return classify_rules(title, files)
+
+
+@dataclass
+class Placement:
+    """分类的最终输出：转存后端只需要 `path`（网盘里的目标目录），其余字段给用户展示。"""
+
+    path: str  # 如 /QueryPilot/电视剧/国产剧/漫长的季节 (2023)
+    label: str  # 如「国产剧」「欧美电影」
+    basis: str  # 如「TMDB + 豆瓣 + LLM」
+    category: Category
+
+
+async def decide_folder(
+    classifier, title: str, files: list[str], root: str = "QueryPilot"
+) -> Placement:
+    """独立于任何转存后端：由分享标题和文件名得出目标目录路径。"""
+    cat = await classifier(title, files)
+    return Placement(cat.folder(root), cat.label(), cat.basis(), cat)

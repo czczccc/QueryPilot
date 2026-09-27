@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from app.services.classify import decide_folder
 from app.services.quark import DETAIL_URL, TOKEN_URL, UA
 
 logger = logging.getLogger(__name__)
@@ -101,10 +102,13 @@ class QuarkSaver:
             raise SaveError(ERROR_TEXT.get(code, f"{default}（夸克错误码 {code}）"))
         return body.get("data") or {}
 
-    async def save(self, share_id: str, pwd: str | None = None) -> SaveResult:
+    async def save(
+        self, share_id: str, pwd: str | None = None, to_path: str | None = None
+    ) -> SaveResult:
+        """`to_path`：指定网盘目标目录路径（不存在就创建），给出时跳过自动分类。"""
         headers = self._headers(share_id)
         try:
-            return await self._save(share_id, pwd, headers)
+            return await self._save(share_id, pwd, headers, to_path)
         except httpx.HTTPError as e:
             # 只记录异常类型，不记录请求（请求头里有 cookie）
             logger.warning("转存请求失败 share=%s error=%s", share_id, type(e).__name__)
@@ -112,7 +116,9 @@ class QuarkSaver:
         except ValueError:
             raise SaveError("夸克返回了无法解析的内容") from None
 
-    async def _save(self, share_id: str, pwd: str | None, headers: dict) -> SaveResult:
+    async def _save(
+        self, share_id: str, pwd: str | None, headers: dict, to_path: str | None = None
+    ) -> SaveResult:
         # 1) 分享页 token
         resp = await self._client.post(
             TOKEN_URL,
@@ -143,18 +149,23 @@ class QuarkSaver:
         title = (data.get("share") or {}).get("title")
         title = title if isinstance(title, str) else None
 
-        # 3) 自动分类：决定存到哪个目录（失败就存到默认目录）
+        # 3) 目标目录：指定路径优先，否则自动分类（失败就存到默认目录）
         to_fid, folder, category, basis = self._to_pdir_fid, None, None, None
-        if self._classifier is not None:
-            names = await self._file_names(share_id, stoken, items, headers)
-            cat = await self._classifier(title or (names[0] if names else share_id), names)
-            try:
-                to_fid = await self._ensure_dir(cat.folder(self._root_dir), headers)
-                folder, category, basis = cat.folder(self._root_dir), cat.label(), cat.basis()
-            except LoginExpiredError:
-                raise
-            except (SaveError, httpx.HTTPError, ValueError, KeyError) as e:
-                logger.warning("自动分类建目录失败（%s），存到默认目录", type(e).__name__)
+        try:
+            if to_path:
+                to_fid, folder = await self._ensure_dir(to_path, headers), to_path
+            elif self._classifier is not None:
+                names = await self._file_names(share_id, stoken, items, headers)
+                place = await decide_folder(
+                    self._classifier, title or (names[0] if names else share_id), names,
+                    self._root_dir,
+                )
+                to_fid = await self._ensure_dir(place.path, headers)
+                folder, category, basis = place.path, place.label, place.basis
+        except LoginExpiredError:
+            raise
+        except (SaveError, httpx.HTTPError, ValueError, KeyError) as e:
+            logger.warning("目标目录准备失败（%s），存到默认目录", type(e).__name__)
 
         # 4) 提交转存任务
         resp = await self._client.post(
