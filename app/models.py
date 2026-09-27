@@ -16,6 +16,7 @@ class SearchRequest(BaseModel):
     query: str = Field(min_length=2, max_length=200)
     refresh: bool = False  # True 时忽略记忆快速返回，强制全网重新搜索
     client_id: str | None = Field(default=None, max_length=64)  # 浏览器标识，用于读取偏好
+    session_id: str | None = Field(default=None, max_length=64)  # 追问：上一轮的会话标识
 
 
 class RawSearchResult(BaseModel):
@@ -139,6 +140,10 @@ class AgentSearchResponse(QuarkSearchResponse):
     stop_reason: str = ""
     required_resolution: str | None = None
     matching_count: int = 0  # 满足清晰度要求的有效链接数
+    session_id: str = ""  # 用于追问的会话标识
+    history: list[str] = Field(default_factory=list)  # 本会话里用户说过的话
+    followup: dict | None = None  # 对追问的解释（首轮为空）
+    filters: dict = Field(default_factory=dict)  # 当前生效的条件：季数/清晰度/字幕/HDR
 
 
 class UserPrefs(BaseModel):

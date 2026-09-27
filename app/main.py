@@ -227,11 +227,14 @@ def create_app(
         query: str,
         refresh: bool = False,
         client_id: str | None = None,
+        session_id: str | None = None,
         _: None = Depends(rate_limit_dep),
     ) -> StreamingResponse:
         """SSE 流式 agent 搜索：每完成一步推送 `step` 事件，最后推送 `result`。"""
         try:
-            req = SearchRequest(query=query, refresh=refresh, client_id=client_id)
+            req = SearchRequest(
+                query=query, refresh=refresh, client_id=client_id, session_id=session_id
+            )
         except ValueError:
             raise HTTPException(status_code=422, detail="输入长度需为 2–200 个字符")
 
