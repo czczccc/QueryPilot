@@ -38,7 +38,7 @@ from app.services.quark import (
     verify_quark_files,
 )
 from app.services.relevance import build_target, judge
-from app.services.sources import search_sites, search_telegram
+from app.services.sources import search_pansou, search_sites, search_telegram
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,15 @@ class QuarkSearchService:
         tg_channels: list[str] | tuple[str, ...] = (),
         tg_client: httpx.AsyncClient | None = None,
         extra_sites: list[str] | tuple[str, ...] = (),
+        pansou_url: str = "",
+        pansou_token: str = "",
+        pansou_timeout: float = 6.0,
+        pansou_src: str = "plugin",
     ) -> None:
+        self._pansou_url = pansou_url.strip()
+        self._pansou_src = pansou_src if pansou_src in ("plugin", "tg", "all") else "plugin"
+        self._pansou_token = pansou_token
+        self._pansou_timeout = pansou_timeout
         self._parser = parser
         self._store = store
         self._tg_channels = list(tg_channels)
@@ -128,7 +136,13 @@ class QuarkSearchService:
             providers["telegram"] = ProviderStatus(name="telegram")
         if self._extra_sites:
             providers["sites"] = ProviderStatus(name="sites")
+        if self._pansou_url:
+            providers["pansou"] = ProviderStatus(name="pansou")
         return providers
+
+    @property
+    def pansou_enabled(self) -> bool:
+        return bool(self._pansou_url)
 
     async def recall(self, key: str) -> list[QuarkLink]:
         return await self._store.recall(key) if self._store else []
@@ -172,7 +186,7 @@ class QuarkSearchService:
                 status.status = "skipped"
         else:
             links = await self.collect(
-                parsed.search_suggestions, parsed.resource, providers
+                parsed.search_suggestions, parsed.resource, providers, pansou=True
             )
             if (
                 not links
@@ -218,10 +232,14 @@ class QuarkSearchService:
         keyword: str,
         providers: dict[str, ProviderStatus],
         keyword_engines: bool = True,
+        pansou: bool = False,
+        tavily: bool = True,
     ) -> list[QuarkLink]:
-        """各引擎并发召回：Tavily 用 `queries`，云搜/Bing/Telegram/资源站用 `keyword`。
+        """各引擎并发召回：Tavily 用 `queries`，云搜/Bing/Telegram/资源站/PanSou 用 `keyword`。
 
-        `keyword_engines=False` 时只跑 Tavily（关键词和上一轮相同，按关键词搜的引擎结果不会变）。
+        `keyword_engines=False` 时不跑云搜/Bing/Telegram/资源站（关键词和上一轮相同，结果不会变）。
+        `pansou`：同时查 PanSou（agent 里它是单独的工具 `pansou_search`，这里默认不查）。
+        `tavily=False`：不跑 Tavily（只查 PanSou 时用）。
         单引擎失败只标记状态，不中断整体。
         """
 
@@ -240,9 +258,15 @@ class QuarkSearchService:
         async def run_sites() -> list[QuarkLink]:
             return await search_sites(keyword, self._extra_sites, self._client)
 
-        engines: list[tuple[str, Callable[[], Awaitable[list[QuarkLink]]]]] = [
-            ("tavily", run_tavily)
-        ]
+        async def run_pansou() -> list[QuarkLink]:
+            return await search_pansou(
+                keyword, self._pansou_url, self._client, self._pansou_timeout,
+                self._pansou_token, src=self._pansou_src,
+            )
+
+        engines: list[tuple[str, Callable[[], Awaitable[list[QuarkLink]]]]] = (
+            [("tavily", run_tavily)] if tavily else []
+        )
         for name, fn in (
             ("qkyunso", run_qkyunso),
             ("bing", run_bing),
@@ -251,6 +275,8 @@ class QuarkSearchService:
         ):
             if keyword_engines and name in providers:
                 engines.append((name, fn))
+        if pansou and "pansou" in providers:  # 放最后：同一分享码优先保留自有来源的标注
+            engines.append(("pansou", run_pansou))
 
         async def guarded(
             name: str, fn: Callable[[], Awaitable[list[QuarkLink]]]

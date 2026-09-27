@@ -110,6 +110,10 @@ def build_default_service() -> QuarkSearchService:
             timeout=10.0, proxy=_settings.tg_proxy, follow_redirects=True
         ) if _settings.tg_proxy else None,
         extra_sites=_settings.extra_sites,
+        pansou_url=_settings.pansou_url,
+        pansou_token=_settings.pansou_token,
+        pansou_timeout=_settings.pansou_timeout,
+        pansou_src=_settings.pansou_src,
     )
 
 
