@@ -921,9 +921,15 @@ function subProgress(sub) {
   const box = el("div", "sub-progress");
   if (sub.media === "movie") {
     const got = sub.saved_episodes && sub.saved_episodes.length;
-    const res = RES_LABEL[sub.best_resolution];
-    box.appendChild(el("span", "sub-progress-text", got ? "已存进网盘" + (res ? "（" + res + "）" : "")
-      : res ? "已有资源，最高 " + res : "等待资源"));
+    const savedRes = (sub.versions || {})["0"];
+    const res = RES_LABEL[got && savedRes ? savedRes : sub.best_resolution];
+    const text = el("span", "sub-progress-text", got ? "已存进网盘" + (res ? "（" + res + "）" : "")
+      : res ? "已有资源，最高 " + res : "等待资源");
+    const goal = sub.upgrade_to || "2160p";
+    if (got && sub.upgrade && savedRes && RES_RANK[savedRes] < RES_RANK[goal]) {
+      text.appendChild(el("span", "sub-lack", "　等 " + RES_LABEL[goal] + " 版本"));
+    }
+    box.appendChild(text);
     return box;
   }
   const total = sub.total_episodes;
@@ -947,6 +953,30 @@ function subProgress(sub) {
   text.append(el("b", "", "已存 " + done + " / " + range), " 集");
   if (lack.length && lack.length < range) text.append(el("span", "sub-lack", "　缺 " + episodeRanges(lack)));
   box.append(bar, text);
+  return box;
+}
+
+// 每集已存的清晰度：一集一个小格子；开了洗版时没达到目标的标黄
+function versionStrip(sub) {
+  const versions = sub.versions || {};
+  const goal = RES_RANK[sub.upgrade_to || "2160p"];
+  const below = (res) => sub.upgrade && res && RES_RANK[res] < goal;
+  if (sub.media === "movie") return null; // 电影的清晰度写在进度那一行
+  const total = sub.total_episodes;
+  const saved = new Set(sub.saved_episodes || []);
+  if (!total || !saved.size || total - sub.start_episode + 1 > 60) return null;
+  const box = el("div", "ep-strip");
+  box.setAttribute("aria-label", "每集已存的清晰度");
+  for (let e = sub.start_episode; e <= total; e++) {
+    const res = versions[String(e)];
+    const has = saved.has(e);
+    const chip = el("span", "ep-chip" + (!has ? " missing" : below(res) ? " below" : " saved"));
+    chip.appendChild(el("b", "", String(e)));
+    if (has) chip.appendChild(el("span", "ep-res", res ? RES_LABEL[res] || res : "?"));
+    chip.title = "第 " + e + " 集：" + (!has ? "还没存" : res ? "已存 " + (RES_LABEL[res] || res) : "已存，认不出清晰度") +
+      (below(res) ? "，等更高清的版本" : "");
+    box.appendChild(chip);
+  }
   return box;
 }
 
@@ -1023,13 +1053,36 @@ const SUB_RULES = [
   { key: "start_episode", label: "从第几集开始", type: "number", tvOnly: true, min: 1 },
   { key: "total_episodes", label: "总集数", type: "number", tvOnly: true, min: 1,
     hint: (sub) => (sub.manual_total ? "手动设置" : sub.total_episodes ? "自动获取，可改" : "未知，可手动填") },
+  // 洗版：只在订阅设置里改，需要先开自动转存
+  { key: "upgrade", label: "洗版", type: "switch", editOnly: true, text: "出更高清的就换一份",
+    disabled: (sub) => !sub.auto_save,
+    hint: (sub) => (sub.auto_save ? "旧版本不会自动删，可在「整理网盘目录」里确认删除" : "需要先打开自动转存") },
+  { key: "upgrade_to", label: "洗版目标", type: "select", editOnly: true, empty: "2160p",
+    options: [["2160p", "4K"], ["1080p", "1080p"], ["720p", "720p"]],
+    disabled: (sub) => !sub.auto_save },
 ];
 
+// 字段当前值：没设置时用规则的默认值（如洗版目标默认 4K）
+function ruleValue(rule, sub) {
+  const cur = sub ? sub[rule.key] : null;
+  if (rule.type === "switch") return !!cur;
+  return cur == null || cur === "" ? (rule.empty || "") : String(cur);
+}
+
 function ruleField(rule, sub) {
-  const wrap = el("label", "field");
+  const wrap = el(rule.type === "switch" ? "div" : "label", "field");
   wrap.appendChild(el("span", "field-label", rule.label));
   let input;
-  if (rule.type === "select") {
+  if (rule.type === "switch") {
+    const sw = el("label", "switch small");
+    input = el("input");
+    input.type = "checkbox";
+    input.checked = ruleValue(rule, sub);
+    const track = el("span", "switch-track");
+    track.setAttribute("aria-hidden", "true");
+    sw.append(input, track, rule.text || "");
+    wrap.appendChild(sw);
+  } else if (rule.type === "select") {
     input = el("select");
     rule.options.forEach(([v, t]) => {
       const o = el("option", "", t);
@@ -1044,10 +1097,15 @@ function ruleField(rule, sub) {
     if (rule.min) input.min = String(rule.min);
     if (rule.type === "number") input.inputMode = "numeric";
   }
-  const cur = sub ? sub[rule.key] : null;
-  input.value = cur == null ? "" : String(cur);
+  if (rule.type !== "switch") {
+    input.value = ruleValue(rule, sub);
+    wrap.appendChild(input);
+  }
   input.dataset.key = rule.key;
-  wrap.appendChild(input);
+  if (rule.disabled && sub && rule.disabled(sub)) {
+    input.disabled = true;
+    wrap.classList.add("is-disabled");
+  }
   if (rule.hint && sub) wrap.appendChild(el("span", "field-hint", rule.hint(sub)));
   return wrap;
 }
@@ -1057,8 +1115,13 @@ function readRules(container, sub) {
   const out = {};
   container.querySelectorAll("[data-key]").forEach((input) => {
     const rule = SUB_RULES.find((r) => r.key === input.dataset.key);
+    if (input.disabled) return;
+    if (rule.type === "switch") {
+      if (input.checked !== ruleValue(rule, sub)) out[rule.key] = input.checked;
+      return;
+    }
     const raw = input.value.trim();
-    const before = sub && sub[rule.key] != null ? String(sub[rule.key]) : "";
+    const before = ruleValue(rule, sub);
     if (raw === before) return;
     if (rule.type === "number") {
       const n = parseInt(raw, 10);
@@ -1074,6 +1137,17 @@ function subEditor(sub) {
   const panel = el("div", "sub-edit");
   const grid = el("div", "sub-edit-grid");
   SUB_RULES.filter((r) => !r.tvOnly || sub.media !== "movie").forEach((r) => grid.appendChild(ruleField(r, sub)));
+  // 洗版目标只在洗版打开时可选
+  const upSw = grid.querySelector('[data-key="upgrade"]');
+  const upTo = grid.querySelector('[data-key="upgrade_to"]');
+  if (upSw && upTo && !upSw.disabled) {
+    const sync = () => {
+      upTo.disabled = !upSw.checked;
+      upTo.closest(".field").classList.toggle("is-disabled", !upSw.checked);
+    };
+    upSw.addEventListener("change", sync);
+    sync();
+  }
   const save = el("button", "primary-btn small", "保存规则");
   save.type = "button";
   save.addEventListener("click", async () => {
@@ -1082,7 +1156,12 @@ function subEditor(sub) {
     save.disabled = true;
     const res = await subApi("/" + sub.id, "PATCH", patch).catch(() => ({ ok: false, body: {} }));
     save.disabled = false;
-    if (res.ok) { toast("已保存《" + sub.resource + "》的规则", "ok"); loadSubs(); }
+    if (res.ok) {
+      toast(patch.upgrade ? "已开启《" + sub.resource + "》洗版，正在后台检查一次更高清的版本"
+        : "已保存《" + sub.resource + "》的规则", "ok", patch.upgrade ? 4000 : 2200);
+      loadSubs();
+      if (patch.upgrade) setTimeout(loadSubs, 45000);
+    }
     else toast(res.body.detail || "保存失败", "error");
   });
 
@@ -1255,7 +1334,8 @@ function openOrganizeDialog(sub) {
     }
     if (plan.deletes.length) {
       const g = tidyGroup("建议删除", plan.deletes.length, "is-delete");
-      g.sec.appendChild(el("p", "tidy-note", "默认都不删。确认不需要的请逐个勾选，删除的文件会进夸克回收站，可以恢复。"));
+      g.sec.appendChild(el("p", "tidy-note", (sub.upgrade ? "洗版换下来的旧版本也列在这里。" : "") +
+        "默认都不删。确认不需要的请逐个勾选，删除的文件会进夸克回收站，可以恢复。"));
       g.sec.appendChild(g.ul); // 说明放在列表上面
       plan.deletes.forEach((d) => {
         const li = el("li", "tidy-row tidy-del");
@@ -1453,6 +1533,12 @@ function subItem(sub) {
   titleRow.appendChild(el("b", "sub-title", "《" + sub.resource + "》"));
   const st = STATE_BADGE[sub.state] || STATE_BADGE.active;
   titleRow.appendChild(badge(st[0], "state-" + st[1], st[2]));
+  if (sub.upgrade) {
+    const goal = RES_LABEL[sub.upgrade_to || "2160p"];
+    titleRow.appendChild(sub.upgrade_done
+      ? badge("已洗版", "state-ok", "已存的都达到 " + goal)
+      : badge("洗版中 → " + goal, "state-accent", "出现更高清的分享时自动再存一份，旧版本在「整理网盘目录」里确认删除"));
+  }
   info.appendChild(titleRow);
   const tags = [
     sub.year || "",
@@ -1466,6 +1552,8 @@ function subItem(sub) {
   body.appendChild(head);
 
   body.appendChild(subProgress(sub));
+  const strip = versionStrip(sub);
+  if (strip) body.appendChild(strip);
   const rules = rulesSummary(sub);
   if (rules) body.appendChild(el("span", "sub-rules", rules));
   if (sub.folder) {
@@ -1648,7 +1736,7 @@ function openSubscribeDialog(target, opts) {
     const more = el("details", "sd-more");
     more.appendChild(el("summary", "", "更多规则（清晰度、关键词、起始集）"));
     const rulesGrid = el("div", "sub-edit-grid");
-    SUB_RULES.filter((r) => r.key !== "total_episodes").forEach((r) => {
+    SUB_RULES.filter((r) => r.key !== "total_episodes" && !r.editOnly).forEach((r) => {
       const f = ruleField(r, null);
       if (r.tvOnly) f.classList.add("tv-only");
       rulesGrid.appendChild(f);
