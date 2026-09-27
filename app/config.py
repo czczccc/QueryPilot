@@ -22,6 +22,9 @@ class Settings:
     max_results: int = 12
     memory_db_path: str = "data/querypilot.db"  # 空字符串关闭记忆
     reverify_interval_hours: float = 6.0  # 后台复验周期，0 关闭
+    tg_channels: tuple[str, ...] = ()  # Telegram 公开频道用户名
+    tg_proxy: str = ""  # 访问 t.me 的代理，如 http://127.0.0.1:7890
+    extra_sites: tuple[str, ...] = ()  # 资源站搜索 URL 模板，{q} 为关键词
     extra: dict = field(default_factory=dict)
 
 
@@ -38,6 +41,9 @@ def load_settings() -> Settings:
         except ValueError:
             return default
 
+    def _list(name: str) -> tuple[str, ...]:
+        return tuple(x.strip() for x in os.getenv(name, "").split(",") if x.strip())
+
     return Settings(
         deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
         tavily_api_key=os.getenv("TAVILY_API_KEY", ""),
@@ -47,4 +53,7 @@ def load_settings() -> Settings:
         max_results=_int("MAX_RESULTS", 12),
         memory_db_path=os.getenv("MEMORY_DB_PATH", "data/querypilot.db"),
         reverify_interval_hours=_float("REVERIFY_INTERVAL_HOURS", 6.0),
+        tg_channels=_list("TG_CHANNELS"),
+        tg_proxy=os.getenv("TG_PROXY", ""),
+        extra_sites=_list("EXTRA_SITES"),
     )

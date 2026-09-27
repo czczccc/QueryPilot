@@ -12,6 +12,7 @@ import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -63,6 +64,11 @@ def build_default_service() -> QuarkSearchService:
         use_bing=True,
         timeout=_settings.request_timeout_seconds,
         store=store,
+        tg_channels=_settings.tg_channels,
+        tg_client=httpx.AsyncClient(
+            timeout=10.0, proxy=_settings.tg_proxy, follow_redirects=True
+        ) if _settings.tg_proxy else None,
+        extra_sites=_settings.extra_sites,
     )
 
 
