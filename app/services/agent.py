@@ -28,9 +28,11 @@ from app.models import (
     QuarkLink,
     SearchMetrics,
     SearchRequest,
+    UserPrefs,
 )
 from app.services.memory import resource_key
 from app.services.quality import meets_requirement, required_resolution
+from app.services.relevance import RelevanceTarget, build_target, judge, llm_judge
 from app.services.search import (
     FRESH_HOURS,
     QuarkSearchService,
@@ -132,7 +134,8 @@ SYSTEM_PROMPT = (
     "的分享链接。你只能通过工具行动，每次调用一个工具，并在 content 里用一句话说明理由。\n"
     "策略：先 recall_memory；记忆不够就 search，然后 verify；"
     "满足要求的链接不够时，换别名、英文名、加「4K」「1080P」「全集」「夸克网盘」等词再搜，"
-    "不要重复用过的查询词；达到目标或继续搜索收益很低时 finish。\n"
+    "不要重复用过的查询词；valid_but_wrong_title 多时说明搜到了同名作品或别的季，"
+    "查询里应加上年份或季数；达到目标或继续搜索收益很低时 finish。\n"
     "预算：最多 {steps} 步。"
 )
 
@@ -145,6 +148,8 @@ class AgentState:
     parsed: ParsedResource
     required: str | None
     refresh: bool
+    target: RelevanceTarget
+    prefs: UserPrefs = field(default_factory=UserPrefs)
     candidates: dict[str, QuarkLink] = field(default_factory=dict)
     verified: set[str] = field(default_factory=set)
     skipped_invalid: set[str] = field(default_factory=set)
@@ -165,6 +170,7 @@ class AgentState:
             c for c in self.candidates.values()
             if self.confirmed(c)
             and c.state == "valid"
+            and c.relevance != "mismatch"
             and meets_requirement(c.quality, self.required)
         ]
 
@@ -186,7 +192,9 @@ class AgentState:
         for c in valid:
             res = (c.quality.resolution if c.quality else None) or "未识别"
             resolutions[res] = resolutions.get(res, 0) + 1
+        mismatched = sum(1 for c in valid if c.relevance == "mismatch")
         return {
+            "valid_but_wrong_title": mismatched,
             "candidates": len(self.candidates),
             "unverified": len(self.unverified()),
             "valid": len(valid),
@@ -359,10 +367,16 @@ class SearchAgent:
         started = time.monotonic()
         request_id = uuid.uuid4().hex
         parsed, fallback_used, douban = await self._service.prepare(req.query)
+        prefs = await self._service.prefs_for(req.client_id)
         state = AgentState(
             parsed=parsed,
-            required=required_resolution(parsed.quality) or required_resolution(req.query),
+            # 本次明确要求的清晰度优先，其次是用户偏好里的默认最低清晰度
+            required=required_resolution(parsed.quality)
+            or required_resolution(req.query)
+            or prefs.min_resolution,
             refresh=req.refresh,
+            target=build_target(parsed, req.query, douban.year if douban else None),
+            prefs=prefs,
             fresh_after=time.time() - FRESH_HOURS * 3600,
         )
         providers = self._service.new_providers()
@@ -411,6 +425,34 @@ class SearchAgent:
                 stop_reason = "已找到足够满足要求的有效链接"
                 break
 
+        # 规则判不了的标题，有 LLM 时批量交给 LLM 判断是否是同一部作品
+        if self._api_key and planner.name == "llm":
+            uncertain = [
+                c for c in state.candidates.values()
+                if state.confirmed(c) and c.state == "valid" and c.relevance == "uncertain"
+            ]
+            if uncertain:
+                t0 = time.monotonic()
+                judged = await llm_judge(
+                    uncertain, parsed, state.target, self._api_key, self._client
+                )
+                step = AgentStep(
+                    step=len(steps) + 1,
+                    tool="judge_relevance",
+                    args={"count": len(uncertain)},
+                    observation={
+                        "judged": judged,
+                        "match": sum(1 for c in uncertain if c.relevance == "match"),
+                        "mismatch": sum(1 for c in uncertain if c.relevance == "mismatch"),
+                        "matching_total": len(state.matching()),
+                    },
+                    planner="llm",
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                )
+                steps.append(step)
+                if emit:
+                    await emit(step)
+
         return await self._finalize(
             req, request_id, started, state, providers, key, steps, planner.name,
             stop_reason, fallback_used, douban,
@@ -437,6 +479,7 @@ class SearchAgent:
         state.recalled = True
         remembered = await self._service.recall(key)
         for link in remembered:
+            judge(link, state.target)
             state.candidates.setdefault(link.share, link)
         fresh = [m for m in remembered if is_fresh(m, state.fresh_after)]
         return {
@@ -480,6 +523,8 @@ class SearchAgent:
         batch = state.unverified()[: max(0, min(limit, MAX_VERIFY_PER_CALL, budget))]
         state.verify_calls += 1
         await self._service.verify(batch)
+        for b in batch:
+            judge(b, state.target)
         state.verified |= {b.share for b in batch}
         counts = {"valid": 0, "invalid": 0, "unknown": 0}
         for b in batch:
@@ -487,6 +532,7 @@ class SearchAgent:
         return {
             "verified": len(batch),
             **counts,
+            "wrong_title": sum(1 for b in batch if b.relevance == "mismatch"),
             "matching_total": len(state.matching()),
             "remaining_unverified": len(state.unverified()),
             "verify_budget_left": MAX_VERIFY_TOTAL - len(state.verified),
@@ -518,10 +564,13 @@ class SearchAgent:
         if not searched:
             for p in providers.values():
                 p.status = "skipped"
-        sort_links(final)
-        # 满足清晰度要求的排在同状态前面
+        sort_links(final, state.prefs)
+        # 满足要求（清晰度 + 不是片名不符）的排在最前
         final.sort(
-            key=lambda c: (c.state != "valid", not meets_requirement(c.quality, state.required))
+            key=lambda c: (
+                c.state != "valid",
+                c.relevance == "mismatch" or not meets_requirement(c.quality, state.required),
+            )
         )
         await self._service.remember(key, req.query, final, from_memory=not searched)
 

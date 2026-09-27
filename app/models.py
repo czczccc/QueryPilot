@@ -15,6 +15,7 @@ class SearchRequest(BaseModel):
 
     query: str = Field(min_length=2, max_length=200)
     refresh: bool = False  # True 时忽略记忆快速返回，强制全网重新搜索
+    client_id: str | None = Field(default=None, max_length=64)  # 浏览器标识，用于读取偏好
 
 
 class RawSearchResult(BaseModel):
@@ -65,6 +66,11 @@ class QuarkLink(BaseModel):
     http: int | None = None  # 壳页状态码
     state: str = "unknown"  # 严格验证状态：valid / invalid / unknown
     quality: QualityInfo | None = None  # 仅验证有效时填充
+    share_title: str | None = None  # 夸克分享页上的标题（验证时获得）
+    files_preview: list[str] = Field(default_factory=list)  # 分享内前几个文件/文件夹名
+    relevance: Literal["match", "uncertain", "mismatch"] = "uncertain"  # 是否是要找的那部
+    relevance_note: str | None = None  # 判定依据，如「年份不符：2019」
+    copy_count: int = 0  # 被用户复制的次数（反馈信号）
     from_memory: bool = False  # 来自记忆库（之前搜索验证过）
     last_checked: float | None = None  # 最近一次验证的 Unix 时间戳（记忆库链接）
 
@@ -133,3 +139,17 @@ class AgentSearchResponse(QuarkSearchResponse):
     stop_reason: str = ""
     required_resolution: str | None = None
     matching_count: int = 0  # 满足清晰度要求的有效链接数
+
+
+class UserPrefs(BaseModel):
+    """用户偏好（按浏览器标识保存在记忆库）。"""
+
+    min_resolution: Literal["2160p", "1080p", "720p"] | None = None  # 默认最低清晰度
+    prefer_subtitle: bool = False
+    prefer_hdr: bool = False
+
+
+class FeedbackRequest(BaseModel):
+    """用户对某条链接的反馈（目前只有「复制」）。"""
+
+    share: str = Field(min_length=6, max_length=32, pattern=r"^[0-9a-zA-Z]+$")

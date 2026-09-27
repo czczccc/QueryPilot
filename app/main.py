@@ -12,13 +12,20 @@ import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.config import load_settings
-from app.models import AgentSearchResponse, AgentStep, QuarkSearchResponse, SearchRequest
+from app.models import (
+    AgentSearchResponse,
+    AgentStep,
+    FeedbackRequest,
+    QuarkSearchResponse,
+    SearchRequest,
+    UserPrefs,
+)
 from app.providers.tavily import TavilyProvider
 from app.security import RateLimiter, install_request_id_factory, set_request_id
 from app.services.agent import SearchAgent
@@ -107,7 +114,7 @@ def create_app(
         lifespan=lifespan,
         title="QueryPilot",
         description="AI 搜索与链接验证引擎：自然语言输入，多引擎聚合检索，严格验证结果可用性。",
-        version="0.7.0",
+        version="0.8.0",
     )
     app.state.search_service = resolved
     app.state.agent = resolved_agent
@@ -152,7 +159,7 @@ def create_app(
     @app.get("/health")
     async def health() -> dict:
         """健康检查：只证明应用进程可响应，不探测外部 API。"""
-        return {"status": "ok", "version": "0.7.0"}
+        return {"status": "ok", "version": "0.8.0"}
 
     @app.get("/api/memory/stats")
     async def memory_stats() -> dict:
@@ -161,6 +168,32 @@ def create_app(
         if store is None:
             return {"enabled": False}
         return {"enabled": True, **(await store.stats())}
+
+    def _store_or_404():
+        store = app.state.search_service.store
+        if store is None:
+            raise HTTPException(status_code=404, detail="记忆功能未开启")
+        return store
+
+    @app.get("/api/prefs", response_model=UserPrefs)
+    async def get_prefs(client_id: str = Query(min_length=8, max_length=64)) -> UserPrefs:
+        """读取某个浏览器的偏好（未设置时返回默认值）。"""
+        return await _store_or_404().get_prefs(client_id)
+
+    @app.put("/api/prefs", response_model=UserPrefs)
+    async def put_prefs(
+        prefs: UserPrefs,
+        client_id: str = Query(min_length=8, max_length=64),
+        _: None = Depends(rate_limit_dep),
+    ) -> UserPrefs:
+        await _store_or_404().set_prefs(client_id, prefs)
+        return prefs
+
+    @app.post("/api/feedback")
+    async def feedback(req: FeedbackRequest) -> dict:
+        """用户复制了某条链接：记入记忆，作为排序信号。"""
+        recorded = await _store_or_404().record_copy(req.share)
+        return {"recorded": recorded}
 
     @app.post("/api/search", response_model=QuarkSearchResponse)
     async def api_search(
@@ -187,11 +220,12 @@ def create_app(
     async def api_agent_stream(
         query: str,
         refresh: bool = False,
+        client_id: str | None = None,
         _: None = Depends(rate_limit_dep),
     ) -> StreamingResponse:
         """SSE 流式 agent 搜索：每完成一步推送 `step` 事件，最后推送 `result`。"""
         try:
-            req = SearchRequest(query=query, refresh=refresh)
+            req = SearchRequest(query=query, refresh=refresh, client_id=client_id)
         except ValueError:
             raise HTTPException(status_code=422, detail="输入长度需为 2–200 个字符")
 
