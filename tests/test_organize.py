@@ -160,7 +160,7 @@ def make(drive: Drive):
 
 def test_subscription_saves_are_locked_deduped_flattened_and_renamed():
     drive = Drive()
-    app, store, s = make(drive)
+    app, store, _ = make(drive)
     # 测试里的搜索解析固定出「流浪地球2」；网盘这边的分享仍是用户截图里的样子
     body = {**CID, "query": "流浪地球2", "resource": "流浪地球2", "media": "tv",
             "year": "2025"}
