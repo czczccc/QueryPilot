@@ -18,12 +18,12 @@ from dataclasses import dataclass, field
 import httpx
 
 from app.models import DoubanMeta, ParsedResource, QuarkLink
+from app.services import llm
 from app.services.quality import required_resolution
 from app.services.relevance import RelevanceTarget, seasons_in
 
 logger = logging.getLogger(__name__)
 
-DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 SESSION_TTL = 3600.0
 MAX_SESSIONS = 500
 
@@ -138,9 +138,9 @@ async def interpret_llm(
     }
     try:
         resp = await client.post(
-            DEEPSEEK_URL,
+            llm.CHAT_URL,
             json={
-                "model": "deepseek-v4-flash",
+                "model": llm.MODEL,
                 "messages": [
                     {"role": "system", "content": LLM_PROMPT},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},

@@ -30,6 +30,7 @@ from app.models import (
     SearchRequest,
     UserPrefs,
 )
+from app.services import llm
 from app.services.conversation import (
     Conversation,
     ConversationStore,
@@ -51,7 +52,6 @@ from app.services.search import (
 
 logger = logging.getLogger(__name__)
 
-DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 
 TARGET_MATCHES = 5  # 满足要求的有效链接达到该数量即结束
 MAX_STEPS = 8  # 工具调用步数上限
@@ -295,12 +295,12 @@ class DeepSeekPlanner:
 
     def __init__(
         self, api_key: str, client: httpx.AsyncClient, timeout: float = 20.0,
-        model: str = "deepseek-v4-flash",
+        model: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._client = client
         self._timeout = timeout
-        self._model = model
+        self._model = model or llm.MODEL
         self._messages: list[dict] = []
         self._queue: list[tuple[str, Action]] = []  # (tool_call_id, action)
         self._pending_id: str | None = None
@@ -339,7 +339,7 @@ class DeepSeekPlanner:
 
     async def _ask(self) -> None:
         resp = await self._client.post(
-            DEEPSEEK_URL,
+            llm.CHAT_URL,
             json={
                 "model": self._model,
                 "messages": self._messages,
