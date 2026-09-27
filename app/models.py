@@ -111,3 +111,25 @@ class QuarkSearchResponse(BaseModel):
     providers: list[ProviderStatus] = Field(default_factory=list)
     metrics: SearchMetrics
     douban: DoubanMeta | None = None  # 输入为豆瓣链接时填充
+
+
+class AgentStep(BaseModel):
+    """agent 的一步：调用了哪个工具、参数、观察结果摘要。"""
+
+    step: int
+    tool: str
+    args: dict = Field(default_factory=dict)
+    observation: dict = Field(default_factory=dict)
+    thought: str | None = None  # LLM 给出的简短理由（规则规划时为空）
+    planner: Literal["llm", "rules"] = "rules"
+    duration_ms: int = 0
+
+
+class AgentSearchResponse(QuarkSearchResponse):
+    """agent 搜索响应：在普通响应基础上附带每一步的轨迹。"""
+
+    steps: list[AgentStep] = Field(default_factory=list)
+    planner: Literal["llm", "rules"] = "rules"
+    stop_reason: str = ""
+    required_resolution: str | None = None
+    matching_count: int = 0  # 满足清晰度要求的有效链接数

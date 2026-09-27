@@ -10,7 +10,7 @@
   <main class="container">
     <header>
       <h1>夸克网盘资源搜索</h1>
-      <p class="tagline">输入影视/剧集名，自动全网搜索夸克网盘分享链接（含提取码、可达性验证与置信度）</p>
+      <p class="tagline">输入影视/剧集名，agent 自动多轮搜索夸克网盘分享链接、验证有效性并识别清晰度</p>
     </header>
 
     <section aria-label="搜索输入">
@@ -33,6 +33,11 @@
     </section>
 
     <p id="status" class="status" role="status" aria-live="polite" hidden></p>
+
+    <section id="agent-panel" class="card agent-panel" hidden aria-label="搜索过程">
+      <h2 id="agent-title">搜索过程</h2>
+      <ol id="agent-steps" class="agent-steps"></ol>
+    </section>
 
     <section id="results" hidden aria-label="搜索结果">
       <div id="parsed-card" class="card" hidden></div>

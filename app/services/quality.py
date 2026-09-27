@@ -126,3 +126,24 @@ def quality_score(info: QualityInfo) -> int:
     if info.low_quality:
         score -= 40
     return max(score, 0)
+
+
+RESOLUTION_RANK = {"SD": 1, "720p": 2, "1080p": 3, "2160p": 4}
+
+
+def required_resolution(text: str | None) -> str | None:
+    """从用户的清晰度要求（如「4K HDR」「1080P」）解析出最低分辨率。"""
+    if not text:
+        return None
+    return _first_match(RESOLUTION_PATTERNS, [text])
+
+
+def meets_requirement(info: QualityInfo | None, required: str | None) -> bool:
+    """有效链接是否满足清晰度要求：枪版一律不满足；有要求时分辨率需已识别且不低于要求。"""
+    if info is None or info.low_quality:
+        return False
+    if required is None:
+        return True
+    if info.resolution is None:
+        return False
+    return RESOLUTION_RANK[info.resolution] >= RESOLUTION_RANK[required]

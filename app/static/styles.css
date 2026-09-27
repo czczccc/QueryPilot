@@ -120,6 +120,18 @@ header h1 {
 .status[data-kind="error"] { color: var(--error); border-color: var(--error); }
 .status[data-kind="warn"] { background: var(--warn-bg); border-color: #f59e0b; }
 
+/* ---- agent 过程 ---- */
+.agent-steps {
+  margin: 0;
+  padding-left: 1.25rem;
+  font-size: 0.9rem;
+}
+
+.agent-steps li { margin: 0.35rem 0; }
+.agent-steps .thought { display: block; color: var(--muted); font-size: 0.85rem; }
+.agent-steps .took { color: var(--muted); font-size: 0.8rem; margin-left: 0.4rem; }
+.agent-steps li.pending { color: var(--muted); list-style: none; margin-left: -1.25rem; }
+
 /* ---- 结果 ---- */
 .card {
   background: var(--card);
