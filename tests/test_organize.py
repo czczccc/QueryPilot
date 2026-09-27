@@ -35,9 +35,10 @@ def F(name, size=None):
 
 def test_pick_one_version_per_episode_and_skip_archives():
     chosen, _ = pick_files([F(n) for n in SHARE_FILES], movie=False, season=1)
+    # 按集判断：1~5 集只有压缩包就存压缩包；6/9/10 集有视频就只存最好的视频
     assert [f["file_name"] for f in chosen] == [
+        *(f"{i:02d}-4K.高码率.zip" for i in range(1, 6)),
         "06-4K.高码率.mkv", "09-4K.高码率.mkv", "10-4K.高码率.mkv"]
-    # 一个视频都没有时才存压缩包（每集一个）
     only_zip, _ = pick_files([F("01.zip"), F("02.rar"), F("a.txt")], movie=False)
     assert [f["file_name"] for f in only_zip] == ["01.zip", "02.rar"]
     movie, _ = pick_files([F("片.1080p.mkv", 2 << 30), F("片.2160p.mkv", 9 << 30),
@@ -181,10 +182,12 @@ def test_subscription_saves_are_locked_deduped_flattened_and_renamed():
         # 展平嵌套文件夹、每集一个版本、不存压缩包
         [save] = drive.saves
         assert save["pdir_fid"] == "nest" and save["to_pdir_fid"] == drive.dirs[target]
-        assert save["fid_list"] == ["06-4K.高码率.mkv", "09-4K.高码率.mkv", "10-4K.高码率.mkv"]
+        assert save["fid_list"] == [*(f"{i:02d}-4K.高码率.zip" for i in range(1, 6)),
+                                    "06-4K.高码率.mkv", "09-4K.高码率.mkv", "10-4K.高码率.mkv"]
         assert sorted(n for _, n in drive.renames) == [
+            *(f"流浪地球2 S01E{i:02d}.zip" for i in range(1, 6)),
             "流浪地球2 S01E06.mkv", "流浪地球2 S01E09.mkv", "流浪地球2 S01E10.mkv"]
-        assert now.saved_episodes == [6, 9, 10]
+        assert now.saved_episodes == [1, 2, 3, 4, 5, 6, 9, 10]
 
         # 再查两次：目录锁定、不再重新分类，也不重复转存
         asyncio.run(check())
@@ -216,22 +219,23 @@ def test_organize_preview_and_confirmed_apply():
         plan = client.get(f"/api/subscriptions/{sub['id']}/organize", params=CID).json()
         assert plan["target"] == "/QueryPilot/电视剧/国产剧/我不是大师 (2025)/Season 01"
         assert {(m["name"], m["to_name"]) for m in plan["moves"]} == {
+            ("01-4K.高码率.zip", "我不是大师 S01E01.zip"),  # 这一集只有压缩包：保留
             ("06-4K.高码率.mkv", "我不是大师 S01E06.mkv"),
             ("09-4K.高码率.mkv", "我不是大师 S01E09.mkv")}
         reasons = {d["name"]: d["reason"] for d in plan["deletes"]}
         assert reasons["09.mp4"] == "重复版本，已保留更好的"
         assert reasons["06-4K.高码率.zip"] == "压缩包，已有视频版本"
         assert reasons["我丨不是大师"] == "整理后是空文件夹"
-        assert "01-4K.高码率.zip" in reasons  # 有视频的剧，压缩包也建议删
+        assert "01-4K.高码率.zip" not in reasons
         assert drive.moves == [] and drive.deletes == []  # 预览不做任何改动
 
         # 用户只勾了 09.mp4，外加一个不在建议里的 fid（必须被忽略）
         r = client.post(f"/api/subscriptions/{sub['id']}/organize", params=CID,
                         json={"delete_fids": ["n9b", "not-in-plan"]}).json()
-        assert r["moved"] == 2 and r["renamed"] == 2 and r["deleted"] == 1
+        assert r["moved"] == 3 and r["renamed"] == 3 and r["deleted"] == 1
         assert drive.deletes == [["n9b"]]
         [(_, now)] = asyncio.run(store.list_subscriptions(OWNER))
-        assert now.saved_episodes == [6, 9]
+        assert now.saved_episodes == [1, 6, 9]
 
 
 def test_plan_ignores_unknown_files():
