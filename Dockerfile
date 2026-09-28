@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} -r requirements.txt
 COPY app ./app
 
 # 非 root 运行
-RUN useradd -m appuser && mkdir -p /app/data && chown appuser /app/data
+RUN useradd -m appuser && mkdir -p /app/data /app/logs && chown appuser /app/data /app/logs
 USER appuser
 
 # 记忆库（SQLite）放在数据卷里，重建容器不丢

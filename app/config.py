@@ -21,6 +21,9 @@ class Settings:
     tavily_api_key: str = ""
     app_env: str = "development"
     log_level: str = "INFO"
+    log_dir: str = ""  # 日志文件目录，空为只输出到控制台
+    log_keep_days: int = 14
+    log_max_mb: int = 50  # 单个日志文件上限，超过提前轮转
     request_timeout_seconds: float = 8.0
     max_results: int = 12
     memory_db_path: str = "data/querypilot.db"  # 空字符串关闭记忆
@@ -91,6 +94,9 @@ def load_settings() -> Settings:
         tavily_api_key=os.getenv("TAVILY_API_KEY", ""),
         app_env=os.getenv("APP_ENV", "development"),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
+        log_dir=os.getenv("LOG_DIR", "").strip(),
+        log_keep_days=_int("LOG_KEEP_DAYS", 14),
+        log_max_mb=_int("LOG_MAX_MB", 50),
         request_timeout_seconds=_float("REQUEST_TIMEOUT_SECONDS", 8.0),
         max_results=_int("MAX_RESULTS", 12),
         memory_db_path=os.getenv("MEMORY_DB_PATH", "data/querypilot.db"),

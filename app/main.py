@@ -26,6 +26,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.admin import admin_router
 from app.config import load_settings
+from app.logfiles import add_file_handler
 from app.models import (
     AgentSearchResponse,
     AgentStep,
@@ -98,10 +99,9 @@ def _asset_version() -> str:
 ASSET_VERSION = _asset_version()
 
 _settings = load_settings()
-logging.basicConfig(
-    level=_settings.log_level,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s request_id=%(request_id)s",
-)
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s request_id=%(request_id)s"
+logging.basicConfig(level=_settings.log_level, format=_LOG_FORMAT)
+add_file_handler(_settings.log_dir, _LOG_FORMAT, _settings.log_keep_days, _settings.log_max_mb)
 install_request_id_factory()
 logger = logging.getLogger(__name__)
 

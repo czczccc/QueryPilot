@@ -8,8 +8,12 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      # 应用日志另写一份到数据卷，按天轮转（默认留 14 天、单文件 50MB），重新部署后还在
+      - LOG_DIR=/app/logs
     volumes:
       - querypilot-data:/app/data
+      - querypilot-logs:/app/logs
     restart: unless-stopped
     # 日志只留最近约 30MB（隐私说明里承诺的），自动滚动覆盖
     logging:
@@ -45,4 +49,5 @@ services:
 
 volumes:
   querypilot-data:
+  querypilot-logs:
   pansou-cache:
