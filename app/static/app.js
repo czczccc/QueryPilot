@@ -1568,6 +1568,22 @@ const STATE_BADGE = {
   paused: ["已暂停", "neutral", "暂停期间不检查，恢复后立即检查一次"],
 };
 
+// 最近一次检查的摘要（frontend-api.md §27）：优先用后端给的一句话 reason
+function checkSummary(c) {
+  if (!c || typeof c !== "object") return "";
+  if (c.reason) return c.reason;
+  const parts = [];
+  if (c.found != null) parts.push("搜到 " + c.found + " 条");
+  if (c.matched != null) parts.push("确认是这部 " + c.matched + " 条");
+  if (c.saved) parts.push("存了 " + c.saved + " 集");
+  return parts.join("，");
+}
+function checkReasons(c) {
+  const r = c && c.reasons;
+  if (!r || typeof r !== "object") return "";
+  return Object.entries(r).map(([k, n]) => k + " " + n + " 条").join("\n");
+}
+
 // 状态徽章：检查失败时不再显示「首次搜索中」；没上映的电影显示「未上映」而不是「待定」
 function stateBadge(sub) {
   if (sub.last_error && (sub.state === "new" || sub.state === "active")) {
@@ -2231,6 +2247,13 @@ function subItem(sub, grouped) { // grouped：在系列分组里，副标题只�
     sub.last_error ? "" : sub.last_checked ? "检查于 " + formatTime(sub.last_checked) : "尚未检查",
   ].filter(Boolean).join(" · ");
   info.appendChild(el("span", "sub-meta", tags));
+  const summary = checkSummary(sub.last_check);
+  if (summary) {
+    const line = el("span", "sub-check", "上次检查：" + summary);
+    const why = checkReasons(sub.last_check);
+    if (why) line.title = "筛掉的原因：\n" + why;
+    info.appendChild(line);
+  }
   if (sub.last_error) {
     info.appendChild(el("span", "sub-error", "上次检查失败：" + sub.last_error +
       (sub.last_checked ? " · " + formatTime(sub.last_checked) : "")));
