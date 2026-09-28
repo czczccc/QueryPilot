@@ -406,9 +406,37 @@ const TOOL_NAME = {
   finish: "完成",
   interpret_followup: "追问",
   cache: "缓存",
+  lookup_media: "查条目",
+  inspect_share: "看文件",
+  check_my_drive: "我的网盘",
 };
 
+// 网盘里已有的集：{"1":[1,2]} → 「第 1 季 1、2 集」
+function driveEpisodesText(eps) {
+  return Object.keys(eps || {}).sort((a, b) => a - b)
+    .filter((k) => (eps[k] || []).length)
+    .map((k) => "第 " + k + " 季 " + episodeRanges(eps[k]) + " 集").join("；");
+}
+
 const TOOL_TEXT = {
+  lookup_media: (a, o) => {
+    const n = (o.results || []).length;
+    const alias = (o.new_names || []).filter(Boolean);
+    return "查条目：" + (a.name || "") + (a.year ? "（" + a.year + "）" : "") +
+      (o.results ? " → 找到 " + n + " 条" : "") + (alias.length ? "，新增别名 " + alias.slice(0, 4).join("、") : "");
+  },
+  inspect_share: (a, o) => {
+    const n = (a.shares || []).length;
+    const res = Object.values(o.shares || {});
+    const video = res.filter((r) => r && !r.error && (r.kind === "video" || r.kind === "pack")).length;
+    const bad = res.filter((r) => r && !r.error && r.kind && r.kind !== "video" && r.kind !== "pack").length;
+    return "打开 " + n + " 个分享看文件" + (res.length ? " → " + video + " 个是视频" + (bad ? "，" + bad + " 个不是视频" : "") : "");
+  },
+  check_my_drive: (a, o) => {
+    if (o.logged_in === false) return "查你的网盘：未登录，跳过";
+    const t = driveEpisodesText(o.episodes);
+    return "查你的网盘：" + (t ? "已有" + t : (o.videos ? "有 " + o.videos + " 个相关视频" : "还没有这部"));
+  },
   cache: (a) => "复用最近结果：" + (a.minutes_ago ? a.minutes_ago + " 分钟前" : "刚刚") +
     "有人搜过同样的内容，直接用那次验证过的链接",
   recall_memory: (a, o) =>
@@ -466,6 +494,18 @@ function renderStep(step) {
   if (step.tool !== "finish") agentSteps.appendChild(pendingStep("正在决定下一步"));
 }
 
+// 搜索时查过网盘：在结果上方提示「你已经有了这些集」
+function renderDriveHint(steps) {
+  const old = document.getElementById("drive-hint");
+  if (old) old.remove();
+  const st = steps.slice().reverse().find((x) => x.tool === "check_my_drive");
+  const t = st && st.observation && !st.observation.error ? driveEpisodesText(st.observation.episodes) : "";
+  if (!t) return;
+  const box = el("p", "drive-hint", "你的网盘里已经有：" + t);
+  box.id = "drive-hint";
+  resultsSection.prepend(box);
+}
+
 function setAgentCollapsed(collapsed) {
   agentSteps.classList.toggle("collapsed", collapsed);
   agentToggle.setAttribute("aria-expanded", String(!collapsed));
@@ -501,6 +541,7 @@ function renderResult(data) {
   setAgentCollapsed(data.links.length > 0);
 
   renderParsed(data.parsed, data.douban);
+  renderDriveHint(data.steps || []);
   renderMetrics(data.metrics, data.providers, !!data.followup);
   renderFollowup(data);
   lastResult = data;
