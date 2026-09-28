@@ -2252,7 +2252,8 @@ dialog, .sub-dialog, .qr-dialog { border-radius: 14px; border: 1px solid var(--b
 .features.flow li { display: inline-flex; align-items: center; gap: 0.45rem; }
 .features.flow li + li::before { content: ""; width: 1.6rem; height: 1px; background: var(--border-strong); margin: 0 0.6rem; }
 .flow-n { display: inline-grid; place-items: center; width: 1.25rem; height: 1.25rem; border-radius: 50%; border: 1px solid var(--border-strong); font-size: 0.68rem; font-variant-numeric: tabular-nums; color: var(--text); }
-@media (max-width: 560px) { .features.flow li + li::before { width: 0.7rem; margin: 0 0.35rem; } .features.flow { font-size: 0.78rem; } }
+@media (max-width: 560px) { .features.flow li + li::before { display: none; } .features.flow { gap: 0.5rem 1rem; font-size: 0.8rem; } }
+.account-btn, .account-btn * { box-shadow: none !important; }
 
 /* 统计：数字带语义色，底色保持中性 */
 .ss-cell { background: transparent !important; border: 1px solid var(--border); }
