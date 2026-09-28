@@ -890,9 +890,10 @@ async function subApi(path, method, payload) {
 // 被限流（429）时的友好提示：带上服务器给的 Retry-After 等待时间
 function rateLimitText(resp, body) {
   const raw = body && typeof body.detail === "string" ? body.detail : "";
-  const base = raw && !/请求过于频繁/.test(raw) ? raw.replace(/[。.]$/, "") : "操作太频繁了，歇一会儿再试";
+  const base = raw && !/请求过于频繁/.test(raw) ? raw.replace(/[。.]$/, "") : "操作太频繁了";
   const secs = Math.ceil(Number(resp.headers.get("Retry-After")) || Number(body && body.retry_after) || 0);
-  if (secs <= 0 || /秒后|明天/.test(base)) return base; // 原因里已经说了要等多久
+  if (/秒后|明天/.test(base)) return base; // 原因里已经说了要等多久
+  if (secs <= 0) return base + "，请稍后再试";
   if (secs >= 3600) return base + "，明天再试";           // 当天额度用完：等到明天 0 点
   return base + "（" + (secs < 60 ? secs + " 秒" : Math.ceil(secs / 60) + " 分钟") + "后可以再试）";
 }
