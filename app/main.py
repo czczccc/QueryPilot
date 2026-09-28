@@ -984,6 +984,55 @@ def create_app(
                                   message + why)
         return [("auto_saved", message + why, link.share)] if result.file_count else []
 
+    async def _drive_have(owner: str, name: str, season: int | None) -> dict:
+        """用户网盘里这部片已有哪些集：本站存过的目录（订阅锁定目录 + QueryPilot 下
+        名字含片名的目录）。只读，最多翻 6 个目录。"""
+        got = await _account_saver(owner)
+        if got is None:
+            return {"logged_in": False}
+        saver = got[0]
+        headers = saver.drive_headers()
+        key = resource_key(name)
+        root = "/" + (safe_name(root_dir) or "QueryPilot")
+        folders = [x.folder for _, x in await resolved.store.list_subscriptions(owner)
+                   if x.folder and key and key in resource_key(strip_season(x.resource))]
+        try:
+            fid = await saver.find_dir(root, headers)
+            if fid is not None:
+                folders += [e["path"] for e in await saver.list_tree(fid, root, headers, depth=2)
+                            if e["dir"] and key and key in resource_key(e["file_name"])]
+            found: dict[int, set[int]] = {}
+            videos, seen = 0, []
+            for folder in list(dict.fromkeys(folders))[:6]:
+                dfid = await saver.find_dir(folder, headers)
+                if dfid is None:
+                    continue
+                seen.append(folder)
+                for e in await saver.list_tree(dfid, folder, headers, depth=2):
+                    if e["dir"] or kind_of(e["file_name"]) != "video":
+                        continue
+                    videos += 1
+                    s_in = seasons_in(e["path"])
+                    s_no = min(s_in) if len(s_in) == 1 else 1
+                    ep = episode_no(e["file_name"], None)
+                    if ep is not None and (season is None or s_no == season):
+                        found.setdefault(s_no, set()).add(ep)
+        except LoginExpiredError:
+            return {"logged_in": False, "error": "夸克登录已失效"}
+        except (SaveError, httpx.HTTPError, ValueError) as e:
+            return {"logged_in": True, "error": str(e) if isinstance(e, SaveError) else "读取网盘失败"}
+        return {"logged_in": True, "folders": seen, "videos": videos,
+                "episodes": {str(k): sorted(v) for k, v in sorted(found.items())}}
+
+    async def _drive_for(request: Request, client_id: str | None):
+        """已扫码登录的用户：给 agent 的 check_my_drive 工具；否则 None（工具不出现）。"""
+        if not login_enabled or resolved.store is None:
+            return None
+        owner = await _owner(request, client_id or "")
+        if not owner.startswith("u:") or await resolved.store.latest_account(owner[2:]) is None:
+            return None
+        return lambda name, season: _drive_have(owner, name, season)
+
     async def _season_offset(sub: Subscription) -> int:
         """前面各季的总集数（TMDB），给按绝对集号编的合集换算本季集号；查不到为 0。"""
         if media_lookup is None or not sub.season or sub.season <= 1 or not sub.tmdb_id:
@@ -1455,8 +1504,9 @@ def create_app(
         """agent 搜索：多轮「规划 → 搜索/验证 → 观察」，响应附带每一步轨迹。"""
         ctx = await _quota_start(request)
         try:
+            drive = await _drive_for(request, req.client_id)
             with llm.scope(allowed=ctx is None or ctx[2].ai) as meter:
-                result = await app.state.agent.run(req)
+                result = await app.state.agent.run(req, drive=drive)
             await _quota_end(ctx, meter, result)
             return result
         except SearchUnavailableError:
@@ -1480,6 +1530,7 @@ def create_app(
             raise HTTPException(status_code=422, detail="输入长度需为 2–200 个字符")
 
         ctx = await _quota_start(request)
+        drive = await _drive_for(request, client_id)
         queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
 
         async def emit(step: AgentStep) -> None:
@@ -1490,7 +1541,7 @@ def create_app(
                 if ctx is not None and ctx[2].reason:  # 先告诉前端本次降级了
                     await queue.put(("quota", json.dumps(ctx[2].to_dict(), ensure_ascii=False)))
                 with llm.scope(allowed=ctx is None or ctx[2].ai) as meter:
-                    result = await app.state.agent.run(req, emit=emit)
+                    result = await app.state.agent.run(req, emit=emit, drive=drive)
                 await _quota_end(ctx, meter, result)
                 await queue.put(("result", result.model_dump_json()))
             except SearchUnavailableError:
