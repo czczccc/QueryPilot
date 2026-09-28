@@ -369,8 +369,54 @@ function linkCard(l, i) {
   open.rel = "noopener noreferrer";
   row.appendChild(open);
   if (saveEnabled && l.state === "valid") row.appendChild(saveButton(l));
+  row.appendChild(reportButtons(l, li));
   li.appendChild(row);
   return li;
+}
+
+// 结果反馈：「不对」「失效」。报过的记在本机，卡片上显示「已反馈」
+// TODO 接口以 frontend-api.md 为准（后端还没出）
+const REPORT_URL = "/api/feedback/report";
+const REPORTED_KEY = "qp_reported";
+function reportedShares() {
+  try { return JSON.parse(localStorage.getItem(REPORTED_KEY) || "{}"); } catch (_) { return {}; }
+}
+function reportButtons(l, card) {
+  const wrap = el("span", "report-btns");
+  const done = (reason) => {
+    wrap.innerHTML = "";
+    wrap.appendChild(el("span", "report-done", reason === "dead" ? "已反馈：失效" : "已反馈：不是这部"));
+    card.classList.add("reported");
+  };
+  const prev = reportedShares()[l.share];
+  if (prev) { done(prev); return wrap; }
+  [["wrong", "不对", "不是要找的这部"], ["dead", "失效", "打不开或文件已被删除"]].forEach(([reason, label, tip]) => {
+    const b = el("button", "ghost-btn small", label);
+    b.type = "button";
+    b.title = tip;
+    b.addEventListener("click", async () => {
+      wrap.querySelectorAll("button").forEach((x) => { x.disabled = true; });
+      const resp = await fetch(REPORT_URL + "?" + cidParam(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ share: l.share, reason, query: lastQuery || "" }),
+      }).catch(() => null);
+      if (!resp || !resp.ok) {
+        wrap.querySelectorAll("button").forEach((x) => { x.disabled = false; });
+        if (resp && resp.status === 429) toast("今天反馈太多了，明天再来吧", "error");
+        else if (resp && resp.status === 422) toast("这个链接格式不对，没法反馈", "error");
+        else toast("反馈没发出去，请稍后再试", "error");
+        return;
+      }
+      const all = reportedShares();
+      all[l.share] = reason;
+      try { localStorage.setItem(REPORTED_KEY, JSON.stringify(all)); } catch (_) { /* 无痕模式 */ }
+      done(reason);
+      toast("已收到反馈，谢谢", "ok");
+    });
+    wrap.appendChild(b);
+  });
+  return wrap;
 }
 
 copyBtn.addEventListener("click", () => {
