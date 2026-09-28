@@ -72,15 +72,18 @@ function Nav({ route }: { route: Route }) {
     );
   };
   let lastGroup = "";
+  let first = true;
   return (
     <>
       <nav aria-label="主导航" className="sticky top-16 hidden w-52 shrink-0 flex-col gap-0.5 self-start md:flex">
         {items.map((n) => {
           const head = n.group !== lastGroup;
           lastGroup = n.group;
+          const top = first;
+          first = false;
           return (
             <div key={n.href} className="flex flex-col">
-              {head && <span className="px-2.5 pt-4 pb-1 text-caption text-fg-subtle first:pt-0">{n.group}</span>}
+              {head && <span className={cn("px-2.5 pb-1 text-caption text-fg-subtle", top ? "pt-0" : "pt-5")}>{n.group}</span>}
               {link(n, false)}
             </div>
           );

@@ -21,7 +21,7 @@ export function Poster({ src, title, size = "md" }: { src?: string | null; title
     );
   }
   return (
-    <span aria-hidden className={cn("shrink-0 overflow-hidden bg-sunken", cls)}>
+    <span aria-hidden className={cn("block shrink-0 overflow-hidden bg-sunken", cls)}>
       <img src={src} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setBroken(true)} className="size-full object-cover" />
     </span>
   );
