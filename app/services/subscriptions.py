@@ -105,6 +105,7 @@ class SubscriptionWatcher:
         self._agent = agent
         self.auto_saver = auto_saver
         self.lookup = None  # MetadataLookup：刷新剧集总集数（main 注入）
+        self._year_tried: set[int] = set()
         self.stagger = 0.0  # 批量检查时两个订阅之间平均等几秒（错开对夸克和搜索源的请求）
         self._store = store
         self._webhook = webhook
@@ -300,8 +301,11 @@ class SubscriptionWatcher:
         """剧集总集数与播出日历随 TMDB / 豆瓣更新（每天最多一次；手动改过总集数的不改集数）。"""
         if self.lookup is None or sub.media != "tv" or not (sub.tmdb_id or sub.douban_id):
             return
+        # 还没有季年份的（这个字段上线前建的订阅）不等 24 小时，下次检查就补一次
         if not await self._store.meta_due(sub.id, 24):
-            return
+            if sub.season_year or not sub.tmdb_id or sub.id in self._year_tried:
+                return
+            self._year_tried.add(sub.id)
         schedule = getattr(self.lookup, "schedule", None)
         if sub.tmdb_id and schedule is not None:
             eps = await schedule(sub.tmdb_id, sub.season or 1)

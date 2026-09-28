@@ -88,3 +88,17 @@ async def test_failed_check_records_error_then_clears():
 def test_error_text_hides_details():
     assert check_error_text(httpx.ReadTimeout("x")) == "搜索服务响应超时，稍后会自动重试"
     assert "key" not in check_error_text(ValueError("api key abc"))
+
+
+async def test_missing_season_year_refreshes_without_waiting_a_day():
+    s = shares("ep", 1)
+    store, _, watcher = setup({s[0]: eps(2)}, s)
+    watcher.lookup = CalendarLookup([TV], [AirEpisode(episode=1, air_date="2024-04-05")])
+    sub = await store.add_subscription(C, "流浪地球", "流浪地球", media="tv", season=2,
+                                       year="2023", tmdb_id="42")
+    assert await store.meta_due(sub.id, 24)  # 刚刷新过（字段上线前）
+    await watcher.check(C, sub)
+    [(_, now)] = await store.list_subscriptions(C)
+    assert now.season_year == "2024"
+    await watcher.check(C, now)  # 有了以后照旧一天一次
+    assert watcher.lookup.schedule_calls == [("42", 2)]
