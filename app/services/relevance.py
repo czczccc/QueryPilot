@@ -57,6 +57,34 @@ def seasons_in(text: str) -> set[int]:
     return out
 
 
+_NOISE_RE = re.compile(
+    r"第\s*\d{1,4}\s*[集话話期]|全\s*\d{1,4}\s*集|更新至\s*\d{1,4}|"
+    r"(?<![0-9a-z])(?:4k|8k|uhd|hdr10\+?|hdr|dv|2160p|1080[pi]|720p|480p|web-?dl|bluray|remux|"
+    r"x26[45]|h\.?26[45]|hevc)(?![0-9a-z])|"
+    r"全集|完结|合集|夸克网盘|夸克|网盘|资源|高清|超清|蓝光|中字|字幕|国语|粤语|在线|下载|杜比视界|杜比",
+    re.IGNORECASE,
+)
+_SUBTITLE_SPLIT = re.compile(r"\s*[～~〜:：—]+\s*")
+
+
+def clean_keyword(text: str) -> str:
+    """给网盘搜索站 / PanSou 的关键词：只留片名。
+
+    这些站基本按整串匹配，「无职转生 第二季 1080P」这种会零产出；季、清晰度等结果回来后
+    由相关性判定和订阅规则筛。带副标题的长片名（「无职转生～到了异世界就拿出真本事～」）只取主标题。
+    """
+    t = SEASON_RANGE_RE.sub(" ", text)
+    t = SEASON_RE.sub(" ", t)
+    t = _NOISE_RE.sub(" ", t)
+    t = re.sub(r"[\[\]【】()（）《》]", " ", t)
+    head = _SUBTITLE_SPLIT.split(t.strip())[0]
+    # 只对中文片名取主标题（英文「Mission: Impossible」的冒号是片名的一部分）
+    if len(head.strip()) >= 2 and re.search(r"[\u4e00-\u9fff]", head):
+        t = head
+    t = re.sub(r"\s+", " ", t).strip(" -_·.")
+    return t or text.strip()
+
+
 def years_in(text: str) -> set[int]:
     return {int(y) for y in YEAR_RE.findall(text)}
 

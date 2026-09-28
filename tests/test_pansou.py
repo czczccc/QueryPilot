@@ -171,3 +171,30 @@ async def test_llm_sees_pansou_tool_only_when_configured():
         SearchRequest(query="流浪地球2"))
     assert resp.steps[0].observation == {"error": "未知工具 pansou_search"}
     assert "pansou_search" not in [t["function"]["name"] for t in seen_llm[-2]["tools"]]
+
+
+def test_clean_keyword():
+    from app.services.relevance import clean_keyword
+
+    assert clean_keyword("无职转生 第二季 1080P") == "无职转生"
+    assert clean_keyword("无职转生～到了异世界就拿出真本事～ 第2季") == "无职转生"
+    assert clean_keyword("庆余年 第二季 全36集 夸克网盘") == "庆余年"
+    assert clean_keyword("The Wandering Earth 2 2160p") == "The Wandering Earth 2"
+    assert clean_keyword("Mission: Impossible") == "Mission: Impossible"
+    assert clean_keyword("流浪地球2") == "流浪地球2"
+    assert clean_keyword("4K") == "4K"  # 全被清掉时退回原词
+
+
+async def test_keywords_cleaned_before_pansou():
+    seen_llm: list[dict] = []
+    llm = deepseek_client([
+        [("search", {"queries": ["无职转生 第二季 1080P"], "keyword": "无职转生 第二季 1080P"})],
+        [("pansou_search", {"keyword": "无职转生 第三季"})],
+        [("finish", {"reason": "够了"})],
+    ], seen_llm)
+    seen: list = []
+    resp = await SearchAgent(pansou_service(seen), api_key="k", client=llm).run(
+        SearchRequest(query="流浪地球2"))
+    assert seen == ["无职转生"]  # 第二季、第三季清洗后是同一个词，只查一次
+    assert resp.steps[0].args["keyword"] == "无职转生 第二季 1080P"  # 原样记录 LLM 给的
+    assert resp.steps[1].observation == {"error": "这个关键词已经用 PanSou 搜过了"}
