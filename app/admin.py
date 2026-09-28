@@ -37,7 +37,8 @@ class InviteRequest(BaseModel):
 
 
 def admin_router(
-    users: UsageStore, token: str, quota: QuotaGuard | None, rate_limit: Callable
+    users: UsageStore, token: str, quota: QuotaGuard | None, rate_limit: Callable,
+    links=None,
 ) -> APIRouter:
     def auth(x_admin_token: str = Header(default="")) -> None:
         if not token:
@@ -46,6 +47,19 @@ def admin_router(
             raise HTTPException(status_code=401, detail="管理口令不正确")
 
     router = APIRouter(prefix="/api/admin", dependencies=[Depends(rate_limit), Depends(auth)])
+
+    @router.get("/feedback")
+    async def feedback_export() -> dict:
+        """用户对搜索结果的「不对 / 失效」反馈，按搜索词分组，可直接当评测集的反例用：
+        每组 {query, bad: [{share, reason, title, reports, weight}]}（不含反馈人）。"""
+        if links is None:
+            raise HTTPException(status_code=404, detail="记忆库未启用")
+        groups: dict[str, dict] = {}
+        for r in await links.report_export():
+            g = groups.setdefault(r["query"] or "", {"query": r["query"] or "", "bad": []})
+            g["bad"].append({"share": r["share"], "reason": r["reason"], "title": r["title"],
+                             "reports": r["reports"], "weight": r["weight"]})
+        return {"items": list(groups.values())}
 
     @router.get("/overview")
     async def overview() -> dict:

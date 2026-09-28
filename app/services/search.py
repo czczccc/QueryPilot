@@ -151,6 +151,10 @@ class QuarkSearchService:
     def pansou_enabled(self) -> bool:
         return bool(self._pansou_url)
 
+    async def blocked(self, key: str) -> tuple[set[str], set[str]]:
+        """用户反馈：(失效的, 不是这部的) 分享码；记忆关闭时为空。"""
+        return await self._store.blocked(key) if self._store else (set(), set())
+
     async def recall(self, key: str) -> list[QuarkLink]:
         return await self._store.recall(key) if self._store else []
 

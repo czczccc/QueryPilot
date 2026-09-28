@@ -163,6 +163,14 @@ class FeedbackRequest(BaseModel):
     share: str = Field(min_length=6, max_length=32, pattern=r"^[0-9a-zA-Z]+$")
 
 
+class ReportRequest(BaseModel):
+    """搜索结果反馈：wrong 不是要找的这部（只对这部片排除），dead 链接失效（所有人都不再推荐）。"""
+
+    share: str = Field(min_length=6, max_length=32, pattern=r"^[0-9a-zA-Z]+$")
+    reason: Literal["wrong", "dead"]
+    query: str = Field(default="", max_length=200)
+
+
 MediaType = Literal["movie", "tv"]
 Resolution = Literal["2160p", "1080p", "720p", "SD"]
 RESOLUTION_RANK = {"SD": 1, "720p": 2, "1080p": 3, "2160p": 4}

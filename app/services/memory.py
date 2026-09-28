@@ -70,6 +70,18 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     best_resolution TEXT,
     UNIQUE (client_id, resource_key)
 );
+CREATE TABLE IF NOT EXISTS link_reports (
+    share        TEXT NOT NULL,
+    reason       TEXT NOT NULL,
+    resource_key TEXT NOT NULL DEFAULT '',
+    query        TEXT NOT NULL DEFAULT '',
+    reporter     TEXT NOT NULL,
+    weight       INTEGER NOT NULL DEFAULT 1,
+    ts           REAL NOT NULL,
+    PRIMARY KEY (share, reason, reporter, resource_key)
+);
+CREATE INDEX IF NOT EXISTS idx_link_reports_reporter ON link_reports(reporter, ts);
+
 CREATE TABLE IF NOT EXISTS notifications (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     subscription_id INTEGER NOT NULL,
@@ -823,6 +835,66 @@ class LinkStore:
 
     async def update_state(self, link: QuarkLink) -> None:
         await asyncio.to_thread(self._update_state, link, time.time())
+
+    # ---- 搜索结果反馈：「不对」只对这部片排除，「失效」对所有人不再推荐 ----
+    REPORT_DAILY = 50  # 每个反馈人每天最多几条
+    HIDE_WEIGHT = 2  # 权重累计到这个数就生效（登录用户 2，未登录 1）
+
+    def _add_report(self, share: str, reason: str, key: str, query: str, reporter: str,
+                    weight: int, now: float) -> str:
+        with self._lock:
+            n = self._conn.execute(
+                "SELECT COUNT(*) FROM link_reports WHERE reporter = ? AND ts > ?",
+                (reporter, now - 86400)).fetchone()[0]
+            if n >= self.REPORT_DAILY:
+                return "limited"
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO link_reports (share, reason, resource_key, query, reporter,"
+                " weight, ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (share, reason, key if reason == "wrong" else "", query[:200], reporter, weight,
+                 now))
+            if reason == "dead" and cur.rowcount and self._conn.execute(
+                    "SELECT COALESCE(SUM(weight), 0) FROM link_reports"
+                    " WHERE share = ? AND reason = 'dead'", (share,)).fetchone()[0] \
+                    >= self.HIDE_WEIGHT:
+                # 够多人说失效了：记忆库里当失效处理，不再从记忆里推荐
+                self._conn.execute("UPDATE links SET state = 'invalid', last_checked = ?"
+                                   " WHERE share = ?", (now, share))
+            self._conn.commit()
+        return "recorded" if cur.rowcount else "duplicate"
+
+    async def add_report(self, share: str, reason: str, key: str, query: str, reporter: str,
+                         weight: int = 1) -> str:
+        """记一条反馈：recorded / duplicate（同一人同一条已报过）/ limited（今天报太多了）。"""
+        return await asyncio.to_thread(self._add_report, share, reason, key, query, reporter,
+                                       weight, time.time())
+
+    def _blocked(self, key: str) -> tuple[set[str], set[str]]:
+        with self._lock:
+            dead = {r[0] for r in self._conn.execute(
+                "SELECT share FROM link_reports WHERE reason = 'dead' GROUP BY share"
+                " HAVING SUM(weight) >= ?", (self.HIDE_WEIGHT,))}
+            wrong = {r[0] for r in self._conn.execute(
+                "SELECT share FROM link_reports WHERE reason = 'wrong' AND resource_key = ?"
+                " GROUP BY share HAVING SUM(weight) >= ?", (key, self.HIDE_WEIGHT))}
+        return dead, wrong
+
+    async def blocked(self, key: str) -> tuple[set[str], set[str]]:
+        """(被反馈失效的分享, 被反馈「不是这部」的分享)，都已达到生效权重。"""
+        return await asyncio.to_thread(self._blocked, key)
+
+    def _report_export(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT r.share, r.reason, r.resource_key, MAX(r.query) AS query,"
+                " SUM(r.weight) AS weight, COUNT(*) AS reports, MIN(r.ts) AS first_ts,"
+                " COALESCE(l.share_title, l.name) AS title"
+                " FROM link_reports r LEFT JOIN links l ON l.share = r.share"
+                " GROUP BY r.share, r.reason, r.resource_key ORDER BY first_ts").fetchall()
+        return [dict(r) for r in rows]
+
+    async def report_export(self) -> list[dict]:
+        return await asyncio.to_thread(self._report_export)
 
     async def record_copy(self, share: str) -> bool:
         """用户复制了某条链接：计数 +1（排序时作为「被认可」的信号）。"""

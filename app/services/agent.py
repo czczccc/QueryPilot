@@ -944,6 +944,13 @@ class SearchAgent:
         history: list[str],
         followup: dict | None,
     ) -> AgentSearchResponse:
+        # 用户反馈过的：失效的当失效，「不是这部」的判为片名不符（都不再推荐）
+        dead, wrong = await self._service.blocked(key)
+        for c in state.candidates.values():
+            if c.share in dead and c.state == "valid":
+                c.state = "invalid"
+            elif c.share in wrong and c.relevance != "mismatch":
+                c.relevance, c.relevance_note = "mismatch", "有人反馈不是这部"
         # 只返回验证过（或新鲜记忆）的链接；未验证的不展示；追问的硬性条件不满足的不展示
         final = [
             c for c in state.candidates.values()
