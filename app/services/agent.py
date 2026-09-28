@@ -45,6 +45,7 @@ from app.services.memory import resource_key
 from app.services.quality import meets_requirement, required_resolution
 from app.services.relevance import (
     RelevanceTarget,
+    _key,
     add_aliases,
     build_target,
     clean_keyword,
@@ -169,9 +170,30 @@ PANSOU_TOOL = {
 }
 
 
-def tools_for(pansou: bool) -> list[dict]:
-    """没配 PanSou 时 LLM 看不到这个工具。"""
-    return [*TOOLS[:2], PANSOU_TOOL, *TOOLS[2:]] if pansou else TOOLS
+LOOKUP_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "lookup_media",
+        "description": (
+            "查影视条目（TMDB，没有时用豆瓣）：返回中文名、原名、年份、类型、每季集数。"
+            "搜不到或结果片名不对时，用它拿到原名 / 英文名换词再搜，并核对年份和季。"
+            "查到的名字会自动加进片名判定。同一个名字不要重复查。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "片名（默认用解析出的资源名）"},
+                "year": {"type": "string", "description": "年份，可省略"},
+            },
+        },
+    },
+}
+
+
+def tools_for(pansou: bool, lookup: bool = False) -> list[dict]:
+    """没配 PanSou / 条目查询时 LLM 看不到对应工具。"""
+    tools = [*TOOLS[:2], PANSOU_TOOL, *TOOLS[2:]] if pansou else list(TOOLS)
+    return [*tools[:-1], LOOKUP_TOOL, tools[-1]] if lookup else tools
 
 
 SYSTEM_PROMPT = (
@@ -179,7 +201,8 @@ SYSTEM_PROMPT = (
     "的分享链接。你只能通过工具行动，每次调用一个工具，并在 content 里用一句话说明理由。\n"
     "策略：先 recall_memory；记忆不够就 search，然后 verify；"
     "满足要求的链接不够时，换别名、英文名、加「4K」「1080P」「全集」「夸克网盘」等词再搜，"
-    "不要重复用过的查询词；valid_but_wrong_title 多时说明搜到了同名作品或别的季，"
+    "不要重复用过的查询词；搜不到或片名对不上时可以 lookup_media 查原名、年份和每季集数；"
+    "valid_but_wrong_title 多时说明搜到了同名作品或别的季，"
     "查询里应加上年份或季数；达到目标或继续搜索收益很低时 finish。\n"
     "预算：最多 {steps} 步。"
 )
@@ -207,6 +230,8 @@ class AgentState:
     verify_calls: int = 0
     pansou: bool = False  # 配了 PanSou（有 pansou_search 工具）
     pansou_keywords: list[str] = field(default_factory=list)
+    lookup: bool = False  # 能查影视条目（有 lookup_media 工具）
+    looked_up: list[str] = field(default_factory=list)  # 查过的名字
     raw_count: int = 0
     fresh_after: float = 0.0
 
@@ -302,6 +327,8 @@ class RulePlanner:
             })
         if state.unverified() and state.verify_calls < 4:
             return Action("verify", {"limit": MAX_VERIFY_PER_CALL})
+        if not state.satisfied() and state.lookup and not state.looked_up:
+            return Action("lookup_media", {"name": state.parsed.resource})
         if not state.satisfied() and state.search_calls == 1:
             alt = alternate_search(state)
             if alt:
@@ -309,6 +336,11 @@ class RulePlanner:
         return Action("finish", {
             "reason": "已找到足够满足要求的有效链接" if state.satisfied() else "可用的搜索手段已用完",
         })
+
+
+def _key_in(name: str, names: list[str]) -> bool:
+    """查到的名字已被 add_aliases 认可（归一化后在片名列表里）。"""
+    return _key(name) in names
 
 
 def alternate_search(state: AgentState) -> dict | None:
@@ -444,7 +476,8 @@ class SearchAgent:
     def _planner(self) -> Planner:
         if self._llm_on():
             return DeepSeekPlanner(self._api_key, self._client,
-                                   tools=tools_for(self._service.pansou_enabled))
+                                   tools=tools_for(self._service.pansou_enabled,
+                                                   self.lookup is not None))
         return RulePlanner()
 
     async def run(
@@ -520,6 +553,7 @@ class SearchAgent:
                 year = str(state.target.year) if state.target.year else None
                 add_aliases(state.target, await self.lookup(parsed.resource, year))
         state.pansou = self._service.pansou_enabled
+        state.lookup = self.lookup is not None
         providers = self._service.new_providers()
         key = resource_key(parsed.resource)
 
@@ -649,12 +683,48 @@ class SearchAgent:
                 return await self._pansou(action.args, state, providers)
             if action.tool == "verify":
                 return await self._verify(action.args, state)
+            if action.tool == "lookup_media" and state.lookup:
+                return await self._lookup_media(action.args, state)
             if action.tool == "finish":
                 return {"matching": len(state.matching())}
             return {"error": f"未知工具 {action.tool}"}
         except Exception as exc:
             logger.exception("工具执行异常: %s", action.tool)
             return {"error": type(exc).__name__}
+
+    async def _lookup_media(self, args: dict, state: AgentState) -> dict:
+        """查条目：把查到的中文名 / 原名加进片名判定和补搜用的别名，已判过的候选重判一遍。"""
+        name = str(args.get("name") or state.parsed.resource).strip()[:60]
+        year = str(args.get("year") or "").strip()[:4] or (
+            str(state.target.year) if state.target.year else None)
+        if not name or name in state.looked_up:
+            return {"error": "这个名字已经查过"}
+        state.looked_up.append(name)
+        infos = await self.lookup(name, year)
+        before = list(state.target.names)
+        add_aliases(state.target, infos)
+        known = {state.parsed.resource, *state.parsed.aliases, state.parsed.english_name or ""}
+        for info in infos:
+            for n in (info.title, info.original_title):
+                if n and n not in known and _key_in(n, state.target.names):
+                    state.parsed.aliases.append(n)
+                    known.add(n)
+        if state.target.names != before:  # 多了名字：没认出片名的候选重判
+            for c in state.candidates.values():
+                if c.relevance == "uncertain" and c.state == "valid":
+                    judge(c, state.target)
+        return {
+            "results": [
+                {k: v for k, v in {
+                    "title": i.title, "original_title": i.original_title, "year": i.year,
+                    "media": i.media, "source": i.source,
+                    "episodes": {str(k): v for k, v in i.episodes.items()} or None,
+                }.items() if v}
+                for i in infos[:5]
+            ],
+            "new_names": [n for n in state.target.names if n not in before],
+            "matching": len(state.matching()),
+        }
 
     async def _recall(self, state: AgentState, key: str) -> dict:
         state.recalled = True
