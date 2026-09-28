@@ -37,6 +37,7 @@ from app.models import (
     OrganizeRequest,
     QuarkLink,
     QuarkSearchResponse,
+    ReportRequest,
     SaveRequest,
     SaveResponse,
     SearchRequest,
@@ -72,7 +73,7 @@ from app.services.quark_save import (
     SaveError,
     Tidy,
 )
-from app.services.relevance import seasons_in
+from app.services.relevance import clean_keyword, seasons_in
 from app.services.search import QuarkSearchService, SearchUnavailableError
 from app.services.series import build_candidates
 from app.services.subscriptions import RES_TEXT, SubscriptionWatcher, strip_season
@@ -422,6 +423,27 @@ def create_app(
         return {"recorded": recorded}
 
     ClientId = Query(min_length=8, max_length=64)
+
+    @app.post("/api/feedback/report")
+    async def report_link(
+        req: ReportRequest, request: Request, client_id: str = ClientId,
+        _: None = Depends(rate_limit_dep),
+    ) -> dict:
+        """结果卡片上的「不对 / 失效」。同一人同一条只算一次，每人每天最多 50 条；
+        登录用户一票顶两票，累计 2 票生效：失效的所有人都不再推荐，「不对」的只对这部片排除。"""
+        store = _store_or_404()
+        owner = await _owner(request, client_id)
+        weight = 2 if owner.startswith("u:") else 1
+        # 未登录的按 IP 记（存哈希）：换浏览器标识刷不出第二票
+        ip = hashlib.sha256(client_ip(request).encode()).hexdigest()[:16]
+        reporter = owner if weight == 2 else f"ip:{ip}"
+        key = resource_key(clean_keyword(req.query)) if req.query else ""
+        status = await store.add_report(req.share, req.reason, key, req.query, reporter,
+                                        weight)
+        if status == "limited":
+            raise HTTPException(status_code=429, detail="今天反馈太多了，明天再来",
+                                headers={"Retry-After": "3600"})
+        return {"status": status}
 
     async def _owner(request: Request, client_id: str) -> str:
         """订阅与通知的归属：登录用户按账号（换浏览器也在），否则按浏览器标识。"""
@@ -1284,6 +1306,7 @@ def create_app(
         ),
         quota,
         rate_limit_dep,
+        links=resolved.store,
     ))
 
     @app.get("/api/quota")
