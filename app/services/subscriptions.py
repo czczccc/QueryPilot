@@ -123,6 +123,20 @@ class SubscriptionWatcher:
         self._store = store
         self._webhook = webhook
         self._client = client
+        self._running: set[int] = set()  # 正在检查的订阅：同一订阅不并发检查
+        self.stopping = False  # 服务要退出了：不再开始新的检查 / 转存
+
+    def busy(self, sub_id: int) -> bool:
+        return sub_id in self._running
+
+    async def due_in(self, interval_hours: float, soon: float = 300.0) -> float:
+        """距离下一轮后台检查还要等几秒：有订阅超过一个周期没检查（比如刚重新部署）就 `soon` 秒后开始。"""
+        subs = [x for _, x in await self._store.list_subscriptions() if x.state != "paused"]
+        if not subs:
+            return interval_hours * 3600
+        oldest = min((x.last_check or {}).get("at") or 0 for x in subs)
+        left = oldest + interval_hours * 3600 - time.time()
+        return max(soon, min(left, interval_hours * 3600))
 
     async def baseline(self, resource: str) -> tuple[int, int, str | None]:
         """订阅时的起点：记忆库里这部资源已知的最好情况，避免一订阅就把旧资源当成更新。"""
@@ -135,6 +149,19 @@ class SubscriptionWatcher:
         return episodes, score, res
 
     async def check(
+        self, client_id: str, sub: Subscription, sync_save: bool = False
+    ) -> list[tuple[str, str, str | None]]:
+        """检查一个订阅；同一订阅已经在检查、或服务正在退出时直接跳过（返回空）。"""
+        if self.stopping or sub.id in self._running:
+            logger.info("订阅 %s 正在检查或服务正在退出，这次跳过", sub.id)
+            return []
+        self._running.add(sub.id)
+        try:
+            return await self._check(client_id, sub, sync_save)
+        finally:
+            self._running.discard(sub.id)
+
+    async def _check(
         self, client_id: str, sub: Subscription, sync_save: bool = False
     ) -> list[tuple[str, str, str | None]]:
         """检查一个订阅，返回新产生的通知 (kind, message, share)。
@@ -578,6 +605,8 @@ class SubscriptionWatcher:
             total = 0
         subs = [x for x in await self._store.list_subscriptions() if x[1].state != "paused"]
         for i, (client_id, sub) in enumerate(subs[:limit]):
+            if self.stopping:  # 要退出了：剩下的下次再查
+                break
             if i and self.stagger > 0:
                 await asyncio.sleep(stagger(self.stagger))
             try:

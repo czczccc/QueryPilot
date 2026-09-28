@@ -171,12 +171,20 @@ async def _selfcheck_loop(check: SelfCheck, hour: int) -> None:
             logger.exception("每日自检异常")
 
 
+SHUTDOWN_GRACE = 60.0  # 退出时最多等进行中的订阅检查多少秒（compose 的 stop_grace_period 要比它长）
+
+
 async def _subscribe_loop(
     watcher: SubscriptionWatcher, interval_hours: float, quota: QuotaGuard | None = None
 ) -> None:
     """后台定期检查追剧订阅；单轮失败只记日志。LLM 用量记到 system，也受全站预算约束。"""
     while True:
-        await asyncio.sleep(interval_hours * 3600)
+        try:
+            wait = await watcher.due_in(interval_hours)
+        except Exception:
+            logger.exception("读取订阅检查时间失败")
+            wait = interval_hours * 3600
+        await asyncio.sleep(wait)
         try:
             allowed = True
             if quota is not None:
@@ -286,7 +294,17 @@ def create_app(
         try:
             yield
         finally:
-            for task in tasks:
+            # 优雅退出：不再开始新的检查，等手上的检查 / 转存做完（最多 SHUTDOWN_GRACE 秒）再停。
+            # 没来得及做的，下次检查会按网盘里缺的集接着补（已有的跳过），不会重复转存。
+            if watcher is not None:
+                watcher.stopping = True
+            busy = [t for t in (*tasks, *_bg_tasks) if not t.done()]
+            if busy and watcher is not None and watcher._running:
+                logger.info("等待 %d 个进行中的订阅检查结束", len(watcher._running))
+                deadline = time.monotonic() + SHUTDOWN_GRACE
+                while watcher._running and time.monotonic() < deadline:
+                    await asyncio.sleep(0.5)
+            for task in busy:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
@@ -840,6 +858,8 @@ def create_app(
         sub = next((x for _, x in await store.list_subscriptions(owner) if x.id == sub_id), None)
         if sub is None:
             raise HTTPException(status_code=404, detail="订阅不存在")
+        if app.state.watcher.busy(sub.id):
+            raise HTTPException(status_code=409, detail="这个订阅正在检查，稍等一会儿再看")
         if not _cooldown_ok(sub.id):
             left = _cooldown_left(sub.id)
             raise HTTPException(status_code=429, detail=f"刚检查过，{left} 秒后可以再查",
