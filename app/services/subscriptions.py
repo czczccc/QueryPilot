@@ -215,6 +215,10 @@ class SubscriptionWatcher:
                 reasons[note] = reasons.get(note, 0) + 1
         if reasons:
             logger.info("订阅检查被筛掉的原因 id=%s %s", sub.id, reasons)
+            for lk in [lk for lk in valid if lk.relevance != "match"][:3]:
+                logger.info("订阅检查被筛掉的例子 id=%s 来源=%s 标题=%s 分享名=%s 文件=%s", sub.id,
+                            lk.source[:30], lk.name[:40], (lk.share_title or "")[:40],
+                            lk.files_preview[:3])
         if sub.auto_save and self.auto_saver is not None:
             notes += await self._auto_save(client_id, sub, movie, ok, notes, sync_save)
         done = self._completed(sub, movie, ok)
