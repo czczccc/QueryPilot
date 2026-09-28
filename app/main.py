@@ -54,6 +54,7 @@ from app.security import RateLimiter, install_request_id_factory, set_request_id
 from app.services import calendar as cal
 from app.services import llm, privacy
 from app.services.agent import SearchAgent
+from app.services.alerts import Alerter
 from app.services.classify import Category, Classifier, episode_no, safe_name
 from app.services.cookie_box import CookieBox, session_hash
 from app.services.intent import DeepSeekParser
@@ -196,6 +197,7 @@ def create_app(
     trending: Trending | None = None,
     search_on_subscribe: bool | None = None,
     pacer: Pacer | None = None,
+    alerter: Alerter | None = None,
 ) -> FastAPI:
     """创建应用；传入 service / agent 便于测试注入假实现。"""
     resolved = service or build_default_service()
@@ -242,6 +244,12 @@ def create_app(
     if pacer is None:
         pacer = Pacer(_settings.quark_write_gap, _settings.quark_write_jitter,
                       _settings.save_daily_limit) if service is None else Pacer(0, 0, 0)
+    if alerter is None and service is None:
+        alerter = Alerter(_settings.alert_tg_bot_token, _settings.alert_tg_chat_id)
+    if alerter is not None and alerter.enabled:
+        resolved.alerts = alerter
+    else:
+        alerter = None
     if watcher is not None and service is None:
         watcher.stagger = _settings.check_stagger_seconds
         # 成组订阅统一挑合集：有 LLM key 由 AI 挑（额度用完自动按规则）
@@ -890,6 +898,8 @@ def create_app(
                 return []
             sub.auto_save_status = status
             await store.set_auto_save_status(sub.id, status)
+            if alerter is not None and status == "login_expired":
+                await alerter.login_expired(owner, sub.resource)
             await store.log_auto_save(sub.id, link.share, False, 0, None, message)
             return [("auto_save_paused", message, link.share)]
 
@@ -941,10 +951,14 @@ def create_app(
         except SaveError as e:
             message = f"{name}自动转存失败：{e}"
             await store.log_auto_save(sub.id, link.share, False, 0, None, message)
+            if alerter is not None:
+                await alerter.save_result(sub.id, sub.resource, False, str(e))
             return [("auto_save_failed", message, link.share)]
         finally:
             if quota is not None:
                 await quota.record(f"user:{owner[2:]}", SYSTEM, meter, searched=False)
+        if alerter is not None and result.done:
+            await alerter.save_result(sub.id, sub.resource, True)
         if sub.auto_save_status:
             sub.auto_save_status = None
             await store.set_auto_save_status(sub.id, None)
@@ -955,6 +969,8 @@ def create_app(
         if result.file_count == 0 and not result.skipped:
             message = f"{name}没能在分享「{result.title or link.name}」里找到要的集，没有转存"
             await store.log_auto_save(sub.id, link.share, False, 0, None, message + why)
+            if alerter is not None:
+                await alerter.save_result(sub.id, sub.resource, False, "分享里没找到要的集")
             return [("auto_save_failed", message, link.share)]
         have = {episode_no(n, sub.season, any_ext=True) for n in result.present
                 if kind_of(n) in ("video", "archive")} - {None}
