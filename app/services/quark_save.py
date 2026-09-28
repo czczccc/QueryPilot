@@ -131,7 +131,7 @@ class QuarkSaver:
         client: httpx.AsyncClient | None = None,
         timeout: float = 10.0,
         poll_interval: float = 1.0,
-        poll_times: int = 10,
+        poll_times: int = 30,
         classifier=None,
         root_dir: str = "QueryPilot",
         pacer: Pacer | None = None,
@@ -347,7 +347,8 @@ class QuarkSaver:
                 return True
             if task.get("status") not in (0, 1, None):  # 夸克任务失败
                 raise SaveError(f"夸克转存任务失败（状态 {task.get('status')}）")
-            await asyncio.sleep(self._poll_interval)
+            # 夸克大文件转存是异步的，可能要一两分钟：越等越慢地查，最长约 2 分钟
+            await asyncio.sleep(self._poll_interval * min(1 + i // 3, 5))
         return False
 
     async def _walk_share(
