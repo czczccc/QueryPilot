@@ -60,6 +60,7 @@ from app.services.quark_login import LoginError, QuarkQrLogin, qr_svg
 from app.services.quark_save import LoginExpiredError, QuarkSaver, SaveError, Tidy
 from app.services.relevance import seasons_in
 from app.services.search import QuarkSearchService, SearchUnavailableError
+from app.services.series import build_candidates
 from app.services.subscriptions import RES_TEXT, SubscriptionWatcher, strip_season
 from app.services.trending import Trending
 from app.services.usage import SYSTEM, QuotaConfig, QuotaGuard, UsageStore
@@ -392,12 +393,13 @@ def create_app(
         q: str = Query(min_length=1, max_length=100), year: str | None = Query(None, max_length=4),
         _: None = Depends(rate_limit_dep),
     ) -> list[MediaCandidate]:
-        """订阅前选影视条目（TMDB 配了 key 才查，豆瓣无需 key）；都查不到返回空列表。"""
+        """订阅前选影视条目（TMDB 配了 key 才查，豆瓣无需 key），每个来源最多 10 条；
+        同一系列的电影合并成一个 kind=collection 的候选（带全部作品）。都查不到返回空列表。"""
         if media_lookup is None:
             return []
-        infos = await media_lookup(strip_season(q.strip()), year)
-        return [MediaCandidate(**{k: getattr(i, k) for k in MediaCandidate.model_fields})
-                for i in infos if i.media]
+        name = strip_season(q.strip())
+        infos = await media_lookup(name, year, limit=10)
+        return await build_candidates(name, infos, getattr(media_lookup, "collection", None))
 
     async def _identify(req: SubscribeRequest) -> dict:
         """订阅的条目信息：前端选好的优先，缺的用 TMDB / 豆瓣补；都没有就按关键词订阅。"""

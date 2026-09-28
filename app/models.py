@@ -326,18 +326,41 @@ class SubscriptionHistory(BaseModel):
     reason: str  # 如「已集齐 12 集」「手动完成」
 
 
-class MediaCandidate(BaseModel):
-    """订阅前让用户选的影视条目。"""
+class CollectionPart(BaseModel):
+    """系列电影里的一部（TMDB collection 的 parts，按上映日期排好）。"""
 
-    source: str  # tmdb / douban
-    id: str | None = None
+    index: int  # 第几部，从 1 开始
+    id: str  # 这一部的 TMDB 电影 id
     title: str
     original_title: str | None = None
     year: str | None = None
-    media: MediaType | None = None
+    release_date: str | None = None  # YYYY-MM-DD；没有表示还没定档
+    poster: str | None = None
+    released: bool = False  # 已上映
+
+
+class CollectionInfo(BaseModel):
+    id: str  # TMDB collection id
+    name: str  # 去掉「（系列）」等后缀，如「谍影重重」
+    poster: str | None = None
+    parts: list[CollectionPart] = Field(default_factory=list)
+
+
+class MediaCandidate(BaseModel):
+    """订阅前让用户选的影视条目。系列电影合并成一个 kind=collection 的候选，用下拉框选第几部。"""
+
+    source: str  # tmdb / douban
+    id: str | None = None  # 条目 id；系列候选是 collection id
+    title: str
+    original_title: str | None = None
+    year: str | None = None
+    media: MediaType | None = None  # 系列候选为 movie
+    kind: Literal["movie", "tv", "collection"] | None = None  # 豆瓣认不出类型时为 None
     poster: str | None = None
     seasons: int | None = None
     episodes: dict[int, int] = Field(default_factory=dict)  # 季 → 总集数
+    collection: CollectionInfo | None = None  # 只有 kind=collection 时有
+    default_part: int | None = None  # 默认选中第几部（从 1 开始）
 
 
 class Notification(BaseModel):

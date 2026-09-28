@@ -20,7 +20,7 @@ class FakeLookup:
         self.infos = infos
         self.calls: list[tuple] = []
 
-    async def __call__(self, name, year, fresh=False):
+    async def __call__(self, name, year, fresh=False, limit=2):
         self.calls.append((name, year, fresh))
         return self.infos
 

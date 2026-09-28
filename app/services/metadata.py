@@ -9,11 +9,12 @@
 import asyncio
 import logging
 import re
+import time
 from dataclasses import asdict, dataclass, field
 
 import httpx
 
-from app.models import AirEpisode
+from app.models import AirEpisode, CollectionInfo, CollectionPart
 from app.services.relevance import seasons_in
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ class MediaInfo:
     poster: str | None = None  # 海报图地址
     episodes: dict[int, int] = field(default_factory=dict)  # 季 → 总集数（剧集）
     season_years: dict[int, str] = field(default_factory=dict)  # 季 → 开播年份（剧集）
+    collection: dict | None = None  # 电影所属系列（TMDB）：{id, name, poster}
 
     def brief(self) -> dict:
         return {k: v for k, v in asdict(self).items() if v not in (None, [], "")}
@@ -96,6 +98,7 @@ async def search_tmdb(
             d = hit
         countries = [c.get("iso_3166_1") for c in d.get("production_countries") or []
                      if isinstance(c, dict)] or list(d.get("origin_country") or [])
+        coll = d.get("belongs_to_collection")
         return MediaInfo(
             source="tmdb",
             title=d.get("title") or d.get("name") or "",
@@ -121,6 +124,9 @@ async def search_tmdb(
                 if isinstance(x, dict) and isinstance(x.get("season_number"), int)
                 and x["season_number"] > 0 and (y := _year(x.get("air_date")))
             },
+            collection={"id": str(coll["id"]), "name": coll.get("name") or "",
+                        "poster": _tmdb_poster(coll.get("poster_path"))}
+            if isinstance(coll, dict) and coll.get("id") else None,
         )
 
     found = await asyncio.gather(*(detail(h) for h in hits[:limit]))
@@ -150,6 +156,51 @@ async def tmdb_season(
             name=e.get("name") if isinstance(e.get("name"), str) else None,
         ))
     return out
+
+
+_SERIES_SUFFIX = re.compile(r"\s*(?:[（(]?系列[）)]?|合集|\s[Cc]ollection)$")
+
+
+def collection_name(name: str) -> str:
+    """「谍影重重（系列）」→「谍影重重」；去完是空的就用原名。"""
+    return _SERIES_SUFFIX.sub("", name.strip()) or name.strip()
+
+
+async def tmdb_collection(
+    cid: str, api_key: str, client: httpx.AsyncClient, base: str = TMDB_BASE,
+    timeout: float = 8.0, today: str | None = None,
+) -> CollectionInfo | None:
+    """系列电影的全部作品（TMDB /collection/{id}），按上映日期排序；没定档的排最后。"""
+    headers, auth = _tmdb_auth(api_key)
+    resp = await client.get(
+        f"{(base or TMDB_BASE).rstrip('/')}/collection/{cid}",
+        params={**auth, "language": "zh-CN"}, headers=headers, timeout=timeout,
+    )
+    resp.raise_for_status()
+    d = resp.json()
+    today = today or time.strftime("%Y-%m-%d")
+    raw = []
+    for p in d.get("parts") or []:
+        if not isinstance(p, dict) or not p.get("id") or p.get("media_type", "movie") != "movie":
+            continue
+        date = p.get("release_date")
+        date = date if isinstance(date, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) else None
+        raw.append((date or "9999", p, date))
+    raw.sort(key=lambda x: x[0])
+    parts = [
+        CollectionPart(
+            index=i, id=str(p["id"]), title=p.get("title") or p.get("original_title") or "",
+            original_title=p.get("original_title"), year=_year(date), release_date=date,
+            poster=_tmdb_poster(p.get("poster_path")), released=bool(date and date <= today),
+        )
+        for i, (_, p, date) in enumerate(raw, 1)
+    ]
+    if not parts:
+        return None
+    return CollectionInfo(
+        id=str(d.get("id") or cid), name=collection_name(d.get("name") or ""),
+        poster=_tmdb_poster(d.get("poster_path")) or parts[0].poster, parts=parts,
+    )
 
 
 # ---------------- 豆瓣 ----------------
@@ -213,26 +264,29 @@ class MetadataLookup:
         self._tmdb_base = tmdb_base
         self._douban = douban
         self._client = client
-        self._cache: dict[tuple[str, str | None], list[MediaInfo]] = {}
+        self._cache: dict[tuple[str, str | None, int], list[MediaInfo]] = {}
+        self._collections: dict[str, tuple[float, CollectionInfo | None]] = {}
 
     @property
     def enabled(self) -> bool:
         return bool(self._tmdb_key) or self._douban
 
     async def __call__(
-        self, name: str, year: str | None, fresh: bool = False
+        self, name: str, year: str | None, fresh: bool = False, limit: int = 2
     ) -> list[MediaInfo]:
-        """`fresh`：跳过缓存重新查（订阅定期刷新总集数时用）。"""
-        key = (name, year)
+        """`fresh`：跳过缓存重新查（订阅定期刷新总集数时用）；`limit`：每个来源取几条
+        （转存分类只要最像的 2 条，订阅选条目取 10 条）。"""
+        key = (name, year, limit)
         if key in self._cache and not fresh:
             return self._cache[key]
         client = self._client or httpx.AsyncClient(timeout=10.0, follow_redirects=True)
         try:
             tasks = []
             if self._tmdb_key:
-                tasks.append(search_tmdb(name, year, self._tmdb_key, client, self._tmdb_base))
+                tasks.append(search_tmdb(name, year, self._tmdb_key, client, self._tmdb_base,
+                                         limit=limit))
             if self._douban:
-                tasks.append(search_douban(name, year, client))
+                tasks.append(search_douban(name, year, client, limit=limit))
             results = await asyncio.gather(*tasks, return_exceptions=True)
         finally:
             if self._client is None:
@@ -247,6 +301,27 @@ class MetadataLookup:
             self._cache.clear()
         self._cache[key] = found
         return found
+
+    async def collection(self, cid: str, fresh: bool = False) -> CollectionInfo | None:
+        """系列电影的全部作品（缓存 1 天）；没配 TMDB key 或查询失败时为 None。"""
+        if not self._tmdb_key or not cid:
+            return None
+        hit = self._collections.get(cid)
+        if hit and not fresh and time.monotonic() - hit[0] < 86400:
+            return hit[1]
+        client = self._client or httpx.AsyncClient(timeout=10.0, follow_redirects=True)
+        try:
+            info = await tmdb_collection(cid, self._tmdb_key, client, self._tmdb_base)
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning("系列电影查询失败（%s）", type(e).__name__)
+            return None
+        finally:
+            if self._client is None:
+                await client.aclose()
+        if len(self._collections) > 500:
+            self._collections.clear()
+        self._collections[cid] = (time.monotonic(), info)
+        return info
 
     async def schedule(self, tmdb_id: str, season: int) -> list[AirEpisode]:
         """剧集一季的播出日历；没配 TMDB key（豆瓣没有每集日期）或查询失败时为空。"""
