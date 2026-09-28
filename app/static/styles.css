@@ -2257,3 +2257,4 @@ dialog, .sub-dialog, .qr-dialog { border-radius: 14px; border: 1px solid var(--b
 
 /* 统计：数字带语义色，底色保持中性 */
 .ss-cell { background: transparent !important; border: 1px solid var(--border); }
+@media (max-width: 860px) { .sidenav { background: var(--topbar-bg); border-top: 1px solid var(--border); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); } }
