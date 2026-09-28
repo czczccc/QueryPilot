@@ -28,8 +28,10 @@ services:
       # 插件白名单：只开网盘/夸克影视类。PanSou 默认会开成人站和 BT 站插件
       # （javdb、u3c3、nyaa、thepiratebay 等），所以这里必须显式列出，不要改成全部启用
       - ENABLED_PLUGINS=${PANSOU_PLUGINS:-pansearch,qupansou,hunhepan,quark4k,quarksoo,quarktv,quarkres,panlian,yunso,yunsou,sousou,haitunsou,xiaokupan,labi,zhizhen,shandian,muou,duoduo,wanou,ouge,huban,hdmoli,libvio,duanjuw,kkv}
-      # QueryPilot 默认只请求插件结果（PANSOU_SRC=plugin）；要用 TG 频道时，先人工筛好频道再填
-      - CHANNELS=${PANSOU_CHANNELS:-}
+      # TG 频道：默认用下面这组影视 / 夸克资源频道（取自 PanSou README 推荐列表里和影视、夸克相关的）。
+      # QueryPilot 只在 .env 设了 PANSOU_SRC=all 时才让 PanSou 搜 TG；且只要夸克链接（cloud_types=quark）。
+      # 想换成自己的名单就在 .env 里写 PANSOU_CHANNELS=频道1,频道2（留空用这里的默认）
+      - CHANNELS=${PANSOU_CHANNELS:-tgsearchers4,Quark_Movies,ucquark,XiangxiuNBB,ydypzyfx,dianyingshare,yingshifenxiang123,zaihuayun,Q66Share,Oscar_4Kmovies,kkxlzy,baicaoZY,MCPH01,MCPH086,yggpan,ysxb48,jdjdn1111,yunpanx,zyfb123,gotopan,PanjClub,Q_dongman,yoyokuakeduanju}
       - CACHE_TTL=60
       - ASYNC_RESPONSE_TIMEOUT=4
       # - PROXY=socks5://host:port   # 国内服务器访问 TG 需要代理
