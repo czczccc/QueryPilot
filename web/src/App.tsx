@@ -1,6 +1,7 @@
 import { Bell, Moon, Search, SlidersHorizontal, Sun } from "lucide-react";
 import type { ReactNode } from "react";
 import { useState } from "react";
+import { PrivacyDialogs, type PrivacyView } from "./features/settings/PrivacyDialogs";
 import { Button, cn } from "@cz/design-system";
 import { AccountButton } from "./features/account/AccountButton";
 import { QuarkLoginDialog } from "./features/account/QuarkLoginDialog";
@@ -95,6 +96,24 @@ function Nav({ route }: { route: Route }) {
   );
 }
 
+function Footer() {
+  const [view, setView] = useState<PrivacyView>(null);
+  return (
+    <footer className="mt-16 flex flex-col items-center gap-2 text-center text-caption text-fg-subtle">
+      <p>结果来自公开搜索源，仅供合规用途；链接可达性与内容有效性请自行判断。</p>
+      <p className="flex gap-3">
+        <button type="button" className="underline-offset-4 hover:text-fg-muted hover:underline" onClick={() => setView("privacy")}>
+          隐私说明
+        </button>
+        <button type="button" className="underline-offset-4 hover:text-fg-muted hover:underline" onClick={() => setView("delete")}>
+          删除我的数据
+        </button>
+      </p>
+      <PrivacyDialogs view={view} onChange={setView} />
+    </footer>
+  );
+}
+
 export function App() {
   const route = useRoute();
   return (
@@ -116,10 +135,14 @@ export function App() {
       <div className="mx-auto flex max-w-6xl gap-10 px-4 pt-6 pb-28 md:px-6 md:pb-16">
         <Nav route={route} />
         <main className="min-w-0 flex-1">
-          {route.view === "discover" && <DiscoverPage />}
+          {/* 搜索页一直挂着，切到其他页再回来时结果还在（和旧版一样） */}
+          <div hidden={route.view !== "discover"}>
+            <DiscoverPage />
+          </div>
           {route.view === "subs" && <SubsPage tab={route.tab} />}
           {route.view === "settings" && <SettingsPage />}
           {route.view === "admin" && <AdminPage />}
+          <Footer />
         </main>
       </div>
       <SubsSync />
