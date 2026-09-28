@@ -454,6 +454,15 @@ class QuarkSaver:
         )
         self._check(resp.json(), "重命名失败")
 
+    async def remove_dir(self, path: str) -> bool:
+        """按路径删掉一个目录（进回收站）；目录不存在返回 False。只给每日自检清理自己的测试目录用。"""
+        headers = self._headers("")
+        fid = await self.find_dir(path, headers)
+        if fid is None:
+            return False
+        await self.delete([fid], headers)
+        return True
+
     async def delete(self, fids: list[str], headers: dict) -> None:
         """删除（进夸克回收站，可在网盘里恢复）。只在用户确认后调用。"""
         await self._pace()
