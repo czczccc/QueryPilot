@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from app.models import (
+    NOTICE_TYPES,
     AirEpisode,
     Notification,
     QualityInfo,
@@ -181,6 +182,8 @@ SUB_FIELDS = {
     "collection_id": "collection_id", "collection_name": "collection_name",
     "collection_index": "collection_index", "series": "series", "release_date": "release_date",
 }
+
+_SEASON_IN_NAME = re.compile(r"\s*第\s*(\d+)\s*季")
 
 _PUNCT_RE = re.compile(r"[\s\-_·:：,，.。!！?？'\"“”‘’()（）\[\]【】《》<>]+")
 
@@ -615,21 +618,38 @@ class LinkStore:
     def _notifications(
         self, client_id: str, limit: int, include_read: bool
     ) -> list[Notification]:
-        unread = "" if include_read else " AND read = 0"
+        unread = "" if include_read else " AND n.read = 0"
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT * FROM notifications WHERE client_id = ? AND dismissed = 0{unread} "
-                "ORDER BY ts DESC, id DESC LIMIT ?",
+                "SELECT n.*, COALESCE(l.share_title, l.name) AS share_name,"
+                " s.season AS sub_season, s.media AS sub_media,"
+                " s.collection_index AS sub_index, s.collection_name AS sub_coll"
+                " FROM notifications n LEFT JOIN links l ON l.share = n.share"
+                " LEFT JOIN subscriptions s ON s.id = n.subscription_id"
+                f" WHERE n.client_id = ? AND n.dismissed = 0{unread}"
+                " ORDER BY n.ts DESC, n.id DESC LIMIT ?",
                 (client_id, limit),
             ).fetchall()
-        return [
-            Notification(
-                id=r["id"], subscription_id=r["subscription_id"], resource=r["resource"],
-                kind=r["kind"], message=r["message"], share=r["share"], ts=r["ts"],
-                read=bool(r["read"]),
-            )
-            for r in rows
-        ]
+        return [self._row_to_notice(r) for r in rows]
+
+    @staticmethod
+    def _row_to_notice(r: sqlite3.Row) -> Notification:
+        resource = r["resource"]
+        m = _SEASON_IN_NAME.search(resource)
+        season = r["sub_season"] if r["sub_media"] == "tv" else None
+        if season is None and m:
+            season = int(m.group(1))
+        name = _SEASON_IN_NAME.sub("", resource).strip() or resource
+        kind_type, summary = NOTICE_TYPES.get(r["kind"], (r["kind"], ""))
+        return Notification(
+            id=r["id"], subscription_id=r["subscription_id"], resource=resource,
+            kind=r["kind"], message=r["message"], share=r["share"], ts=r["ts"],
+            read=bool(r["read"]), type=kind_type, summary=summary, subscription_name=name,
+            season=season, part=r["sub_index"] if r["sub_media"] == "movie" else None,
+            resource_title=r["share_name"],
+            url=f"https://pan.quark.cn/s/{r['share']}" if r["share"] else None,
+            created_at=time.strftime("%Y-%m-%dT%H:%M:%S+08:00", time.gmtime(r["ts"] + 8 * 3600)),
+        )
 
     def _tidy_notifications(self, sub: Subscription, now: float, archived: bool) -> None:
         """自动收起（标已读）过时的通知（调用方持有锁）：
