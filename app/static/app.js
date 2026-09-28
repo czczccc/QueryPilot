@@ -1857,6 +1857,24 @@ async function subscribe(payload) {
   return null;
 }
 
+// 订阅整个系列：后端为每一部建一个电影订阅（已订阅 / 已完成的跳过），整个系列只占 1 个名额
+async function subscribeCollection(payload, name) {
+  const res = await subApi("/collection", "POST", Object.assign({ client_id: clientId }, payload));
+  if (res.ok) {
+    const list = Array.isArray(res.body) ? res.body : [];
+    toast(list.length
+      ? "已订阅《" + name + "》系列的 " + list.length + " 部电影（只占 1 个订阅名额）" + (payload.auto_join ? "，以后出新作会自动加入" : "")
+      : "《" + name + "》系列的电影都已经订阅过或已完成", "ok", 4000);
+    subsTab = "movie";
+    loadSubs();
+    setTimeout(loadSubs, 45000);
+    return list[0] || { resource: name };
+  }
+  const why = payload.auto_save ? "自动转存需要先扫码登录夸克" : "订阅追剧需要先扫码登录夸克";
+  if (await loginIfNeeded(res, why)) return subscribeCollection(payload, name);
+  return null;
+}
+
 // 片名末尾的全角波浪号（如「无职转生～到了异世界就拿出真本事～」）去掉再拼季，
 // 否则显示成「…本事～ 第3季」
 function tidyTitle(t) {
@@ -1931,6 +1949,11 @@ function collectionOption(c, idx, name) {
     o.value = String(p.index);
     sel.appendChild(o);
   });
+  if (parts.length > 1) {
+    const all = el("option", "", "整个系列（" + parts.length + " 部）");
+    all.value = "all";
+    sel.appendChild(all);
+  }
   const def = parts.some((p) => p.index === c.default_part) ? c.default_part : parts[0].index;
   sel.value = String(def);
   sel.addEventListener("click", () => { radio.checked = true; radio.dispatchEvent(new Event("change", { bubbles: true })); });
@@ -1978,6 +2001,16 @@ function openSubscribeDialog(target, opts) {
       sw.title = meState.logged_in ? "剧集会立即补齐网盘里缺的集；电影有合适资源时存一次" : "需要先扫码登录夸克";
       optsBox.appendChild(sw);
     }
+    // 选「整个系列」时才出现：以后出新作自动加入（默认关）
+    const joinSw = el("label", "switch small sd-join");
+    const joinCb = el("input");
+    joinCb.type = "checkbox";
+    const joinTrack = el("span", "switch-track");
+    joinTrack.setAttribute("aria-hidden", "true");
+    joinSw.append(joinCb, joinTrack, "以后出新作自动加入");
+    joinSw.title = "每天查一次这个系列有没有新片，有就自动订阅并通知你";
+    joinSw.hidden = true;
+    optsBox.appendChild(joinSw);
     const more = el("details", "sd-more");
     more.appendChild(el("summary", "", "更多规则（清晰度、关键词、起始集）"));
     const rulesGrid = el("div", "sub-edit-grid");
@@ -2018,6 +2051,9 @@ function openSubscribeDialog(target, opts) {
     const syncOpts = () => { // 电影没有起始集
       const c = selected();
       rulesGrid.querySelectorAll(".tv-only").forEach((f) => { f.hidden = !!c && c.media === "movie"; });
+      const part = list.querySelector(".cand input:checked") && list.querySelector(".cand input:checked").closest(".cand").querySelector(".cand-part");
+      joinSw.hidden = !(part && part.value === "all");
+      setText(ok, joinSw.hidden ? "订阅" : "订阅整个系列");
       list.querySelectorAll(".cand").forEach((l) => l.classList.toggle("on", l.querySelector("input").checked));
     };
     list.addEventListener("change", syncOpts);
@@ -2054,6 +2090,21 @@ function openSubscribeDialog(target, opts) {
       if (name.length < 2 && !selected()) { toast("片名至少 2 个字", "error"); q.focus(); return; }
       const c = selected();
       const payload = {};
+      const partSel = c && c.kind === "collection" ? list.querySelector(".cand.on .cand-part") : null;
+      if (partSel && partSel.value === "all") {
+        const rules = readRules(rulesGrid, null);
+        const body = { collection_id: String(c.collection.id), auto_join: joinCb.checked, auto_save: !!(autoCb && autoCb.checked) };
+        ["resolution", "include", "exclude", "upgrade", "upgrade_to"].forEach((k) => { if (rules[k] !== undefined && rules[k] !== "") body[k] = rules[k]; });
+        ok.disabled = true;
+        ok.classList.add("loading");
+        dlg.close();
+        const sub = await subscribeCollection(body, collectionName(c.collection.name) || c.title);
+        if (sub || closed) { finish(sub); return; }
+        dlg.showModal();
+        ok.disabled = false;
+        ok.classList.remove("loading");
+        return;
+      }
       if (c && c.kind === "collection" && collectionParts(c).length) { // 选了系列里的某一部：按普通电影订阅
         const sel = list.querySelector(".cand.on .cand-part");
         const parts = collectionParts(c);
