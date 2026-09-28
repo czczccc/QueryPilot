@@ -496,49 +496,7 @@ body.searched .hero h1,
 body.searched .hero .tagline,
 body.searched .hero .features { display: none; }
 
-/* ================= 偏好 / 订阅 面板 ================= */
-.panels {
-  display: grid;
-  gap: 0.6rem;
-  max-width: 680px;
-  margin: 0.5rem auto 0;
-}
-
-@media (min-width: 640px) {
-  .panels { grid-template-columns: 1fr 1fr; align-items: start; }
-}
-
-.panel {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  transition: box-shadow 0.3s ease;
-}
-
-.panel[open] { box-shadow: var(--shadow); }
-
-.panel summary {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.65rem 1rem;
-  font-size: 0.9rem;
-  font-weight: 500;
-  color: var(--muted);
-  cursor: pointer;
-  list-style: none;
-  border-radius: 14px;
-  user-select: none;
-  transition: color 0.2s ease;
-}
-
-.panel summary::-webkit-details-marker { display: none; }
-.panel summary:hover, .panel[open] summary { color: var(--text); }
-.panel .chev { margin-left: auto; transition: transform 0.3s var(--ease); }
-.panel[open] .chev { transform: rotate(180deg); }
-
-.panel-body { padding: 0 1rem 0.9rem; animation: fade-down 0.35s var(--ease); }
-
+/* ================= 偏好设置 / 订阅：视图内的通用块 ================= */
 @keyframes fade-down {
   from { opacity: 0; transform: translateY(-6px); }
   to { opacity: 1; transform: none; }
@@ -1753,10 +1711,6 @@ body.searched .hero .memory-stats { display: none; }
   .sub-dialog { padding: 1rem; }
 }
 
-/* 订阅面板打开时占满整行，卡片不那么挤 */
-@media (min-width: 640px) {
-  .panels:has(#subs-panel[open]) > * { grid-column: 1 / -1; }
-}
 
 /* ================= 可能相关（待核对）折叠区 ================= */
 .maybe-box { margin-top: 0.9rem; border: 1px dashed var(--border-strong); border-radius: var(--radius); background: var(--surface); }
@@ -1984,4 +1938,192 @@ body.searched .hero .memory-stats { display: none; }
   .note-top { flex-wrap: wrap; }
   .note-summary { flex-basis: 100%; order: 3; }
   .note-time { margin-left: auto; }
+}
+
+/* ================= 应用骨架：左侧导航 + 视图 ================= */
+.app-shell {
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+  gap: 1.5rem;
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 0 max(1.25rem, env(safe-area-inset-right)) 0 max(1.25rem, env(safe-area-inset-left));
+}
+.app-shell > .container { width: 100%; max-width: 920px; margin: 0 auto; padding-left: 0; padding-right: 0; min-width: 0; }
+
+.sidenav {
+  position: sticky;
+  top: 4.25rem;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: calc(100vh - 5.5rem);
+  overflow-y: auto;
+  margin-top: 1.25rem;
+  padding: 0.75rem 0.6rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: saturate(160%) blur(14px);
+  -webkit-backdrop-filter: saturate(160%) blur(14px);
+}
+.nav-group {
+  margin: 0.7rem 0.6rem 0.2rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.nav-group:first-child { margin-top: 0.1rem; }
+.nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 0.92rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+.nav-item svg { flex: none; }
+.nav-item:hover { color: var(--text); background: var(--surface-2); }
+.nav-item.active { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.nav-badge {
+  margin-left: auto;
+  min-width: 1.25rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1.25rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.nav-sub { display: flex; flex-direction: column; margin: 0.1rem 0 0.2rem 1.9rem; border-left: 1px solid var(--border); }
+.nav-sub a {
+  padding: 0.3rem 0.7rem;
+  font-size: 0.84rem;
+  color: var(--muted);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  margin-left: -1px;
+  transition: color 0.2s ease, border-color 0.2s ease;
+}
+.nav-sub a:hover { color: var(--text); }
+.nav-sub a.active { color: var(--accent); border-left-color: var(--accent); font-weight: 600; }
+.sidenav [hidden] { display: none; }
+
+/* 视图：只显示当前一个，切换时淡入；布局容器固定，不因展开内容而重排 */
+.view[hidden] { display: none; }
+.view { animation: fade-up 0.35s var(--ease) both; }
+.view-page { padding-top: 1.5rem; }
+.view-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+.view-head h2 { display: flex; align-items: center; gap: 0.6rem; margin: 0; font-size: 1.45rem; letter-spacing: -0.01em; }
+.view-head .unread { font-size: 0.75rem; }
+.view-sub { margin: 0.3rem 0 0; max-width: 62ch; color: var(--muted); font-size: 0.85rem; }
+.view-head > .primary-btn { flex: none; }
+.view-head > .primary-btn[hidden] { display: none; }
+.view-empty { padding: 1.5rem 0; }
+
+.workspace {
+  padding: 1rem 1.1rem 1.1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+.workspace .subs-toolbar { margin-top: 0.4rem; }
+
+/* 订阅概况：四个数字，出问题的用颜色标出来 */
+.subs-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.5rem;
+  margin-bottom: 0.9rem;
+}
+.subs-summary[hidden] { display: none; }
+.ss-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.6rem 0.8rem;
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.ss-n { font-size: 1.3rem; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.ss-label { font-size: 0.78rem; color: var(--muted); }
+.ss-cell.tone-warn { background: var(--warn-soft); }
+.ss-cell.tone-warn .ss-n { color: var(--warn); }
+.ss-cell.tone-danger { background: var(--danger-soft); }
+.ss-cell.tone-danger .ss-n { color: var(--danger); }
+
+.settings-card h3 { margin: 0 0 0.75rem; font-size: 1rem; }
+.settings-card .panel-hint { margin-top: 0.75rem; }
+.settings-links { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.85rem; }
+.secondary-btn.danger-text { color: var(--danger); }
+.secondary-btn.danger-text:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--danger); }
+
+/* 窄屏：导航收成底部标签栏，只留三个主入口；订阅的分类用页面里的标签页 */
+@media (max-width: 860px) {
+  .app-shell { display: block; padding: 0; }
+  .app-shell > .container { padding: 0 1rem 2.5rem; }
+  body { padding-bottom: calc(4rem + env(safe-area-inset-bottom)); }
+  .sidenav {
+    position: fixed;
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    flex-direction: row;
+    justify-content: space-around;
+    max-height: none;
+    margin: 0;
+    padding: 0.35rem 0.5rem calc(0.35rem + env(safe-area-inset-bottom));
+    background: var(--topbar-bg);
+    border: none;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    box-shadow: none;
+    overflow: visible;
+  }
+  .nav-group, .nav-sub { display: none; }
+  .nav-item {
+    flex: 1 1 0;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+    padding: 0.35rem 0.25rem;
+    font-size: 0.72rem;
+    text-align: center;
+  }
+  .nav-item.active { background: transparent; }
+  .nav-item span:not(.nav-badge) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .nav-badge { position: absolute; top: 0.1rem; left: calc(50% + 0.35rem); margin: 0; }
+  .to-top { bottom: calc(4.75rem + env(safe-area-inset-bottom)); }
+  .toasts { bottom: calc(4.75rem + env(safe-area-inset-bottom)); }
+}
+@media (max-width: 600px) {
+  .view-page { padding-top: 1rem; }
+  .view-head { flex-direction: column; align-items: stretch; gap: 0.75rem; }
+  .view-head h2 { font-size: 1.25rem; flex-wrap: wrap; }
+  .view-head > .primary-btn { align-self: flex-start; }
+  .workspace { padding: 0.8rem 0.75rem; border-radius: 14px; }
+  .subs-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .subs-toolbar { flex-wrap: wrap; }
+  .seg { max-width: 100%; overflow-x: auto; }
+  .seg button { flex: none; }
 }

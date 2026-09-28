@@ -855,6 +855,9 @@ const subsList = document.getElementById("subs-list");
 const notifBox = document.getElementById("notif-box");
 let notesCache = [];
 const subsUnread = document.getElementById("subs-unread");
+const navUnread = document.getElementById("nav-unread");
+const subsOff = document.getElementById("subs-off");
+const subsSummary = document.getElementById("subs-summary");
 const subsTabs = document.getElementById("subs-tabs");
 const newSubBtn = document.getElementById("new-sub-btn");
 const subscribeBtn = document.getElementById("subscribe-btn");
@@ -917,12 +920,18 @@ async function loadSubs() {
       fetch("/api/subscriptions/history?" + cidParam()).catch(() => null),
       fetch("/api/subscriptions/collections?" + cidParam()).catch(() => null),
     ]);
-    if (!subsResp.ok || !notifResp.ok) return; // 记忆未开启：不显示订阅
+    if (!subsResp.ok || !notifResp.ok) { // 记忆未开启：不显示订阅
+      if (subsPanel.hidden) setText(subsOff, "服务器没有开启订阅功能。");
+      return;
+    }
     subsCache = await subsResp.json();
     historyCache = histResp && histResp.ok ? await histResp.json() : [];
     collectionsCache = collResp && collResp.ok ? await collResp.json().catch(() => []) : [];
     const notes = await notifResp.json();
     subsPanel.hidden = false;
+    subsOff.hidden = true;
+    setNavAvailable("subs");
+    newSubBtn.hidden = false;
     if (lastResult) {
       subscribeBtn.hidden = false;
       if (subscribeBox.hidden) renderSubscribeBox(lastResult);
@@ -932,7 +941,9 @@ async function loadSubs() {
     renderNotifs();
 
     renderSubsTab();
-  } catch (_) { /* 网络问题：下次再试 */ }
+  } catch (_) { // 网络问题：下次再试
+    if (subsPanel.hidden) setText(subsOff, "订阅加载失败，请稍后刷新重试。");
+  }
 }
 
 // ---- 订阅提醒：卡片样式，按订阅分组；未读的一条条「已读」，已读的折叠起来 ----
@@ -1015,6 +1026,9 @@ function renderNotifs() {
   const read = notesCache.filter((n) => n.read);
   subsUnread.hidden = unread.length === 0;
   setText(subsUnread, unread.length + " 条新提醒");
+  navUnread.hidden = unread.length === 0;
+  setText(navUnread, unread.length > 99 ? "99+" : String(unread.length));
+  navUnread.title = unread.length + " 条新提醒";
   notifBox.innerHTML = "";
   if (unread.length) {
     const head = el("div", "notif-head");
@@ -1235,6 +1249,8 @@ function renderSubsTab() {
     const n = SUBS_TABS[tab].count();
     setText(b.querySelector(".seg-n"), n ? String(n) : "");
   });
+  renderSubsSummary();
+  syncNav();
   subsList.innerHTML = "";
   if (subsTab === "calendar") { renderCalendar(); return; }
   const items = subsTab === "history"
@@ -1244,11 +1260,36 @@ function renderSubsTab() {
   items.forEach((li) => subsList.appendChild(li));
 }
 
+// 订阅概况：只用已拉到的订阅数据统计，方便一眼看出哪些要处理
+function renderSubsSummary() {
+  const tv = subsCache.filter((s) => subMedia(s) === "tv");
+  const failing = subsCache.filter((s) => s.last_error && s.state !== "paused").length;
+  const paused = subsCache.filter((s) => s.state === "paused").length;
+  const missing = tv.reduce((n, s) => n + (Array.isArray(s.lack_episodes) ? s.lack_episodes.length : 0), 0);
+  const tracking = subsCache.length - paused;
+  const cells = [
+    ["追更中", tracking, "", "剧集和电影里正在定期检查的订阅"],
+    ["缺集", missing, missing ? "warn" : "", "剧集订阅里还没存到的集数合计"],
+    ["检查失败", failing, failing ? "danger" : "", "上次检查失败的订阅，服务器会自动重试"],
+    ["已暂停", paused, "", "暂停期间不检查"],
+  ];
+  subsSummary.innerHTML = "";
+  if (!subsCache.length) { subsSummary.hidden = true; return; }
+  subsSummary.hidden = false;
+  cells.forEach(([label, n, tone, tip]) => {
+    const c = el("div", "ss-cell" + (tone ? " tone-" + tone : ""));
+    c.title = tip;
+    c.append(el("b", "ss-n", String(n)), el("span", "ss-label", label));
+    subsSummary.appendChild(c);
+  });
+}
+
 subsTabs.addEventListener("click", (e) => {
   const b = e.target.closest("[data-tab]");
   if (!b || b.dataset.tab === subsTab) return;
   subsTab = b.dataset.tab;
   try { localStorage.setItem("qp_subs_tab", subsTab); } catch (_) { /* 忽略 */ }
+  history.replaceState(null, "", "#/subs/" + subsTab); // 地址栏跟着标签页走，刷新后还在这一页
   renderSubsTab();
 });
 
@@ -1276,6 +1317,7 @@ function weekRange(offset) {
 // 点日历里的一集：切到剧集标签页并高亮对应的订阅卡片
 function jumpToSub(id) {
   subsTab = "tv";
+  history.replaceState(null, "", "#/subs/tv");
   renderSubsTab();
   const li = subsList.querySelector('[data-sub-id="' + id + '"]');
   if (!li) return;
@@ -3189,6 +3231,51 @@ document.addEventListener("keydown", (e) => {
   input.focus();
   input.select();
 });
+
+// ---- 页面结构：左侧导航 + 三个视图（发现 / 我的订阅 / 偏好设置），用 location.hash 记住当前页 ----
+// #/ 发现（搜索）· #/subs 或 #/subs/<tv|movie|calendar|history> 我的订阅 · #/settings 偏好设置
+const sidenav = document.getElementById("sidenav");
+const VIEWS = ["discover", "subs", "settings"];
+
+function currentView() {
+  return document.body.dataset.view || "discover";
+}
+
+// 没开订阅功能的服务器不显示订阅入口
+function setNavAvailable(name) {
+  sidenav.querySelectorAll('[data-needs="' + name + '"]').forEach((n) => { n.hidden = false; });
+}
+
+function syncNav() {
+  const view = currentView();
+  sidenav.querySelectorAll("a[data-view]").forEach((a) => {
+    const on = a.dataset.view === view && (!a.dataset.tab || a.dataset.tab === subsTab);
+    a.classList.toggle("active", on);
+    if (on && !a.dataset.tab) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  });
+}
+
+function showView(view, tab) {
+  if (!VIEWS.includes(view)) view = "discover";
+  const changed = view !== currentView();
+  document.body.dataset.view = view;
+  document.querySelectorAll(".view[data-view]").forEach((v) => { v.hidden = v.dataset.view !== view; });
+  if (view === "subs" && tab && SUBS_TABS[tab] && tab !== subsTab) {
+    subsTab = tab;
+    try { localStorage.setItem("qp_subs_tab", subsTab); } catch (_) { /* 忽略 */ }
+  }
+  if (view === "subs") renderSubsTab();
+  syncNav();
+  if (changed) window.scrollTo({ top: 0 });
+}
+
+function route() {
+  const parts = location.hash.replace(/^#\/?/, "").split("/");
+  showView(parts[0] || "discover", parts[1]);
+}
+window.addEventListener("hashchange", route);
+route();
 
 const toTop = document.getElementById("to-top");
 toTop.addEventListener("click", () => window.scrollTo({ top: 0, behavior: "smooth" }));
