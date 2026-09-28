@@ -1719,6 +1719,9 @@ body.searched .hero .memory-stats { display: none; }
 .cand-orig, .cand-meta { font-size: 0.75rem; color: var(--muted); overflow-wrap: anywhere; }
 .cand-season { font-size: 0.78rem; padding-top: 0.25rem; padding-bottom: 0.25rem; }
 .cand-kw { grid-template-columns: auto 40px 1fr; border-style: dashed; }
+/* 系列：海报叠一层，表示是一组电影；选第几部的下拉框片名较长，限制宽度 */
+.cand-coll .poster { box-shadow: 3px -3px 0 -1px var(--surface-solid), 3px -3px 0 0 var(--border-strong); }
+.cand-part { max-width: 15rem; text-overflow: ellipsis; }
 .cand-skel { height: 76px; border: none; background: linear-gradient(90deg, var(--surface-2) 25%, var(--border) 50%, var(--surface-2) 75%); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; cursor: default; }
 @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 .sd-opts { display: grid; gap: 0.55rem; }
@@ -1735,6 +1738,8 @@ body.searched .hero .memory-stats { display: none; }
   .cand { grid-template-columns: auto 36px 1fr; }
   .cand .poster.small { width: 36px; }
   .cand-season { grid-column: 3; justify-self: start; }
+  .cand-part { width: 100%; max-width: 100%; min-width: 0; }
+  .cand > * { min-width: 0; }
   .sub-dialog { padding: 1rem; }
 }
 
