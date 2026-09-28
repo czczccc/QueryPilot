@@ -140,6 +140,8 @@ class QuarkSearchService:
             providers["pansou"] = ProviderStatus(name="pansou")
         return providers
 
+    alerts = None  # Alerter：main 注入
+
     @property
     def http(self) -> httpx.AsyncClient:
         """访问夸克分享页用的 HTTP 客户端（agent 的 inspect_share 工具复用）。"""
@@ -300,6 +302,9 @@ class QuarkSearchService:
                 providers[name].duration_ms += int((time.monotonic() - t0) * 1000)
 
         per_engine = await asyncio.gather(*(guarded(n, fn) for n, fn in engines))
+        if self.alerts is not None:  # 某个源连续报错时告警站长
+            for n, _ in engines:
+                await self.alerts.source_result(n, not providers[n].error_type)
         for status in providers.values():
             if status.error_type:
                 status.status = "error"
