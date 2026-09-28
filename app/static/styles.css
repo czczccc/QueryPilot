@@ -1600,6 +1600,15 @@ body.searched .hero .memory-stats { display: none; }
 .sg-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem 0.75rem; }
 .sg-title { display: flex; align-items: baseline; gap: 0.5rem; min-width: 0; }
 .sg-title b { font-size: 0.95rem; }
+.sg-toggle {
+  display: inline-flex; align-items: center; gap: 0.35rem; min-width: 0;
+  padding: 0.15rem 0.35rem 0.15rem 0.1rem; margin-left: -0.1rem;
+  background: none; border: none; border-radius: 8px; color: inherit; cursor: pointer; text-align: left;
+}
+.sg-toggle:hover { background: var(--surface-2); }
+.sg-toggle svg { flex: none; color: var(--muted); transition: transform 0.25s var(--ease); }
+.sg-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+.sg-list[hidden] { display: none; }
 .sg-count { font-size: 0.76rem; color: var(--muted); }
 .sg-tools { display: flex; align-items: center; gap: 0.6rem; }
 .sg-list { list-style: none; margin: 0; padding: 0 0 0 0.85rem; border-left: 2px solid var(--accent-line); }
