@@ -270,6 +270,9 @@ class Subscription(BaseModel):
     created: float
     last_checked: float | None = None
     last_error: str | None = None  # 上次检查失败的原因（给用户看的）；成功检查后清空
+    # 上次检查的摘要：{found 搜到, valid 有效, matched 确认是这部, mismatch 片名等不符,
+    # dead 失效, saved 这次存了几集 / 个, reasons {筛掉原因: 条数}, reason 一句话, at 时间戳}
+    last_check: dict | None = None
     best_episodes: int = 0  # 目前见过的最多集数（有效且相关的链接里）
     best_score: int = 0  # 目前见过的最高质量分
     best_resolution: str | None = None

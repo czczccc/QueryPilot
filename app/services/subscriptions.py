@@ -145,9 +145,13 @@ class SubscriptionWatcher:
         if sub.state == "paused":
             return []
         if unreleased(sub.release_date, sub.series):  # 还没上映 / 开播：先不搜
+            sub.last_check = {"found": 0, "valid": 0, "matched": 0, "mismatch": 0, "dead": 0,
+                              "saved": 0, "reasons": {}, "reason": "还没上映 / 开播，先不搜",
+                              "at": time.time()}
             await self._store.update_subscription(client_id, sub, [])
             return []
         await self._refresh_meta(sub)
+        saved_before = set(sub.saved_episodes)
         group_notes = await self._group_save(client_id, sub, sync_save)
         # 强制全网搜索，且记忆里的链接也全部重新验证（集数可能已经变了）
         resp = await self._agent.run(
@@ -221,6 +225,8 @@ class SubscriptionWatcher:
                             lk.files_preview[:3])
         if sub.auto_save and self.auto_saver is not None:
             notes += await self._auto_save(client_id, sub, movie, ok, notes, sync_save)
+        sub.last_check = self._summary(sub, resp, links, ok, notes, saved_before, required,
+                                       movie)
         done = self._completed(sub, movie, ok)
         if done:
             notes.append(("completed", f"《{sub.resource}》{done}，订阅已完成，移入订阅历史", None))
@@ -310,6 +316,51 @@ class SubscriptionWatcher:
                 if got:
                     await self._push(got)
         return mine
+
+    @staticmethod
+    def _summary(
+        sub: Subscription, resp, links: list[QuarkLink], ok: list[QuarkLink], notes: list[Note],
+        saved_before: set[int], required: str | None, movie: bool,
+    ) -> dict:
+        """这次检查的摘要（卡片上显示「搜到 29 条，24 条片名不符；存了 3 集」）。"""
+        valid = [lk for lk in resp.links if lk.state == "valid"]
+        matched = [lk for lk in valid if lk.relevance == "match"]
+        reasons: dict[str, int] = {}
+        for lk in valid:
+            if lk.relevance != "match":
+                key = (lk.relevance_note or "没能确认是这部")[:20]
+                reasons[key] = reasons.get(key, 0) + 1
+        filtered = len(matched) - len([lk for lk in links if lk.relevance == "match"
+                                       and lk.state == "valid"])
+        if filtered:
+            reasons["被包含 / 排除词过滤"] = filtered
+        weak = len([lk for lk in links if lk.state == "valid" and lk.relevance == "match"]) \
+            - len(ok)
+        if weak:
+            reasons[f"清晰度没到 {required}"] = weak
+        saves = [n for n in notes if n[0] in ("auto_saved", "upgraded")]
+        saved = len(set(sub.saved_episodes) - saved_before) if not movie else len(saves)
+        head = f"搜到 {len(resp.links)} 条，有效 {len(valid)} 条，确认是这部 {len(matched)} 条"
+        if saves:
+            tail = f"存了 {saved} 集" if not movie and saved else "已转存"
+        elif any(n[0] == "auto_save_failed" for n in notes):
+            tail = "转存失败，见转存记录"
+        elif not ok:
+            top = max(reasons.items(), key=lambda x: x[1])[0] if reasons else None
+            tail = f"没有可用的资源（主要原因：{top}）" if top else "没有可用的资源"
+        elif not sub.auto_save:
+            tail = "没开自动转存"
+        elif not movie and sub.lack_episodes == []:
+            tail = "要的集都已存好"
+        else:
+            tail = "这次没有新的内容"
+        return {
+            "found": len(resp.links), "valid": len(valid), "matched": len(matched),
+            "mismatch": len(valid) - len(matched),
+            "dead": sum(1 for lk in resp.links if lk.state == "invalid"),
+            "saved": saved, "reasons": reasons, "reason": f"{head}；{tail}",
+            "at": time.time(),
+        }
 
     @staticmethod
     def _target(sub: Subscription):
