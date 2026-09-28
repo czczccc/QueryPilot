@@ -75,6 +75,7 @@ from app.services.quark_save import (
     Tidy,
 )
 from app.services.relevance import clean_keyword, seasons_in
+from app.services.resilience import RetryTransport
 from app.services.search import QuarkSearchService, SearchUnavailableError
 from app.services.series import build_candidates
 from app.services.subscriptions import RES_TEXT, SubscriptionWatcher, strip_season
@@ -334,7 +335,7 @@ def create_app(
         else (_settings.invite_codes if service is None else ())
     )
     pending_invites: dict[str, str] = {}  # login_id → 用户填的邀请码（扫码成功后才校验）
-    quark_http = quark_client or httpx.AsyncClient(timeout=10.0)
+    quark_http = quark_client or httpx.AsyncClient(timeout=10.0, transport=RetryTransport(retries=2))
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
     @app.middleware("http")

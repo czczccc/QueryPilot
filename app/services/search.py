@@ -38,6 +38,7 @@ from app.services.quark import (
     verify_quark_files,
 )
 from app.services.relevance import build_target, judge
+from app.services.resilience import CircuitBreaker, RetryTransport
 from app.services.sources import search_pansou, search_sites, search_telegram
 
 logger = logging.getLogger(__name__)
@@ -89,8 +90,10 @@ class QuarkSearchService:
         self._max_tasks = max_tasks
         self._timeout = timeout
         self._client = client or httpx.AsyncClient(
-            timeout=timeout, headers={"User-Agent": UA}, follow_redirects=True
+            timeout=timeout, headers={"User-Agent": UA}, follow_redirects=True,
+            transport=RetryTransport(retries=1),
         )
+        self.breaker = CircuitBreaker()
         self._tg_client = tg_client or self._client
 
     @property
@@ -288,6 +291,11 @@ class QuarkSearchService:
                 engines.append((name, fn))
         if pansou and "pansou" in providers:  # 放最后：同一分享码优先保留自有来源的标注
             engines.append(("pansou", run_pansou))
+        skipped = [n for n, _ in engines if not self.breaker.allow(n)]
+        for n in skipped:  # 熔断中的源这次直接跳过
+            providers[n].status = "error"
+            providers[n].error_type = "circuit_open"
+        engines = [(n, fn) for n, fn in engines if n not in skipped]
 
         async def guarded(
             name: str, fn: Callable[[], Awaitable[list[QuarkLink]]]
@@ -306,9 +314,14 @@ class QuarkSearchService:
                 providers[name].duration_ms += int((time.monotonic() - t0) * 1000)
 
         per_engine = await asyncio.gather(*(guarded(n, fn) for n, fn in engines))
-        if self.alerts is not None:  # 某个源连续报错时告警站长
-            for n, _ in engines:
-                await self.alerts.source_result(n, not providers[n].error_type)
+        for n, _ in engines:
+            ok = not providers[n].error_type
+            opened = self.breaker.record(n, ok)
+            if self.alerts is not None:  # 某个源连续报错时告警站长
+                await self.alerts.source_result(n, ok)
+                if opened:
+                    await self.alerts.send(f"breaker:{n}", f"搜索源 {n} 连续失败，已暂停 "
+                                           f"{self.breaker.cooldown / 60:.0f} 分钟，之后自动重试")
         for status in providers.values():
             if status.error_type:
                 status.status = "error"
