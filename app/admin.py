@@ -38,7 +38,7 @@ class InviteRequest(BaseModel):
 
 def admin_router(
     users: UsageStore, token: str, quota: QuotaGuard | None, rate_limit: Callable,
-    links=None,
+    links=None, selfcheck: Callable | None = None,
 ) -> APIRouter:
     def auth(x_admin_token: str = Header(default="")) -> None:
         if not token:
@@ -60,6 +60,23 @@ def admin_router(
             g["bad"].append({"share": r["share"], "reason": r["reason"], "title": r["title"],
                              "reports": r["reports"], "weight": r["weight"]})
         return {"items": list(groups.values())}
+
+    @router.get("/selfcheck")
+    async def selfcheck_last() -> dict:
+        """上一次每日自检的结果（服务重启后清空）；没配片单时 enabled=false。"""
+        check = selfcheck() if selfcheck else None
+        if check is None:
+            return {"enabled": False, "last": None}
+        return {"enabled": True, "titles": check.titles,
+                "last": check.last.to_dict() if check.last else None}
+
+    @router.post("/selfcheck")
+    async def selfcheck_now() -> dict:
+        """立即跑一次每日自检（要几分钟），返回结果；异常同样会发告警。"""
+        check = selfcheck() if selfcheck else None
+        if check is None:
+            raise HTTPException(status_code=404, detail="没配 SELFCHECK_TITLES，自检未启用")
+        return (await check.run()).to_dict()
 
     @router.get("/overview")
     async def overview() -> dict:
