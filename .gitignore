@@ -30,3 +30,6 @@ evals/reports/
 # ---- 前端包（packages/*）----
 node_modules/
 packages/*/dist/
+
+# ---- 新前端（web/ 构建产物）----
+app/web/

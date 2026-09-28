@@ -1,0 +1,11 @@
+@import "../../packages/cz-design-system/src/styles/index.css";
+@source "./";
+
+html {
+  scroll-behavior: smooth;
+}
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
