@@ -29,6 +29,7 @@ from app.models import (
 )
 from app.services.memory import LinkStore, resource_key
 from app.services.pacing import stagger
+from app.services.packs import Pick, covered, rule_pick
 from app.services.quality import RESOLUTION_RANK, meets_requirement
 from app.services.relevance import build_target, judge
 
@@ -38,6 +39,10 @@ Note = tuple[str, str, str | None]
 # (订阅归属, 订阅, 链接, 要的集号 / None 表示不限) → 要追加的通知；
 # 实现方负责把网盘里已有的集写回 `sub.saved_episodes`
 AutoSaver = Callable[[str, Subscription, QuarkLink, set[int] | None], Awaitable[list[Note]]]
+
+Chooser = Callable[[list[tuple[QuarkLink, set[int]]], set[int], str, bool],
+                   Awaitable[Pick | None]]
+GROUP_GAP = 3 * 3600.0  # 同一组多久统一挑一次（秒）
 
 RES_TEXT = {"2160p": "4K", "1080p": "1080p", "720p": "720p", "SD": "标清"}
 
@@ -77,6 +82,11 @@ def passes_filters(link: QuarkLink, include: str | None, exclude: str | None) ->
     return not (exclude and any(w in text for w in exclude.lower().split()))
 
 
+async def _rule(cands: list[tuple[QuarkLink, set[int]]], missing: set[int],
+                tv: bool) -> Pick | None:
+    return rule_pick(cands, missing, tv)
+
+
 def check_error_text(exc: Exception) -> str:
     """检查失败的原因，给用户看：不带地址、key 等内部细节。"""
     if isinstance(exc, httpx.TimeoutException):
@@ -106,6 +116,9 @@ class SubscriptionWatcher:
         self.auto_saver = auto_saver
         self.lookup = None  # MetadataLookup：刷新剧集总集数（main 注入）
         self._year_tried: set[int] = set()
+        # 成组订阅统一挑资源：(候选, 缺的部/季, 片名, 是否剧集) → Pick；None 时按规则挑
+        self.chooser: Chooser | None = None
+        self._group_checked: dict[tuple[str, str], float] = {}
         self.stagger = 0.0  # 批量检查时两个订阅之间平均等几秒（错开对夸克和搜索源的请求）
         self._store = store
         self._webhook = webhook
@@ -135,6 +148,7 @@ class SubscriptionWatcher:
             await self._store.update_subscription(client_id, sub, [])
             return []
         await self._refresh_meta(sub)
+        group_notes = await self._group_save(client_id, sub, sync_save)
         # 强制全网搜索，且记忆里的链接也全部重新验证（集数可能已经变了）
         resp = await self._agent.run(
             SearchRequest(query=sub.query, refresh=True, client_id=client_id), fresh_hours=0
@@ -151,7 +165,7 @@ class SubscriptionWatcher:
             movie = sub.media == "movie"
         else:  # 没识别出条目：单个视频文件按电影处理
             movie = most is not None and most.quality.video_count <= 1
-        notes: list[tuple[str, str, str | None]] = []
+        notes: list[tuple[str, str, str | None]] = list(group_notes)
         if most and episodes > sub.best_episodes:
             if sub.best_episodes == 0:  # 订阅时还没有资源（或只搜到过无效的）
                 count = "" if movie else f"，目前 {episodes} 集"
@@ -193,6 +207,86 @@ class SubscriptionWatcher:
         if notes:
             await self._push(notes)
         return notes
+
+    async def _group_save(self, owner: str, sub: Subscription, force: bool) -> list[Note]:
+        """成组订阅（系列电影 / 整部剧全部季，单独订阅的系列里的一部也算）统一挑资源。
+
+        整组按片名搜一次，算出每个分享覆盖哪几部 / 几季，挑一个补上缺的部分最多的
+        （合集、全季包优先），再给缺的那几部 / 几季各自转存（只取缺的文件，存进各自的目录）。
+        同一组几小时内只做一次（立即检查除外）。返回当前这个订阅的通知，其余订阅的直接写库。
+        """
+        if not (sub.auto_save and sub.collection_id and self.auto_saver is not None):
+            return []
+        key, now = (owner, sub.collection_id), time.time()
+        if not force and self._group_checked.get(key, 0) > now - GROUP_GAP:
+            return []
+        self._group_checked[key] = now
+        try:
+            return await self._group_pick(owner, sub)
+        except Exception:  # 统一挑选出错不影响单个订阅的检查
+            logger.exception("成组订阅挑选失败 collection=%s", sub.collection_id)
+            return []
+
+    async def _group_pick(self, owner: str, sub: Subscription) -> list[Note]:
+        tv = sub.media == "tv"
+        members = [sub if x.id == sub.id else x for _, x in
+                   await self._store.list_subscriptions(owner)
+                   if x.collection_id == sub.collection_id and x.auto_save
+                   and x.state != "paused" and not unreleased(x.release_date, x.series)
+                   and (x.media == "tv") == tv]
+        missing: dict[int, Subscription] = {}
+        for m in members:
+            index = (m.season or 1) if tv else m.collection_index
+            if index is None:
+                continue
+            need = m.lack_episodes != [] if tv else not await self._store.has_auto_saved(m.id)
+            if need:
+                missing[index] = m
+        if not missing:
+            return []
+        name = strip_season(sub.resource) if tv else (sub.collection_name or sub.resource)
+        titles = {} if tv else {i: m.resource for i, m in missing.items()}
+        resp = await self._agent.run(
+            SearchRequest(query=name, refresh=True, client_id=owner), fresh_hours=0
+        )
+        need = set(missing)
+        cands = []
+        for lk in resp.links:
+            # 按系列名搜的，单部的相关性判定（年份、季）对合集不适用：只要有效，
+            # 覆盖哪几部由 covered() 按片名认
+            if lk.state != "valid" or not lk.quality:
+                continue
+            if not passes_filters(lk, sub.include, sub.exclude):
+                continue
+            if not meets_requirement(lk.quality, sub.resolution or resp.required_resolution):
+                continue
+            cover = covered(lk, name, tv, titles)
+            if cover & need:
+                cands.append((lk, cover))
+        if not cands:
+            return []
+        if self.chooser is not None:
+            pick = await self.chooser(cands, need, name, tv)
+        else:
+            pick = await _rule(cands, need, tv)
+        if pick is None:
+            return []
+        logger.info("成组订阅挑中 share=%s 覆盖 %s（%s）", pick.link.share, sorted(pick.parts),
+                    pick.by)
+        mine: list[Note] = []
+        for index in sorted(pick.parts):
+            m = missing[index]
+            wanted = None
+            if tv and m.lack_episodes is not None:
+                wanted = set(m.lack_episodes)
+            got = await self._save_one(owner, m, pick.link, wanted, pick.reason)
+            if m is sub:
+                mine += got
+            else:
+                await self._store.update_subscription(owner, m, got)
+                if got:
+                    await self._push(got)
+        return mine
 
     @staticmethod
     def _target(sub: Subscription):
@@ -254,9 +348,12 @@ class SubscriptionWatcher:
 
     async def _save_one(
         self, client_id: str, sub: Subscription, link: QuarkLink, wanted: set[int] | None,
+        note: str | None = None,
     ) -> list[Note]:
         assert self.auto_saver is not None
         try:
+            if note:  # 成组挑中的合集：带上挑选理由
+                return await self.auto_saver(client_id, sub, link, wanted, note=note)
             return await self.auto_saver(client_id, sub, link, wanted)
         except Exception:  # 自动转存出错不影响通知本身
             logger.exception("订阅自动转存异常 id=%s", sub.id)

@@ -88,6 +88,10 @@ class Tidy:
     offset: int = 0  # 前面各季的总集数（这一季按绝对集号编时换算用）
     total: int | None = None  # 这一季的总集数
     default_res: str | None = None  # 文件名没写清晰度时用分享整体的
+    # 系列电影：第几部、系列名；分享是多部合集时只取这一部（pack：这次是特意挑的合集）
+    part: int | None = None
+    series: str | None = None
+    pack: bool = False
 
 
 @dataclass
@@ -239,7 +243,8 @@ class QuarkSaver:
         if only_new:
             if tidy is not None:  # 整理模式：递归展平，每集挑一个最好的版本
                 items = await self._walk_share(share_id, stoken, items, headers)
-                items, _ = pick_files(items, tidy.movie, tidy.season, tidy.offset, tidy.total)
+                items, _ = pick_files(items, tidy.movie, tidy.season, tidy.offset, tidy.total,
+                                      tidy.part, tidy.series, tidy.title, tidy.year, tidy.pack)
             elif len(items) == 1 and items[0].get("dir"):
                 pdir = str(items[0]["fid"])
                 items = await self._sub_items(share_id, stoken, pdir, headers)
