@@ -56,6 +56,20 @@ ERROR_TEXT = {
 }
 
 
+def http_error_text(e: httpx.HTTPError) -> str:
+    """网络层失败的真实原因（不含地址和凭证）。"""
+    if isinstance(e, httpx.TimeoutException):
+        return "夸克响应超时，下次检查会自动重试"
+    if isinstance(e, httpx.HTTPStatusError):
+        code = e.response.status_code
+        if code == 429:
+            return "夸克限制了请求频率（429），下次检查会自动重试"
+        return f"夸克接口返回 HTTP {code}，下次检查会自动重试"
+    if isinstance(e, httpx.ConnectError):
+        return "连不上夸克服务器，下次检查会自动重试"
+    return f"连接夸克失败（{type(e).__name__}），下次检查会自动重试"
+
+
 class SaveError(Exception):
     """转存失败，`str(e)` 可直接展示给用户（不含任何凭证）。"""
 
@@ -180,7 +194,7 @@ class QuarkSaver:
         except httpx.HTTPError as e:
             # 只记录异常类型，不记录请求（请求头里有 cookie）
             logger.warning("转存请求失败 share=%s error=%s", share_id, type(e).__name__)
-            raise SaveError("连接夸克失败，请稍后重试") from None
+            raise SaveError(http_error_text(e)) from None
         except ValueError:
             raise SaveError("夸克返回了无法解析的内容") from None
 
@@ -309,6 +323,13 @@ class QuarkSaver:
                 raise SaveError("提交转存失败")
             # 5) 轮询任务状态：status 2 = 完成
             done = await self._wait_task(task_id, headers) and done
+        if done and only_new:
+            # 核对：任务报完成，目标目录里要真的出现这些文件，否则不算成功
+            now_names, _ = await self._existing(to_fid, headers)
+            got = [f for f in items if str(f.get("file_name") or "") in now_names]
+            if not got:
+                raise SaveError("夸克显示转存完成，但目标目录里没有出现文件，下次检查会重试")
+            items = got
         if tidy is not None and tidy.rename and done:
             await self._rename_saved(to_fid, items, tidy, headers)
         return SaveResult(task_id, len(items), title, done, folder, category, basis, skipped,
@@ -324,6 +345,8 @@ class QuarkSaver:
             task = self._check(resp.json(), "转存失败")
             if task.get("status") == 2:
                 return True
+            if task.get("status") not in (0, 1, None):  # 夸克任务失败
+                raise SaveError(f"夸克转存任务失败（状态 {task.get('status')}）")
             await asyncio.sleep(self._poll_interval)
         return False
 

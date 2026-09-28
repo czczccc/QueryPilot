@@ -202,6 +202,8 @@ class PackDrive(Drive):
     def __init__(self):
         super().__init__()
         self.have = []
+        self.names = {"f1": "谍影重重.2002.1080p.mkv", "f2": "谍影重重2.2004.1080p.mkv",
+                      "f3": "谍影重重3.最后通牒.2007.1080p.mkv"}
 
     async def handler(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/sharepage/detail"):
