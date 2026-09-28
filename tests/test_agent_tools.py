@@ -80,3 +80,22 @@ async def test_inspect_turns_uncertain_into_match():
     obs = await agent._inspect({"shares": ["abc"]}, state)
     assert obs["shares"]["abc"]["relevance"] == "match" and link.relevance == "match"
     assert to_inspect(state) == []
+
+
+async def test_check_my_drive_runs_once_when_logged_in():
+    calls = []
+
+    async def drive(name, season):
+        calls.append((name, season))
+        return {"logged_in": True, "folders": ["/QueryPilot/x"], "videos": 2,
+                "episodes": {"1": [1, 2]}}
+
+    agent = SearchAgent(make_service(ScriptedTavily({}, default=shares("ok", 6))))
+    resp = await agent.run(SearchRequest(query="流浪地球2"), drive=drive)
+    step = [s for s in resp.steps if s.tool == "check_my_drive"]
+    assert len(step) == 1 and step[0].observation["episodes"] == {"1": [1, 2]}
+    assert calls == [("流浪地球2", None)]
+    plain = await SearchAgent(make_service(ScriptedTavily({}, default=shares("ok", 6)))).run(
+        SearchRequest(query="流浪地球2"))
+    assert "check_my_drive" not in [s.tool for s in plain.steps]
+    assert "check_my_drive" in [t["function"]["name"] for t in tools_for(False, False, True)]

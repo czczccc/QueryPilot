@@ -212,11 +212,31 @@ INSPECT_TOOL = {
 }
 MAX_INSPECT = 6  # 一次搜索最多打开几个分享
 
+DRIVE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "check_my_drive",
+        "description": (
+            "查用户自己的夸克网盘里这部片 / 这一季已经有哪些集（用户已扫码登录时才有）。"
+            "用来提醒「你已经有了」、只推荐缺的集。一次搜索查一次就够。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "片名（默认用解析出的资源名）"},
+                "season": {"type": "integer", "description": "第几季，可省略"},
+            },
+        },
+    },
+}
+# (片名, 季) → {"folders": [...], "episodes": {季: [集]}, "videos": n}
+DriveChecker = Callable[[str, int | None], Awaitable[dict]]
 
-def tools_for(pansou: bool, lookup: bool = False) -> list[dict]:
-    """没配 PanSou / 条目查询时 LLM 看不到对应工具。"""
+
+def tools_for(pansou: bool, lookup: bool = False, drive: bool = False) -> list[dict]:
+    """没配 PanSou / 条目查询、没登录夸克时 LLM 看不到对应工具。"""
     tools = [*TOOLS[:2], PANSOU_TOOL, *TOOLS[2:]] if pansou else list(TOOLS)
-    extra = [LOOKUP_TOOL] if lookup else []
+    extra = ([LOOKUP_TOOL] if lookup else []) + ([DRIVE_TOOL] if drive else [])
     return [*tools[:-1], *extra, INSPECT_TOOL, tools[-1]]
 
 
@@ -257,6 +277,7 @@ class AgentState:
     lookup: bool = False  # 能查影视条目（有 lookup_media 工具）
     looked_up: list[str] = field(default_factory=list)  # 查过的名字
     inspected: dict[str, dict] = field(default_factory=dict)  # 打开看过的分享 → 概况
+    drive_checked: dict | None = None  # 查过用户网盘：结果
     raw_count: int = 0
     fresh_after: float = 0.0
 
@@ -509,17 +530,19 @@ class SearchAgent:
         """有 key，且本次请求没被降级（额度 / 全站预算）。"""
         return bool(self._api_key) and llm.enabled()
 
-    def _planner(self) -> Planner:
+    def _planner(self, drive: bool = False) -> Planner:
         if self._llm_on():
             return DeepSeekPlanner(self._api_key, self._client,
                                    tools=tools_for(self._service.pansou_enabled,
-                                                   self.lookup is not None))
+                                                   self.lookup is not None, drive))
         return RulePlanner()
 
     async def run(
-        self, req: SearchRequest, emit: Emit | None = None, fresh_hours: float = FRESH_HOURS
+        self, req: SearchRequest, emit: Emit | None = None, fresh_hours: float = FRESH_HOURS,
+        drive: DriveChecker | None = None,
     ) -> AgentSearchResponse:
-        """`fresh_hours`：记忆里多久内验证过的链接可免复验（订阅检查传 0，全部重验）。"""
+        """`fresh_hours`：记忆里多久内验证过的链接可免复验（订阅检查传 0，全部重验）。
+        `drive`：用户已扫码登录时查他网盘已有哪些集（check_my_drive 工具）。"""
         started = time.monotonic()
         request_id = uuid.uuid4().hex
         prefs = await self._service.prefs_for(req.client_id)
@@ -593,7 +616,7 @@ class SearchAgent:
         providers = self._service.new_providers()
         key = resource_key(parsed.resource)
 
-        planner: Planner = self._planner()
+        planner: Planner = self._planner(drive is not None)
         last: tuple[Action, dict] | None = None
         stop_reason = "达到步数上限"
         # 追问后上一轮结果已够用：只筛选，不再搜索
@@ -613,7 +636,7 @@ class SearchAgent:
                 action = await planner.decide(state, last)
 
             t0 = time.monotonic()
-            observation = await self._execute(action, state, providers, key)
+            observation = await self._execute(action, state, providers, key, drive)
             step = AgentStep(
                 step=len(steps) + 1,
                 tool=action.tool,
@@ -667,6 +690,18 @@ class SearchAgent:
                 if emit:
                     await emit(step)
 
+        # 用户已登录：搜完查一次网盘（LLM 没查过时代码兜底），结果里能提醒「你已经有了」
+        if drive is not None and state.drive_checked is None:
+            t0 = time.monotonic()
+            observation = await self._execute(
+                Action("check_my_drive"), state, providers, key, drive)
+            step = AgentStep(step=len(steps) + 1, tool="check_my_drive", args={},
+                             observation=observation, planner="rules",
+                             duration_ms=int((time.monotonic() - t0) * 1000))
+            steps.append(step)
+            if emit:
+                await emit(step)
+
         resp = await self._finalize(
             req, request_id, started, state, providers, key, steps, planner.name,
             stop_reason, fallback_used, douban, session_id, history,
@@ -708,9 +743,12 @@ class SearchAgent:
         })
 
     async def _execute(
-        self, action: Action, state: AgentState, providers: dict[str, ProviderStatus], key: str
+        self, action: Action, state: AgentState, providers: dict[str, ProviderStatus], key: str,
+        drive: DriveChecker | None = None,
     ) -> dict:
         try:
+            if action.tool == "check_my_drive" and drive is not None:
+                return await self._my_drive(action.args, state, drive)
             if action.tool == "recall_memory":
                 return await self._recall(state, key)
             if action.tool == "search":
@@ -729,6 +767,16 @@ class SearchAgent:
         except Exception as exc:
             logger.exception("工具执行异常: %s", action.tool)
             return {"error": type(exc).__name__}
+
+    async def _my_drive(self, args: dict, state: AgentState, drive: DriveChecker) -> dict:
+        name = str(args.get("name") or state.parsed.resource).strip()[:60]
+        try:
+            season = int(args["season"]) if args.get("season") else state.target.season
+        except (TypeError, ValueError):
+            season = state.target.season
+        got = await drive(name, season)
+        state.drive_checked = got
+        return got
 
     async def _inspect(self, args: dict, state: AgentState) -> dict:
         """打开分享看文件：文件名补进 files_preview 后重新判定相关性。"""
