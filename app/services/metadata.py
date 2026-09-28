@@ -203,6 +203,46 @@ async def tmdb_collection(
     )
 
 
+async def tmdb_tv_seasons(
+    tv_id: str, api_key: str, client: httpx.AsyncClient, base: str = TMDB_BASE,
+    timeout: float = 8.0, today: str | None = None,
+) -> CollectionInfo | None:
+    """整部剧的各季（TMDB /tv/{id}）：每季一个 part，id 为 s<季号>，不含特别篇（第 0 季）。"""
+    headers, auth = _tmdb_auth(api_key)
+    resp = await client.get(
+        f"{(base or TMDB_BASE).rstrip('/')}/tv/{tv_id}",
+        params={**auth, "language": "zh-CN"}, headers=headers, timeout=timeout,
+    )
+    resp.raise_for_status()
+    d = resp.json()
+    name = d.get("name") or d.get("original_name") or ""
+    today = today or time.strftime("%Y-%m-%d")
+    poster = _tmdb_poster(d.get("poster_path"))
+    parts = []
+    for x in d.get("seasons") or []:
+        if not isinstance(x, dict) or not isinstance(x.get("season_number"), int):
+            continue
+        n = x["season_number"]
+        if n <= 0:
+            continue
+        date = x.get("air_date")
+        date = date if isinstance(date, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) else None
+        parts.append(CollectionPart(
+            index=n, id=f"s{n}", title=name if n == 1 else f"{name} 第{n}季",
+            year=_year(date), release_date=date,
+            poster=_tmdb_poster(x.get("poster_path")) or poster,
+            released=bool(date and date <= today),
+            episodes=x.get("episode_count") if isinstance(x.get("episode_count"), int)
+            and x["episode_count"] > 0 else None,
+        ))
+    if not name or not parts:
+        return None
+    parts.sort(key=lambda p: p.index)
+    return CollectionInfo(id=f"tv:{d.get('id') or tv_id}", name=name, poster=poster,
+                          parts=parts, media="tv", tmdb_id=str(d.get("id") or tv_id),
+                          year=_year(d.get("first_air_date")))
+
+
 # ---------------- 豆瓣 ----------------
 
 async def search_douban(
@@ -303,7 +343,8 @@ class MetadataLookup:
         return found
 
     async def collection(self, cid: str, fresh: bool = False) -> CollectionInfo | None:
-        """系列电影的全部作品（缓存 1 天）；没配 TMDB key 或查询失败时为 None。"""
+        """系列电影的全部作品，或 `tv:<id>` 整部剧的各季（缓存 1 天）；
+        没配 TMDB key 或查询失败时为 None。"""
         if not self._tmdb_key or not cid:
             return None
         hit = self._collections.get(cid)
@@ -311,7 +352,10 @@ class MetadataLookup:
             return hit[1]
         client = self._client or httpx.AsyncClient(timeout=10.0, follow_redirects=True)
         try:
-            info = await tmdb_collection(cid, self._tmdb_key, client, self._tmdb_base)
+            if cid.startswith("tv:"):  # 整部剧：各季当成系列的各部
+                info = await tmdb_tv_seasons(cid[3:], self._tmdb_key, client, self._tmdb_base)
+            else:
+                info = await tmdb_collection(cid, self._tmdb_key, client, self._tmdb_base)
         except (httpx.HTTPError, ValueError) as e:
             logger.warning("系列电影查询失败（%s）", type(e).__name__)
             return None

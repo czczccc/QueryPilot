@@ -131,7 +131,7 @@ class SubscriptionWatcher:
         """
         if sub.state == "paused":
             return []
-        if sub.media == "movie" and unreleased(sub.release_date, sub.series):  # 还没上映：先不搜
+        if unreleased(sub.release_date, sub.series):  # 还没上映 / 开播：先不搜
             await self._store.update_subscription(client_id, sub, [])
             return []
         await self._refresh_meta(sub)
@@ -333,17 +333,27 @@ class SubscriptionWatcher:
     async def add_part(
         self, owner: str, info: CollectionInfo, part: CollectionPart, settings: dict,
     ) -> Subscription | None:
-        """把系列里的一部加成订阅（共用系列的规则）；已经订阅着的返回 None。"""
+        """把系列里的一部（或整部剧的一季）加成订阅（共用同一组规则）；已经订阅着的返回 None。"""
         key = resource_key(part.title)
+        tv = info.media == "tv"
         for _, x in await self._store.list_subscriptions(owner):
-            if x.tmdb_id == part.id or resource_key(x.resource) == key:
+            same = (x.tmdb_id == info.tmdb_id and x.media == "tv" and (x.season or 1) == part.index
+                    ) if tv else x.tmdb_id == part.id
+            if same or resource_key(x.resource) == key:
                 return None
         fields = {k: v for k, v in settings.items() if v not in (None, False, "")}
+        if tv:
+            fields |= {"media": "tv", "season": part.index, "year": info.year,
+                       "season_year": part.year, "tmdb_id": info.tmdb_id}
+            if part.episodes:
+                fields["total_episodes"] = part.episodes
+        else:
+            fields |= {"media": "movie", "year": part.year, "tmdb_id": part.id}
         sub = await self._store.add_subscription(
             owner, part.title, part.title, await self.baseline(part.title),
-            media="movie", year=part.year, tmdb_id=part.id, poster=part.poster or info.poster,
-            collection_id=info.id, collection_name=info.name, collection_index=part.index,
-            series=True, release_date=part.release_date, **fields,
+            poster=part.poster or info.poster, collection_id=info.id,
+            collection_name=info.name, collection_index=part.index, series=True,
+            release_date=part.release_date, **fields,
         )
         if sub is None:
             return None
@@ -369,10 +379,9 @@ class SubscriptionWatcher:
             # 已订阅的各部：更新上映日期（定档了才开始搜）
             dates = {p.id: p.release_date for p in info.parts}
             for _, x in await self._store.list_subscriptions(owner):
-                if x.collection_id == cid and x.tmdb_id in dates \
-                        and dates[x.tmdb_id] != x.release_date:
-                    await self._store.edit_subscription(owner, x.id,
-                                                        release_date=dates[x.tmdb_id])
+                pid = f"s{x.season or 1}" if info.media == "tv" else x.tmdb_id
+                if x.collection_id == cid and pid in dates and dates[pid] != x.release_date:
+                    await self._store.edit_subscription(owner, x.id, release_date=dates[pid])
             if not c["auto_join"]:
                 continue
             new = [p for p in info.parts if p.id not in c["known"]]
@@ -380,9 +389,10 @@ class SubscriptionWatcher:
                 sub = await self.add_part(owner, info, part, c["settings"])
                 if sub is not None:
                     added += 1
-                    await self._store.add_notification(
-                        owner, sub, "series_new",
-                        f"《{info.name}》系列新增《{part.title}》，已为你订阅")
+                    text = (f"《{info.name}》出了第 {part.index} 季，已为你订阅"
+                            if info.media == "tv" else
+                            f"《{info.name}》系列新增《{part.title}》，已为你订阅")
+                    await self._store.add_notification(owner, sub, "series_new", text)
             if new:
                 await self._store.set_collection(owner, cid, known=[
                     *c["known"], *(p.id for p in new)])

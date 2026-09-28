@@ -201,7 +201,7 @@ def _state(row: sqlite3.Row) -> str:
     state = row["state"] or "active"
     if state == "active" and (
         row["media"] is None or (row["media"] == "tv" and not row["total_episodes"])
-        or (row["media"] == "movie" and unreleased(row["release_date"], bool(row["series"])))
+        or unreleased(row["release_date"], bool(row["series"]))  # 还没上映 / 开播
     ):
         return "pending"
     return state
@@ -525,12 +525,18 @@ class LinkStore:
         return out
 
     def _history_tmdb_ids(self, client_id: str) -> set[str]:
+        """历史里完成过的条目：电影是 TMDB id，剧集是「id:季号」。"""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT data FROM subscription_history WHERE client_id = ?", (client_id,)
             ).fetchall()
-        ids = {json.loads(r["data"] or "{}").get("tmdb_id") for r in rows}
-        return {i for i in ids if i}
+        out = set()
+        for r in rows:
+            d = json.loads(r["data"] or "{}")
+            if d.get("tmdb_id"):
+                out.add(f"{d['tmdb_id']}:{d.get('season') or 1}" if d.get("media") == "tv"
+                        else d["tmdb_id"])
+        return out
 
     @staticmethod
     def _row_to_sub(row: sqlite3.Row) -> Subscription:

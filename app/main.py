@@ -537,7 +537,7 @@ def create_app(
         done = await store.history_tmdb_ids(owner)
         created = []
         for part in info.parts:
-            if part.id in done:
+            if (f"{info.tmdb_id}:{part.index}" if info.media == "tv" else part.id) in done:
                 continue
             sub = await app.state.watcher.add_part(owner, info, part, settings)
             if sub is not None:
