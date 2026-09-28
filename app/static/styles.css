@@ -2166,3 +2166,10 @@ body[data-view="subs"] .workspace, body[data-view="settings"] .settings-card {
 
 /* 搜索时查过你的网盘：提示已经有的集 */
 .drive-hint { margin: 0 0 0.8rem; padding: 0.55rem 0.85rem; border-radius: 12px; background: var(--ok-soft); color: var(--ok); font-size: 0.86rem; }
+
+/* 结果反馈：「不对」「失效」放在操作行最右边，弱化显示 */
+.report-btns { display: inline-flex; gap: 0.3rem; margin-left: auto; align-items: center; }
+.report-btns .ghost-btn { color: var(--muted); font-size: 0.78rem; }
+.report-btns .ghost-btn:hover { color: var(--danger); }
+.report-done { font-size: 0.78rem; color: var(--muted); }
+.result-card.reported { opacity: 0.7; }
