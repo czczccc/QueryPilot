@@ -223,13 +223,23 @@ def _state(row: sqlite3.Row) -> str:
     return state
 
 
+def connect(path: str | Path) -> sqlite3.Connection:
+    """打开 SQLite：文件库开 WAL（读写不互相堵，后台检查写库时页面照样能读）、等锁最多 5 秒。"""
+    if str(path) != ":memory:":
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), check_same_thread=False, timeout=5.0)
+    if str(path) != ":memory:":
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
 class LinkStore:
     """SQLite 链接库。`path=":memory:"` 用于测试。"""
 
     def __init__(self, path: str | Path) -> None:
-        if str(path) != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(path), check_same_thread=False)
+        self._conn = connect(path)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         with self._lock:
@@ -909,6 +919,13 @@ class LinkStore:
 
     async def set_prefs(self, client_id: str, prefs: UserPrefs) -> None:
         await asyncio.to_thread(self._set_prefs, client_id, prefs, time.time())
+
+    async def ping(self) -> None:
+        """健康检查用：库能读（锁住超过 5 秒会抛错）。"""
+        def run() -> None:
+            with self._lock:
+                self._conn.execute("SELECT 1").fetchone()
+        await asyncio.to_thread(run)
 
     async def stats(self) -> dict[str, int]:
         return await asyncio.to_thread(self._stats)

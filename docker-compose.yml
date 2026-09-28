@@ -15,6 +15,14 @@ services:
       - querypilot-data:/app/data
       - querypilot-logs:/app/logs
     restart: unless-stopped
+    # 健康检查：/health 连续 3 次（间隔 5 秒）不通就结束主进程，由上面的 restart 自动拉起。
+    # （Docker 自己不会重启 unhealthy 的容器，所以由检查脚本主动退出）
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,time,sys\nfor i in range(3):\n try:\n  urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=10); sys.exit(0)\n except Exception:\n  time.sleep(5)\nsys.exit(1)\" || kill 1"]
+      interval: 60s
+      timeout: 60s
+      start_period: 60s
+      retries: 1
     # 重新部署时给进行中的订阅检查 / 转存留时间做完（应用里最多等 60 秒）
     stop_grace_period: 90s
     # 日志只留最近约 30MB（隐私说明里承诺的），自动滚动覆盖

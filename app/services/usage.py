@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.services.llm import Meter
+from app.services.memory import connect
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS usage_daily (
@@ -67,9 +68,7 @@ class UsageStore:
     """用量表。`path=":memory:"` 用于测试；和链接库可以是同一个 SQLite 文件。"""
 
     def __init__(self, path: str | Path) -> None:
-        if str(path) != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(path), check_same_thread=False)
+        self._conn = connect(path)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         with self._lock:

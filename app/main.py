@@ -417,9 +417,15 @@ def create_app(
         return resp
 
     @app.get("/health")
-    async def health() -> dict:
-        """健康检查：只证明应用进程可响应，不探测外部 API。"""
-        return {"status": "ok", "version": "0.10.0"}
+    async def health() -> JSONResponse:
+        """健康检查：应用进程可响应、数据库能读；不探测外部 API。容器 healthcheck 用它。"""
+        if resolved.store is not None:
+            try:
+                await asyncio.wait_for(resolved.store.ping(), timeout=8)
+            except Exception:
+                logger.exception("健康检查：数据库不可用")
+                return JSONResponse({"status": "error", "db": "unavailable"}, status_code=503)
+        return JSONResponse({"status": "ok", "version": "0.10.0"})
 
     @app.get("/api/memory/stats")
     async def memory_stats() -> dict:
