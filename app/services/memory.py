@@ -175,6 +175,7 @@ _MIGRATIONS = [
     ("subscriptions", "schedule", "TEXT"),  # 播出日历（JSON）
     ("subscriptions", "season_year", "TEXT"),
     ("subscriptions", "last_error", "TEXT"),
+    ("subscriptions", "last_check", "TEXT"),
     ("notifications", "dismissed", "INTEGER NOT NULL DEFAULT 0"),  # 用户删掉的（留着防重复提醒）
     ("subscriptions", "collection_id", "TEXT"),
     ("subscriptions", "collection_name", "TEXT"),
@@ -558,6 +559,7 @@ class LinkStore:
         return Subscription(
             id=row["id"], query=row["query"], resource=row["resource"], created=row["created"],
             last_checked=row["last_checked"], last_error=row["last_error"],
+            last_check=json.loads(row["last_check"]) if row["last_check"] else None,
             collection_id=row["collection_id"], collection_name=row["collection_name"],
             collection_index=row["collection_index"], series=bool(row["series"]),
             release_date=row["release_date"],
@@ -612,11 +614,13 @@ class LinkStore:
             self._conn.execute(
                 "UPDATE subscriptions SET last_checked = ?, best_episodes = ?, best_score = ?, "
                 "best_resolution = ?, total_episodes = ?, season_year = ?, last_error = NULL, "
-                "saved_episodes = ?, versions = ?, "
+                "saved_episodes = ?, versions = ?, last_check = COALESCE(?, last_check), "
                 "state = CASE WHEN state = 'paused' THEN state ELSE 'active' END WHERE id = ?",
                 (now, sub.best_episodes, sub.best_score, sub.best_resolution,
                  sub.total_episodes, sub.season_year, json.dumps(sorted(set(sub.saved_episodes))),
-                 json.dumps({str(k): v for k, v in sorted(sub.versions.items())}), sub.id),
+                 json.dumps({str(k): v for k, v in sorted(sub.versions.items())}),
+                 json.dumps(sub.last_check, ensure_ascii=False) if sub.last_check else None,
+                 sub.id),
             )
             for kind, message, share in notes:
                 self._conn.execute(
