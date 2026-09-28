@@ -854,7 +854,6 @@ const subsPanel = document.getElementById("subs-panel");
 const subsList = document.getElementById("subs-list");
 const notifBox = document.getElementById("notif-box");
 let notesCache = [];
-const subsUnread = document.getElementById("subs-unread");
 const navUnread = document.getElementById("nav-unread");
 const subsOff = document.getElementById("subs-off");
 const subsSummary = document.getElementById("subs-summary");
@@ -1024,8 +1023,6 @@ function noteGroups(list) {
 function renderNotifs() {
   const unread = notesCache.filter((n) => !n.read);
   const read = notesCache.filter((n) => n.read);
-  subsUnread.hidden = unread.length === 0;
-  setText(subsUnread, unread.length + " 条新提醒");
   navUnread.hidden = unread.length === 0;
   setText(navUnread, unread.length > 99 ? "99+" : String(unread.length));
   navUnread.title = unread.length + " 条新提醒";
@@ -1088,7 +1085,7 @@ function noteItem(n) {
   }
   const acts = el("div", "note-acts");
   if (p.url) {
-    const open = el("a", "ghost-btn small", "打开链接");
+    const open = el("a", "secondary-btn small note-open", "打开链接");
     open.href = p.url;
     open.target = "_blank";
     open.rel = "noopener noreferrer";
@@ -1101,7 +1098,7 @@ function noteItem(n) {
     acts.appendChild(save);
   }
   if (!n.read) {
-    const btn = el("button", "ghost-btn small note-read-btn", "已读");
+    const btn = el("button", "secondary-btn small note-read-btn", "标为已读");
     btn.type = "button";
     btn.setAttribute("aria-label", "标为已读");
     btn.addEventListener("click", () => {
@@ -1110,15 +1107,21 @@ function noteItem(n) {
     });
     acts.appendChild(btn);
   }
-  if (n.id !== undefined) {
-    const del = el("button", "ghost-btn small note-del-btn", "删除");
+  if (n.id !== undefined) { // 删除是次要操作，收进「更多」
+    const more = el("details", "note-more");
+    const sum = el("summary", "ghost-btn small", "更多");
+    sum.setAttribute("aria-label", "更多操作");
+    const menu = el("div", "note-more-menu");
+    const del = el("button", "link-btn danger", "删除这条提醒");
     del.type = "button";
-    del.title = "删除这条，以后同一个资源不再提醒";
+    del.title = "删除后，同一个资源以后不再提醒";
     del.addEventListener("click", () => {
       li.classList.add("leaving");
       setTimeout(() => deleteNote(n), 220);
     });
-    acts.appendChild(del);
+    menu.append(del, el("span", "note-more-hint", "同一个资源以后不再提醒"));
+    more.append(sum, menu);
+    acts.appendChild(more);
   }
   if (acts.children.length) li.appendChild(acts);
   return li;
@@ -1189,8 +1192,9 @@ function seriesGroup(subs) {
     cb.checked = !!info.auto_join;
     const track = el("span", "switch-track");
     track.setAttribute("aria-hidden", "true");
-    sw.append(cb, track, isTv ? "新季自动加入" : "新作自动加入");
-    sw.title = isTv ? "每天查一次这部剧有没有新的一季，有就自动订阅并通知你" : "每天查一次这个系列有没有新片，有就自动订阅并通知你";
+    sw.append(cb, track, isTv ? "整部剧：新季自动加入" : "整个系列：新作自动加入");
+    sw.title = (isTv ? "整部剧的设置：每天查一次有没有新的一季，有就自动订阅并通知你"
+      : "整个系列的设置：每天查一次有没有新片，有就自动订阅并通知你") + "。不影响下面每一项自己的自动转存开关";
     cb.addEventListener("change", async () => {
       cb.disabled = true;
       const res = await subApi("/collection/" + encodeURIComponent(cid), "PATCH", { auto_join: cb.checked })
@@ -1312,19 +1316,20 @@ function renderSubsSummary() {
   const tracking = subsCache.length - paused;
   const cells = [
     ["追更中", tracking, "", "剧集和电影里正在定期检查的订阅"],
-    ["缺集", missing, missing ? "warn" : "", "剧集订阅里还没存到的集数合计"],
+    ["待补集数", missing, missing ? "warn" : "", "所有剧集订阅里还没存进网盘的集数合计（按每季订阅的追踪范围算）"],
     ["检查失败", failing, failing ? "danger" : "", "上次检查失败的订阅，服务器会自动重试"],
     ["已暂停", paused, "", "暂停期间不检查"],
   ];
   subsSummary.innerHTML = "";
   if (!subsCache.length) { subsSummary.hidden = true; return; }
   subsSummary.hidden = false;
-  cells.forEach(([label, n, tone, tip]) => {
+  cells.forEach(([label, n, tone, tip]) => { // 只是统计，没有对应的筛选，所以不做成可点击
     const c = el("div", "ss-cell" + (tone ? " tone-" + tone : ""));
     c.title = tip;
     c.append(el("b", "ss-n", String(n)), el("span", "ss-label", label));
     subsSummary.appendChild(c);
   });
+  subsSummary.appendChild(el("p", "ss-note", "待补集数：所有剧集订阅里还没存进网盘的集数合计，电影不计入。"));
 }
 
 subsTabs.addEventListener("click", (e) => {
@@ -2043,17 +2048,18 @@ function openOrganizeDialog(sub) {
   load();
 }
 
-function autoSaveSwitch(sub) {
+function autoSaveSwitch(sub, grouped) { // grouped：在系列 / 全部季分组里，写明只管这一项
   const sw = el("label", "switch small");
   const cb = el("input");
   cb.type = "checkbox";
   cb.checked = !!sub.auto_save;
   const track = el("span", "switch-track");
   track.setAttribute("aria-hidden", "true");
-  sw.append(cb, track, sub.media === "movie" ? "有资源自动转存" : "自动转存补齐缺集");
-  sw.title = sub.media === "movie"
+  const scope = grouped ? (sub.media === "movie" ? "这部：" : "这一季：") : "";
+  sw.append(cb, track, scope + (sub.media === "movie" ? "有资源自动转存" : "自动转存补齐缺集"));
+  sw.title = (sub.media === "movie"
     ? "出现满足清晰度要求的资源时存一次；之后更高清只提醒"
-    : "打开后立即把网盘里缺的集补齐，之后出新集也自动转存";
+    : "打开后立即把网盘里缺的集补齐，之后出新集也自动转存") + (grouped ? "。只影响这一项，不影响整组设置" : "");
   cb.addEventListener("change", async () => {
     const want = cb.checked;
     cb.disabled = true;
@@ -2159,7 +2165,7 @@ function subItem(sub, grouped) { // grouped：在系列分组里，副标题只�
   }
 
   const row = el("div", "sub-row");
-  row.appendChild(autoSaveSwitch(sub));
+  row.appendChild(autoSaveSwitch(sub, grouped));
   const log = el("ul", "save-log");
   log.hidden = true;
   if (sub.auto_save) row.appendChild(saveLogButton(sub, log));
