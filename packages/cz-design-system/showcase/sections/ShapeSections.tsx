@@ -1,4 +1,5 @@
-import { elevation, radius, radiusRoles, spacing, type SpacingStep } from "../../src";
+import type { ReactNode } from "react";
+import { radius, radiusRoles, spacing, type SpacingStep } from "../../src";
 import { SectionHeader } from "./SectionHeader";
 
 const spaceClass: Record<SpacingStep, string> = {
@@ -96,40 +97,102 @@ export function RadiusSection() {
   );
 }
 
-const shadowClass: Record<string, string> = {
-  xs: "shadow-xs",
-  sm: "shadow-sm",
-  md: "shadow-md",
-  lg: "shadow-lg",
-  xl: "shadow-xl",
-};
-const shadowUse: Record<string, string> = {
-  xs: "按钮、输入框",
-  sm: "卡片",
-  md: "悬停的卡片",
-  lg: "下拉、弹出层",
-  xl: "对话框",
-};
+/** 每一档阴影配一个真实场景的小样，放在凹陷底色上，让高度差一眼可见。 */
+const elevationDemos: { name: string; use: string; demo: ReactNode }[] = [
+  {
+    name: "shadow-xs",
+    use: "按钮、输入框",
+    demo: (
+      <div className="flex items-center gap-2">
+        <span className="flex h-control-md items-center rounded-control border border-line bg-surface px-3 text-body shadow-xs">
+          繁花
+        </span>
+        <span className="flex h-control-md items-center rounded-control border border-line bg-surface px-3 text-body font-medium shadow-xs">
+          搜索
+        </span>
+      </div>
+    ),
+  },
+  {
+    name: "shadow-sm",
+    use: "卡片",
+    demo: (
+      <div className="w-44 rounded-card border border-line-subtle bg-surface p-3 shadow-sm">
+        <div className="text-body font-medium">繁花</div>
+        <div className="text-caption font-normal text-fg-subtle">更新至第 30 集</div>
+      </div>
+    ),
+  },
+  {
+    name: "shadow-md",
+    use: "悬停的卡片",
+    demo: (
+      <div className="w-44 -translate-y-1 rounded-card border border-line bg-surface p-3 shadow-md">
+        <div className="text-body font-medium">繁花</div>
+        <div className="text-caption font-normal text-accent-fg">点击查看详情</div>
+      </div>
+    ),
+  },
+  {
+    name: "shadow-lg",
+    use: "下拉菜单、弹出层",
+    demo: (
+      <div className="flex w-40 flex-col rounded-popover border border-line-subtle bg-raised p-1 text-footnote shadow-lg">
+        <span className="rounded-sm bg-hover px-2 py-1.5">打开网盘目录</span>
+        <span className="px-2 py-1.5 text-fg-muted">暂停订阅</span>
+        <span className="px-2 py-1.5 text-danger-fg">取消订阅</span>
+      </div>
+    ),
+  },
+  {
+    name: "shadow-xl",
+    use: "对话框",
+    demo: (
+      <div className="flex w-48 flex-col gap-2 rounded-dialog border border-line-subtle bg-raised p-3 shadow-xl">
+        <div className="text-footnote font-medium">取消订阅《繁花》？</div>
+        <div className="flex justify-end gap-1.5">
+          <span className="rounded-sm border border-line px-2 py-0.5 text-caption">保留</span>
+          <span className="rounded-sm bg-danger px-2 py-0.5 text-caption text-on-accent">取消</span>
+        </div>
+      </div>
+    ),
+  },
+  {
+    name: "shadow-ring",
+    use: "键盘焦点",
+    demo: (
+      <span className="flex h-control-md w-44 items-center rounded-control border border-focus bg-surface px-3 text-body shadow-ring">
+        剧名<span className="ml-0.5 h-4 w-px animate-breathe bg-fg" />
+      </span>
+    ),
+  },
+];
 
 export function ElevationSection() {
   return (
     <section className="flex flex-col gap-8">
       <SectionHeader id="elevation" source="src/tokens/shadow.ts" title="阴影">
-        阴影只表达高度。每档两层：贴近物体的接触阴影和柔和的环境阴影，带一点石墨色相而不是纯黑。
-        深色主题里阴影几乎看不见，改用顶部 1px 的微弱高光表达层级。
+        阴影只表达高度，越往上的元素阴影越大越柔：按钮最低，卡片其次，菜单和对话框浮在最上面。每档两层，贴近物体的接触阴影加柔和的环境阴影，
+        带一点石墨色相而不是纯黑。深色主题里阴影不明显，改用顶部 1px 高光加一圈淡描边勾出边缘，层级越高越亮。
       </SectionHeader>
       <div className="grid gap-4 md:grid-cols-2">
         {(["light", "dark"] as const).map((theme) => (
-          <div key={theme} data-theme={theme} className="grid grid-cols-2 gap-6 overflow-hidden rounded-dialog border border-line-subtle bg-canvas p-6 sm:grid-cols-3">
-            {elevation.map((e) => (
-              <div key={e} className={`flex aspect-square max-w-full flex-col justify-end rounded-card bg-raised p-3 ${shadowClass[e]}`}>
-                <code className="font-mono text-footnote text-fg">shadow-{e}</code>
-                <span className="text-caption font-normal text-fg-subtle">{shadowUse[e]}</span>
-              </div>
-            ))}
-            <div className="flex aspect-square max-w-full flex-col justify-end rounded-card bg-raised p-3 shadow-ring">
-              <code className="font-mono text-footnote text-fg">shadow-ring</code>
-              <span className="text-caption font-normal text-fg-subtle">键盘焦点</span>
+          <div
+            key={theme}
+            data-theme={theme}
+            className="flex flex-col gap-4 overflow-hidden rounded-dialog border border-line-subtle bg-canvas p-4"
+          >
+            <span className="text-caption text-fg-subtle">{theme === "light" ? "浅色主题" : "深色主题"}</span>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {elevationDemos.map((d) => (
+                <div key={d.name} className="flex flex-col gap-2">
+                  <div className="grid h-36 place-items-center rounded-card border border-line-subtle bg-sunken px-3">{d.demo}</div>
+                  <div className="flex items-baseline justify-between gap-2 px-0.5">
+                    <code className="font-mono text-footnote text-fg">{d.name}</code>
+                    <span className="text-caption font-normal text-fg-subtle">{d.use}</span>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         ))}
