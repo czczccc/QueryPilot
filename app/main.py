@@ -58,9 +58,16 @@ from app.services.intent import DeepSeekParser
 from app.services.memory import LinkStore, resource_key
 from app.services.metadata import MetadataLookup
 from app.services.organize import TidyPlan, file_resolution, kind_of, plan_tidy
+from app.services.pacing import Pacer, seconds_to_cn_midnight
 from app.services.quality import RESOLUTION_RANK
 from app.services.quark_login import LoginError, QuarkQrLogin, qr_svg
-from app.services.quark_save import LoginExpiredError, QuarkSaver, SaveError, Tidy
+from app.services.quark_save import (
+    DailyLimitError,
+    LoginExpiredError,
+    QuarkSaver,
+    SaveError,
+    Tidy,
+)
 from app.services.relevance import seasons_in
 from app.services.search import QuarkSearchService, SearchUnavailableError
 from app.services.series import build_candidates
@@ -172,6 +179,7 @@ def create_app(
     media_lookup: MetadataLookup | None = None,
     trending: Trending | None = None,
     search_on_subscribe: bool | None = None,
+    pacer: Pacer | None = None,
 ) -> FastAPI:
     """创建应用；传入 service / agent 便于测试注入假实现。"""
     resolved = service or build_default_service()
@@ -214,6 +222,12 @@ def create_app(
         if resolved.store is not None
         else None
     )
+    # 防夸克风控：按账号给写操作排队、加随机间隔，限制每天转存次数；测试默认不等待不限次
+    if pacer is None:
+        pacer = Pacer(_settings.quark_write_gap, _settings.quark_write_jitter,
+                      _settings.save_daily_limit) if service is None else Pacer(0, 0, 0)
+    if watcher is not None and service is None:
+        watcher.stagger = _settings.check_stagger_seconds
     sub_interval = (
         subscribe_interval_hours
         if subscribe_interval_hours is not None
@@ -324,7 +338,8 @@ def create_app(
 
     def rate_limit_dep(request: Request) -> None:
         if not limiter.allow(client_ip(request)):
-            raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
+            raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试",
+                                headers={"Retry-After": "60"})
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -703,6 +718,10 @@ def create_app(
     _last_sync: dict[int, float] = {}
     SYNC_COOLDOWN = 120.0  # 同一订阅两次「立即检查」至少间隔这么多秒
 
+    def _cooldown_left(sub_id: int) -> int:
+        """离下次能「立即检查」还有几秒。"""
+        return max(1, int(SYNC_COOLDOWN - (time.monotonic() - _last_sync.get(sub_id, 0.0))) + 1)
+
     def _cooldown_ok(sub_id: int) -> bool:
         now = time.monotonic()
         if now - _last_sync.get(sub_id, -SYNC_COOLDOWN) < SYNC_COOLDOWN:
@@ -745,7 +764,9 @@ def create_app(
         if sub is None:
             raise HTTPException(status_code=404, detail="订阅不存在")
         if not _cooldown_ok(sub.id):
-            raise HTTPException(status_code=429, detail="刚检查过，请稍后再试")
+            left = _cooldown_left(sub.id)
+            raise HTTPException(status_code=429, detail=f"刚检查过，{left} 秒后可以再查",
+                                headers={"Retry-After": str(left)})
         notes = await _sync_check(owner, sub)
         return {"notifications": [{"kind": k, "message": m, "share": sh} for k, m, sh in notes]}
 
@@ -761,7 +782,7 @@ def create_app(
         if cookie is None:
             return None
         return QuarkSaver(cookie, "0", client=quark_http, classifier=classifier,
-                          root_dir=root_dir), account[0]
+                          root_dir=root_dir, pacer=pacer, pace_key=owner), account[0]
 
     def _is_movie(sub: Subscription, link: QuarkLink | None = None) -> bool:
         if sub.media:
@@ -874,6 +895,10 @@ def create_app(
         except LoginExpiredError:
             await store.delete_account(sh)
             return await pause("login_expired", expired)
+        except DailyLimitError:  # 不暂停订阅、不发通知，明天的检查接着存
+            message = f"{name}有更新，但你今天的转存次数已用完（防止夸克账号被风控），明天自动继续"
+            await store.log_auto_save(sub.id, link.share, False, 0, None, message)
+            return []
         except SaveError as e:
             message = f"{name}自动转存失败：{e}"
             await store.log_auto_save(sub.id, link.share, False, 0, None, message)
@@ -1093,7 +1118,8 @@ def create_app(
         subject, ip_subject = who.subject, who.ip_subject
         decision = await _check(who)
         if decision.blocked:
-            raise HTTPException(status_code=429, detail=decision.message())
+            raise HTTPException(status_code=429, detail=decision.message(),
+                                headers={"Retry-After": str(seconds_to_cn_midnight())})
         if decision.login_required:
             raise HTTPException(status_code=401, detail=decision.message())
         return subject, ip_subject, decision
@@ -1273,9 +1299,11 @@ def create_app(
         """转存到夸克网盘：扫码登录过的存到自己的网盘；否则凭口令存到部署者的网盘。"""
         user = await _user_cookie(request)
         if user is not None:
+            owner = f"u:{user[3]}"
             saver_obj = QuarkSaver(
                 user[1], _settings.quark_save_dir_fid if service is None else "0",
                 client=quark_http, classifier=classifier, root_dir=root_dir,
+                pacer=pacer, pace_key=owner,
             )
         elif app.state.saver is not None and x_save_token:
             if not hmac.compare_digest(x_save_token.encode(), resolved_token.encode()):
@@ -1297,6 +1325,9 @@ def create_app(
         try:
             with llm.scope(allowed=allowed) as meter:
                 result = await saver_obj.save(req.share, req.pwd)
+        except DailyLimitError as e:
+            raise HTTPException(status_code=429, detail=str(e),
+                                headers={"Retry-After": str(e.retry_after)}) from None
         except LoginExpiredError as e:
             if user is None:
                 return SaveResponse(ok=False, message=str(e))

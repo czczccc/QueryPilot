@@ -29,6 +29,7 @@ from app.services.organize import (
     standard_name,
     versioned_name,
 )
+from app.services.pacing import Pacer
 from app.services.quality import RESOLUTION_RANK
 from app.services.quark import DETAIL_URL, TOKEN_URL, UA
 
@@ -61,6 +62,14 @@ class SaveError(Exception):
 
 class LoginExpiredError(SaveError):
     """cookie 已失效（夸克错误码 31001）。"""
+
+
+class DailyLimitError(SaveError):
+    """这个账号今天的转存次数用完了（防风控）；`retry_after` 秒后（北京时间明天 0 点）恢复。"""
+
+    def __init__(self, limit: int, retry_after: int) -> None:
+        super().__init__(f"今天转存次数已达上限（{limit} 次），明天再试（限制是为了防止夸克账号被风控）")
+        self.retry_after = retry_after
 
 
 @dataclass
@@ -107,6 +116,8 @@ class QuarkSaver:
         poll_times: int = 10,
         classifier=None,
         root_dir: str = "QueryPilot",
+        pacer: Pacer | None = None,
+        pace_key: str = "",
     ) -> None:
         """`classifier`：`await classifier(title, files) -> Category`，为 None 时不分类，
         直接存到 `to_pdir_fid`；分类或建目录失败时也退回 `to_pdir_fid`。"""
@@ -118,6 +129,13 @@ class QuarkSaver:
         self._poll_times = poll_times
         self._classifier = classifier
         self._root_dir = root_dir
+        self._pacer = pacer
+        self._pace_key = pace_key
+
+    async def _pace(self) -> None:
+        """写操作前按账号排队、隔几秒再做（见 pacing.Pacer），降低夸克风控风险。"""
+        if self._pacer is not None:
+            await self._pacer.wait(self._pace_key)
 
     def __repr__(self) -> str:  # 防止对象被打印时带出 cookie
         return f"QuarkSaver(to_pdir_fid={self._to_pdir_fid!r})"
@@ -168,6 +186,7 @@ class QuarkSaver:
         tidy: Tidy | None = None,
     ) -> SaveResult:
         # 1) 分享页 token
+        await self._pace()
         resp = await self._client.post(
             TOKEN_URL,
             json={"pwd_id": share_id, "passcode": pwd or "",
@@ -259,8 +278,13 @@ class QuarkSaver:
         groups: dict[str, list[dict]] = {}
         for f in items:
             groups.setdefault(str(f.get("_pdir") or pdir), []).append(f)
+        if self._pacer is not None:  # 真要提交转存了才算一次（没有新集的检查不算）
+            retry = self._pacer.take_save(self._pace_key)
+            if retry is not None:
+                raise DailyLimitError(self._pacer.daily_saves, retry)
         task_id, done = "", True
         for parent, batch in groups.items():
+            await self._pace()
             resp = await self._client.post(
                 SAVE_URL,
                 params=COMMON_PARAMS,
@@ -383,6 +407,7 @@ class QuarkSaver:
         return await self._ensure_dir(path, headers)
 
     async def move(self, fids: list[str], to_fid: str, headers: dict) -> None:
+        await self._pace()
         resp = await self._client.post(
             MOVE_URL, params=COMMON_PARAMS,
             json={"action_type": 1, "to_pdir_fid": to_fid, "filelist": fids, "exclude_fids": []},
@@ -393,6 +418,7 @@ class QuarkSaver:
             await self._wait_task(task_id, headers)
 
     async def rename(self, fid: str, name: str, headers: dict) -> None:
+        await self._pace()
         resp = await self._client.post(
             RENAME_URL, params=COMMON_PARAMS, json={"fid": fid, "file_name": name},
             headers=headers, timeout=self._timeout,
@@ -401,6 +427,7 @@ class QuarkSaver:
 
     async def delete(self, fids: list[str], headers: dict) -> None:
         """删除（进夸克回收站，可在网盘里恢复）。只在用户确认后调用。"""
+        await self._pace()
         resp = await self._client.post(
             DELETE_URL, params=COMMON_PARAMS,
             json={"action_type": 2, "filelist": fids, "exclude_fids": []},
@@ -479,6 +506,7 @@ class QuarkSaver:
         found = body.get("data") if isinstance(body.get("data"), list) else []
         if found and isinstance(found[0], dict) and found[0].get("fid"):
             return str(found[0]["fid"])
+        await self._pace()
         resp = await self._client.post(
             MKDIR_URL, params=COMMON_PARAMS,
             json={"pdir_fid": "0", "file_name": "", "dir_path": path, "dir_init_lock": False},
