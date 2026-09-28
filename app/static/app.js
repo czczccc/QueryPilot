@@ -939,6 +939,11 @@ async function loadSubs() {
 // 每种提醒的标签和一句话说明；后端给了结构化字段就用字段，没给就从 message 里取
 const NOTE_KIND = {
   episodes: ["新集", "accent", ""],
+  new_episodes: ["新集", "accent", ""],
+  better_quality: ["更高清", "info", "出现了更高清的版本"],
+  saved: ["已转存", "ok", ""],
+  save_failed: ["转存失败", "danger", ""],
+  save_paused: ["转存暂停", "warn", ""],
   maybe: ["可能相关", "warn", "找到一个可能相关的资源，请自己核对是不是这部"],
   found: ["有资源了", "accent", "找到了新资源"],
   quality: ["更高清", "info", "出现了更高清的版本"],
@@ -973,9 +978,9 @@ function noteParts(n) {
   let summary = n.summary || (kind && kind[2]) || "";
   let path = "";
   const savedM = msg.match(/转存.*?(\d+)\s*个新?文件到[「『]([^」』]+)[」』]/);
-  if (!summary && savedM) { // 「已自动转存《…》的 N 个新文件到「路径」」→ 短句 + 灰色路径
-    summary = `转存了 ${savedM[1]} 个新文件`;
+  if (savedM) { // 「已自动转存《…》的 N 个新文件到「路径」」→ 短句 + 灰色路径
     path = savedM[2];
+    if (!n.resource_title) summary = `转存了 ${savedM[1]} 个新文件`;
   }
   if (!summary) { // 没有固定说法的：去掉片名和链接后的那句话
     summary = msg.replace(/https?:\/\/\S+/g, "").replace(/^《[^》]+》/, "").replace(/[：:，,]\s*$/, "").trim() || msg;
@@ -1129,10 +1134,12 @@ function groupSeries(subs) {
   const groups = {};
   const out = [];
   subs.forEach((sub) => {
-    if (!sub.series || !sub.collection_id) { out.push(subItem(sub)); return; }
-    let g = groups[sub.collection_id];
+    const key = sub.collection_id || (sub.show_id ? "tv:" + sub.show_id : ""); // 全部季的订阅也可能只带 show_id
+    if (!(sub.series || sub.show_id) || !key) { out.push(subItem(sub)); return; }
+    if (!sub.collection_id) sub.collection_id = key;
+    let g = groups[key];
     if (!g) {
-      g = groups[sub.collection_id] = [];
+      g = groups[key] = [];
       out.push(g);
     }
     g.push(sub);
