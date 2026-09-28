@@ -25,6 +25,7 @@ class Drive:
         self.expired = False
         self.saved: list[dict] = []
         self.have = ["流浪地球2.E01.2160p.mkv"]
+        self.names = {f"f{i}": f"流浪地球.E{i:02d}.1080p.mkv" for i in range(1, 100)}
 
     async def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -49,7 +50,9 @@ class Drive:
             return httpx.Response(200, json={"code": 0, "data": {"list": [
                 {"file_name": n, "fid": n, "dir": False} for n in self.have]}})
         if path.endswith("/sharepage/save"):
-            self.saved.append(json.loads(request.read()))
+            body = json.loads(request.read())
+            self.saved.append(body)
+            self.have += [self.names.get(f, f) for f in body["fid_list"]]  # 存进目标目录
             return httpx.Response(200, json={"code": 0, "data": {"task_id": "t"}})
         if path.endswith("/clouddrive/task"):
             return httpx.Response(200, json={"code": 0, "data": {"status": 2}})

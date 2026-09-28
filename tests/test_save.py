@@ -94,7 +94,7 @@ async def test_network_error_does_not_log_cookie(caplog):
     try:
         await s.save("abcdef123456")
     except SaveError as e:
-        assert "连接夸克失败" in str(e)
+        assert "连不上夸克" in str(e)
     assert "SECRET" not in caplog.text
 
 
