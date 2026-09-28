@@ -32,6 +32,7 @@ from app.models import (
     CollectionSubscribeRequest,
     FeedbackRequest,
     MediaCandidate,
+    NoticeReadRequest,
     Notification,
     OrganizeRequest,
     QuarkLink,
@@ -39,6 +40,7 @@ from app.models import (
     SaveRequest,
     SaveResponse,
     SearchRequest,
+    SeasonsSubscribeRequest,
     SeriesSubscription,
     SeriesUpdate,
     SubscribeRequest,
@@ -545,6 +547,18 @@ def create_app(
         if created and (req.auto_save or search_on_subscribe):
             _spawn_checks(owner, [x for x in created if x.state == "new"])
         return created
+
+    @app.post("/api/subscriptions/seasons", response_model=list[Subscription])
+    async def subscribe_seasons(
+        req: SeasonsSubscribeRequest, request: Request, _: None = Depends(rate_limit_dep)
+    ) -> list[Subscription]:
+        """一次订阅一部剧的全部季（TMDB）：等同于 POST /api/subscriptions/collection 传
+        collection_id=tv:<tmdb_id>。整部剧只占 1 个名额，返回新建的各季订阅。"""
+        return await subscribe_collection(CollectionSubscribeRequest(
+            client_id=req.client_id, collection_id=f"tv:{req.tmdb_id}", auto_join=req.auto_join,
+            auto_save=req.auto_save, resolution=req.resolution, include=req.include,
+            exclude=req.exclude, upgrade=req.upgrade, upgrade_to=req.upgrade_to,
+        ), request)
 
     @app.get("/api/subscriptions/collections", response_model=list[SeriesSubscription])
     async def list_collections(
@@ -1070,9 +1084,17 @@ def create_app(
             await _owner(request, client_id), include_read=include_read)
 
     @app.post("/api/notifications/read")
-    async def notifications_read(request: Request, client_id: str = ClientId) -> dict:
-        """全部标为已读。"""
-        await _store_or_404().mark_read(await _owner(request, client_id))
+    async def notifications_read(
+        request: Request, client_id: str = ClientId,
+        body: NoticeReadRequest | None = None,
+    ) -> dict:
+        """标为已读：body `{"ids": [4, 5]}` 只标这几条，不传或 ids 为空则全部已读。"""
+        store, owner = _store_or_404(), await _owner(request, client_id)
+        if body is not None and body.ids:
+            for nid in body.ids:
+                await store.mark_notification(owner, nid)
+        else:
+            await store.mark_read(owner)
         return {"ok": True}
 
     @app.post("/api/notifications/{nid}/read")

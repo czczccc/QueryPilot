@@ -208,6 +208,17 @@ class SubscribeRequest(BaseModel):
     collection_index: int | None = Field(default=None, ge=1, le=200)
 
 
+class SeasonsSubscribeRequest(SubscribeRequest):
+    """一次订阅一部剧的全部季：和单季订阅一样的请求体（必须带 tmdb_id），再加 auto_join。"""
+
+    tmdb_id: str = Field(min_length=1, max_length=20)
+    auto_join: bool = False  # 以后出新季自动加入
+
+
+class NoticeReadRequest(BaseModel):
+    ids: list[int] | None = Field(default=None, max_length=500)  # 不传或空：全部已读
+
+
 class CollectionSubscribeRequest(BaseModel):
     """订阅整个系列（TMDB collection）：每部建一个电影订阅，共用这组规则；整个系列只占 1 个名额。"""
 
@@ -322,6 +333,19 @@ class Subscription(BaseModel):
 
     @computed_field  # type: ignore[prop-decorator]
     @property
+    def show_id(self) -> str | None:
+        """整部剧一起订阅时的剧 id（TMDB），前端按它把各季折叠成一组；否则为 None。"""
+        cid = self.collection_id or ""
+        return cid[3:] if self.series and cid.startswith("tv:") else None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def all_seasons(self) -> bool:
+        """是否是「全部季」一起订阅建的。"""
+        return self.show_id is not None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
     def upgrade_done(self) -> bool | None:
         """洗版是否已完成（范围内已存的都达到目标清晰度）；没开洗版为 None。"""
         if not self.upgrade:
@@ -414,17 +438,44 @@ class MediaCandidate(BaseModel):
     default_part: int | None = None  # 默认选中第几部（从 1 开始）
 
 
+# 通知 kind → (卡片类型 type, 一句话说明)
+NOTICE_TYPES: dict[str, tuple[str, str]] = {
+    "found": ("found", "找到资源了"),
+    "episodes": ("new_episodes", "有新集了"),
+    "quality": ("better_quality", "有更高清的版本"),
+    "maybe": ("maybe", "找到可能相关的资源，请自己核对"),
+    "auto_saved": ("saved", "已自动转存到你的网盘"),
+    "upgraded": ("upgraded", "已转存更高清的版本"),
+    "auto_save_failed": ("save_failed", "自动转存失败"),
+    "auto_save_paused": ("save_paused", "自动转存已暂停，需要重新扫码登录"),
+    "completed": ("completed", "订阅已完成"),
+    "series_new": ("series_new", "出了新的一部 / 一季，已自动订阅"),
+}
+
+
 class Notification(BaseModel):
+    """订阅通知。`message` 是原来的整段文字（兼容旧前端）；卡片用后面的结构化字段。"""
+
     id: int
     subscription_id: int
     resource: str
-    # episodes 新集 / found 有资源了 / quality 更高清 / completed 订阅完成 /
-    # auto_saved / auto_save_failed / auto_save_paused 自动转存结果
+    # episodes 新集 / found 有资源了 / quality 更高清 / completed 订阅完成 / maybe 可能相关 /
+    # auto_saved / auto_save_failed / auto_save_paused 自动转存结果 / upgraded 洗版 / series_new
     kind: str
     message: str
-    share: str | None = None  # 带来更新的那条链接
+    share: str | None = None  # 带来更新的那条链接（分享码）
     ts: float
     read: bool = False
+    # ---- 卡片用的结构化字段 ----
+    type: str = ""  # found / new_episodes / better_quality / maybe / saved / upgraded /
+    # save_failed / save_paused / completed / series_new（见 NOTICE_TYPES）
+    summary: str = ""  # 一句话中文说明，如「找到可能相关的资源，请自己核对」
+    subscription_name: str = ""  # 订阅名（去掉「第N季」）
+    season: int | None = None  # 剧集第几季
+    part: int | None = None  # 系列电影第几部
+    resource_title: str | None = None  # 分享的标题（资源名）
+    url: str | None = None  # 分享链接
+    created_at: str = ""  # ISO 时间（北京时间，带 +08:00）
 
 
 class SaveRequest(BaseModel):
