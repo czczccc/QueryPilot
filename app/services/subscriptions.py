@@ -177,6 +177,8 @@ class SubscriptionWatcher:
         )
         if sub.media == "tv" and sub.season:
             target.season = sub.season
+        # 剧集订阅的年份是首播年：后面几季、多季合集写的是更晚的年份，只排除更早的
+        target.year_floor = sub.media == "tv"
         return target
 
     async def _maybe(self, sub: Subscription, links: list[QuarkLink]) -> list[Note]:

@@ -333,3 +333,51 @@ async def test_subscription_rechecks_entry_and_asks_about_unsure():
     assert [k for k, _, _ in notes] == ["maybe"] and saved == []
     [(_, again)] = await store2.list_subscriptions("c" * 8)
     assert await watcher2.check("c" * 8, again) == []  # 同一个只提醒一次
+
+
+# ---------------- 线上实测（无职转生）：波浪号、游戏、多季合集、后几季年份 ----------------
+
+MUSHOKU = "无职转生～到了异世界就拿出真本事～"
+
+
+def _sub_target(season: int, year: str = "2021"):
+    from app.models import Subscription
+    from app.services.subscriptions import SubscriptionWatcher
+
+    sub = Subscription(id=1, query=MUSHOKU, resource=f"{MUSHOKU} 第{season}季", created=0,
+                       media="tv", season=season, year=year)
+    return SubscriptionWatcher._target(sub)
+
+
+def test_fullwidth_tilde_and_multi_season_pack():
+    pack = "无职转生 ~到了异世界就拿出真本事 S01-S02季全集 4K超清2160P收藏版 内封简日双语字幕"
+    for season, want in ((1, "match"), (2, "match"), (3, "mismatch")):
+        lk = L(title=pack, files=["S01E01.mkv"])
+        judge(lk, _sub_target(season))
+        assert lk.relevance == want, (season, lk.relevance_note)
+
+
+def test_games_are_not_videos():
+    game = L(title="W 无职转生到了异世界就拿出真本事 TENOKE中文版", files=["setup.exe"])
+    judge(game, _sub_target(2))
+    assert game.relevance == "mismatch" and "游戏" in game.relevance_note
+    only_exe = L(title="无职转生 到了异世界就拿出真本事", files=["Mushoku.exe", "data.pak"])
+    judge(only_exe, _sub_target(1))
+    assert only_exe.relevance == "mismatch"
+    # 片名里带「游戏」的影视不受影响
+    squid = L(title="鱿鱼游戏 第二季 2024 1080P", files=["鱿鱼游戏.S02E01.mkv"])
+    judge(squid, build_target(P("鱿鱼游戏"), "鱿鱼游戏"))
+    assert squid.relevance == "match"
+
+
+def test_later_seasons_keep_later_years():
+    s2 = L(title=f"{MUSHOKU} 第二季 2023 1080P", files=["S02E01.mkv"])
+    judge(s2, _sub_target(2))
+    assert s2.relevance == "match"
+    old = L(title=f"{MUSHOKU} 第二季 2012", files=["S02E01.mkv"])
+    judge(old, _sub_target(2))
+    assert old.relevance == "mismatch"
+    # 电影还是按 ±1 年判
+    movie = L(title="流浪地球2 2019", files=["a.mkv"])
+    judge(movie, build_target(P("流浪地球2"), "流浪地球2", "2023"))
+    assert movie.relevance == "mismatch"
