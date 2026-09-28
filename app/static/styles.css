@@ -1637,6 +1637,15 @@ body.searched .hero .memory-stats { display: none; }
 .seg-n { font-size: 0.7rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 .seg-n:empty { display: none; }
 .subs-list li.subs-empty { padding: 1rem 0; font-size: 0.85rem; }
+/* 整个系列：一组订阅，头部放「新作自动加入」和「退订整个系列」 */
+.subs-list li.sub-group { display: grid; justify-content: stretch; gap: 0.2rem; padding: 0.75rem 0 0.25rem; }
+.sg-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem 0.75rem; }
+.sg-title { display: flex; align-items: baseline; gap: 0.5rem; min-width: 0; }
+.sg-title b { font-size: 0.95rem; }
+.sg-count { font-size: 0.76rem; color: var(--muted); }
+.sg-tools { display: flex; align-items: center; gap: 0.6rem; }
+.sg-list { list-style: none; margin: 0; padding: 0 0 0 0.85rem; border-left: 2px solid var(--accent-line); }
+.sg-list li.sub-item:last-child { border-bottom: none; }
 
 .sub-card { display: grid; grid-template-columns: 52px 1fr; gap: 0.8rem; align-items: start; animation: fade-up 0.35s var(--ease) both; }
 .sub-body { display: grid; gap: 0.4rem; min-width: 0; }

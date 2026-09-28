@@ -892,17 +892,21 @@ async function loginIfNeeded(res, why) {
   return false;
 }
 
+let collectionsCache = []; // 系列级设置（新作自动加入）
+
 async function loadSubs() {
   if (!clientId) return;
   try {
-    const [subsResp, notifResp, histResp] = await Promise.all([
+    const [subsResp, notifResp, histResp, collResp] = await Promise.all([
       fetch("/api/subscriptions?" + cidParam()),
       fetch("/api/notifications?" + cidParam()),
       fetch("/api/subscriptions/history?" + cidParam()).catch(() => null),
+      fetch("/api/subscriptions/collections?" + cidParam()).catch(() => null),
     ]);
     if (!subsResp.ok || !notifResp.ok) return; // 记忆未开启：不显示订阅
     subsCache = await subsResp.json();
     historyCache = histResp && histResp.ok ? await histResp.json() : [];
+    collectionsCache = collResp && collResp.ok ? await collResp.json().catch(() => []) : [];
     const notes = await notifResp.json();
     subsPanel.hidden = false;
     if (lastResult) {
@@ -922,6 +926,85 @@ async function loadSubs() {
 
     renderSubsTab();
   } catch (_) { /* 网络问题：下次再试 */ }
+}
+
+// 「订阅整个系列」建的订阅按系列折叠成一组，放在该系列第一部出现的位置
+function groupSeries(subs) {
+  const groups = {};
+  const out = [];
+  subs.forEach((sub) => {
+    if (!sub.series || !sub.collection_id) { out.push(subItem(sub)); return; }
+    let g = groups[sub.collection_id];
+    if (!g) {
+      g = groups[sub.collection_id] = [];
+      out.push(g);
+    }
+    g.push(sub);
+  });
+  return out.map((x) => (Array.isArray(x) ? seriesGroup(x) : x));
+}
+
+function seriesGroup(subs) {
+  subs.sort((a, b) => (a.collection_index || 0) - (b.collection_index || 0));
+  const cid = String(subs[0].collection_id);
+  const info = collectionsCache.find((c) => String(c.collection_id) === cid) || {};
+  const name = collectionName(info.name || subs[0].collection_name) || "系列";
+  const li = el("li", "sub-group");
+  const head = el("div", "sg-head");
+  const title = el("div", "sg-title");
+  title.append(el("b", "", name + " 系列"), el("span", "sg-count", "订阅中 " + subs.length + " 部"));
+  const tools = el("div", "sg-tools");
+
+  if (info.collection_id !== undefined) { // 后端有系列设置时才显示开关
+    const sw = el("label", "switch small");
+    const cb = el("input");
+    cb.type = "checkbox";
+    cb.checked = !!info.auto_join;
+    const track = el("span", "switch-track");
+    track.setAttribute("aria-hidden", "true");
+    sw.append(cb, track, "新作自动加入");
+    sw.title = "每天查一次这个系列有没有新片，有就自动订阅并通知你";
+    cb.addEventListener("change", async () => {
+      cb.disabled = true;
+      const res = await subApi("/collection/" + encodeURIComponent(cid), "PATCH", { auto_join: cb.checked })
+        .catch(() => ({ ok: false, status: 0, body: {} }));
+      cb.disabled = false;
+      if (res.ok) {
+        info.auto_join = cb.checked;
+        toast(cb.checked ? "《" + name + "》系列以后出新作会自动订阅" : "已关闭《" + name + "》系列的新作自动加入", "ok");
+      } else if (res.status === 404) {
+        loadSubs();
+      } else {
+        cb.checked = !cb.checked;
+        toast(res.body.detail || "操作失败", "error");
+      }
+    });
+    tools.appendChild(sw);
+  }
+
+  const del = el("button", "ghost-btn small danger", "退订整个系列");
+  del.type = "button";
+  del.title = "系列里还在订阅中的部一起取消；单独订阅的部和已完成的历史不受影响";
+  del.addEventListener("click", async () => {
+    if (!del.classList.contains("confirm")) { // 第一次点只是确认
+      del.classList.add("confirm");
+      setText(del, "确定退订 " + subs.length + " 部？");
+      setTimeout(() => { del.classList.remove("confirm"); setText(del, "退订整个系列"); }, 3000);
+      return;
+    }
+    del.disabled = true;
+    const res = await subApi("/collection/" + encodeURIComponent(cid), "DELETE").catch(() => ({ ok: false, body: {} }));
+    if (res.ok) toast("已退订《" + name + "》系列");
+    else toast(res.body.detail || "操作失败", "error");
+    loadSubs();
+  });
+  tools.appendChild(del);
+  head.append(title, tools);
+
+  const list = el("ul", "sg-list");
+  subs.forEach((sub) => list.appendChild(subItem(sub, true)));
+  li.append(head, list);
+  return li;
 }
 
 // 没识别出类型的关键词订阅归到「剧集」
@@ -948,7 +1031,7 @@ function renderSubsTab() {
   if (subsTab === "calendar") { renderCalendar(); return; }
   const items = subsTab === "history"
     ? historyCache.map(historyItem)
-    : subsCache.filter((s) => subMedia(s) === subsTab).map(subItem);
+    : groupSeries(subsCache.filter((s) => subMedia(s) === subsTab));
   if (!items.length) subsList.appendChild(el("li", "muted subs-empty", SUBS_TABS[subsTab].empty));
   items.forEach((li) => subsList.appendChild(li));
 }
@@ -1731,7 +1814,7 @@ function saveLogButton(sub, log) {
 }
 
 // 一条订阅：海报 + 标题与状态 + 进度 + 规则 + 自动转存 + 设置面板
-function subItem(sub) {
+function subItem(sub, grouped) { // grouped：在系列分组里，副标题只写「第 N 部」
   const li = el("li", "sub-item" + (sub.state === "paused" ? " is-paused" : ""));
   li.dataset.subId = String(sub.id);
   const card = el("div", "sub-card");
@@ -1752,7 +1835,7 @@ function subItem(sub) {
   const tags = [
     sub.season_year || sub.year || "", // 季订阅显示这一季的开播年，不是剧集首播年
     sub.collection_name
-      ? collectionName(sub.collection_name) + " 系列" + (sub.collection_index ? " · 第 " + sub.collection_index + " 部" : "")
+      ? (grouped ? "" : collectionName(sub.collection_name) + " 系列 · ") + (sub.collection_index ? "第 " + sub.collection_index + " 部" : "电影")
       : sub.media === "movie" ? "电影" : sub.media === "tv" ? "剧集" : "按关键词",
     sub.last_error ? "" : sub.last_checked ? "检查于 " + formatTime(sub.last_checked) : "尚未检查",
   ].filter(Boolean).join(" · ");
