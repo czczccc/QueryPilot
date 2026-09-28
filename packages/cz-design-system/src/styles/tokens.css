@@ -129,11 +129,11 @@
   --cz-color-info-fg: oklch(0.525 0.114 248);
   --cz-color-info-soft: oklch(0.972 0.013 248);
   --cz-color-info-line: oklch(0.885 0.059 248);
-  --cz-shadow-xs: 0 1px 2px 0 oklch(0.24 0.012 170 / 0.05);
-  --cz-shadow-sm: 0 1px 2px 0 oklch(0.24 0.012 170 / 0.06), 0 1px 3px 0 oklch(0.24 0.012 170 / 0.04);
-  --cz-shadow-md: 0 2px 4px -1px oklch(0.24 0.012 170 / 0.05), 0 6px 16px -4px oklch(0.24 0.012 170 / 0.09);
-  --cz-shadow-lg: 0 4px 8px -4px oklch(0.24 0.012 170 / 0.06), 0 16px 36px -8px oklch(0.24 0.012 170 / 0.14);
-  --cz-shadow-xl: 0 8px 16px -8px oklch(0.24 0.012 170 / 0.08), 0 28px 64px -16px oklch(0.24 0.012 170 / 0.22);
+  --cz-shadow-xs: 0 1px 2px 0 oklch(0.24 0.012 170 / 0.08);
+  --cz-shadow-sm: 0 1px 2px 0 oklch(0.24 0.012 170 / 0.08), 0 2px 6px 0 oklch(0.24 0.012 170 / 0.06);
+  --cz-shadow-md: 0 2px 4px -1px oklch(0.24 0.012 170 / 0.08), 0 8px 20px -4px oklch(0.24 0.012 170 / 0.14);
+  --cz-shadow-lg: 0 4px 8px -4px oklch(0.24 0.012 170 / 0.1), 0 18px 40px -8px oklch(0.24 0.012 170 / 0.2);
+  --cz-shadow-xl: 0 10px 20px -8px oklch(0.24 0.012 170 / 0.12), 0 32px 72px -16px oklch(0.24 0.012 170 / 0.3);
 }
 
 /* 跟随系统：未显式指定浅色时，系统深色即启用深色主题 */
@@ -182,11 +182,11 @@
     --cz-color-info-fg: oklch(0.8 0.096 248);
     --cz-color-info-soft: oklch(0.61 0.12 248 / 0.16);
     --cz-color-info-line: oklch(0.71 0.114 248 / 0.34);
-    --cz-shadow-xs: 0 1px 2px 0 oklch(0 0 0 / 0.3);
-    --cz-shadow-sm: inset 0 1px 0 0 oklch(1 0 0 / 0.05), 0 1px 2px 0 oklch(0 0 0 / 0.35);
-    --cz-shadow-md: inset 0 1px 0 0 oklch(1 0 0 / 0.05), 0 6px 16px -4px oklch(0 0 0 / 0.45);
-    --cz-shadow-lg: inset 0 1px 0 0 oklch(1 0 0 / 0.05), 0 16px 36px -8px oklch(0 0 0 / 0.55);
-    --cz-shadow-xl: inset 0 1px 0 0 oklch(1 0 0 / 0.05), 0 28px 64px -16px oklch(0 0 0 / 0.65);
+    --cz-shadow-xs: 0 0 0 1px oklch(1 0 0 / 0.04), 0 1px 2px 0 oklch(0 0 0 / 0.5);
+    --cz-shadow-sm: inset 0 1px 0 0 oklch(1 0 0 / 0.06), 0 0 0 1px oklch(1 0 0 / 0.05), 0 2px 4px 0 oklch(0 0 0 / 0.45);
+    --cz-shadow-md: inset 0 1px 0 0 oklch(1 0 0 / 0.07), 0 0 0 1px oklch(1 0 0 / 0.06), 0 8px 20px -4px oklch(0 0 0 / 0.55);
+    --cz-shadow-lg: inset 0 1px 0 0 oklch(1 0 0 / 0.08), 0 0 0 1px oklch(1 0 0 / 0.07), 0 18px 40px -8px oklch(0 0 0 / 0.65);
+    --cz-shadow-xl: inset 0 1px 0 0 oklch(1 0 0 / 0.09), 0 0 0 1px oklch(1 0 0 / 0.08), 0 32px 72px -16px oklch(0 0 0 / 0.75);
   }
 }
 
@@ -235,11 +235,11 @@
   --cz-color-info-fg: oklch(0.525 0.114 248);
   --cz-color-info-soft: oklch(0.972 0.013 248);
   --cz-color-info-line: oklch(0.885 0.059 248);
-  --cz-shadow-xs: 0 1px 2px 0 oklch(0.24 0.012 170 / 0.05);
-  --cz-shadow-sm: 0 1px 2px 0 oklch(0.24 0.012 170 / 0.06), 0 1px 3px 0 oklch(0.24 0.012 170 / 0.04);
-  --cz-shadow-md: 0 2px 4px -1px oklch(0.24 0.012 170 / 0.05), 0 6px 16px -4px oklch(0.24 0.012 170 / 0.09);
-  --cz-shadow-lg: 0 4px 8px -4px oklch(0.24 0.012 170 / 0.06), 0 16px 36px -8px oklch(0.24 0.012 170 / 0.14);
-  --cz-shadow-xl: 0 8px 16px -8px oklch(0.24 0.012 170 / 0.08), 0 28px 64px -16px oklch(0.24 0.012 170 / 0.22);
+  --cz-shadow-xs: 0 1px 2px 0 oklch(0.24 0.012 170 / 0.08);
+  --cz-shadow-sm: 0 1px 2px 0 oklch(0.24 0.012 170 / 0.08), 0 2px 6px 0 oklch(0.24 0.012 170 / 0.06);
+  --cz-shadow-md: 0 2px 4px -1px oklch(0.24 0.012 170 / 0.08), 0 8px 20px -4px oklch(0.24 0.012 170 / 0.14);
+  --cz-shadow-lg: 0 4px 8px -4px oklch(0.24 0.012 170 / 0.1), 0 18px 40px -8px oklch(0.24 0.012 170 / 0.2);
+  --cz-shadow-xl: 0 10px 20px -8px oklch(0.24 0.012 170 / 0.12), 0 32px 72px -16px oklch(0.24 0.012 170 / 0.3);
 }
 
 [data-theme="dark"] {
@@ -286,9 +286,9 @@
   --cz-color-info-fg: oklch(0.8 0.096 248);
   --cz-color-info-soft: oklch(0.61 0.12 248 / 0.16);
   --cz-color-info-line: oklch(0.71 0.114 248 / 0.34);
-  --cz-shadow-xs: 0 1px 2px 0 oklch(0 0 0 / 0.3);
-  --cz-shadow-sm: inset 0 1px 0 0 oklch(1 0 0 / 0.05), 0 1px 2px 0 oklch(0 0 0 / 0.35);
-  --cz-shadow-md: inset 0 1px 0 0 oklch(1 0 0 / 0.05), 0 6px 16px -4px oklch(0 0 0 / 0.45);
-  --cz-shadow-lg: inset 0 1px 0 0 oklch(1 0 0 / 0.05), 0 16px 36px -8px oklch(0 0 0 / 0.55);
-  --cz-shadow-xl: inset 0 1px 0 0 oklch(1 0 0 / 0.05), 0 28px 64px -16px oklch(0 0 0 / 0.65);
+  --cz-shadow-xs: 0 0 0 1px oklch(1 0 0 / 0.04), 0 1px 2px 0 oklch(0 0 0 / 0.5);
+  --cz-shadow-sm: inset 0 1px 0 0 oklch(1 0 0 / 0.06), 0 0 0 1px oklch(1 0 0 / 0.05), 0 2px 4px 0 oklch(0 0 0 / 0.45);
+  --cz-shadow-md: inset 0 1px 0 0 oklch(1 0 0 / 0.07), 0 0 0 1px oklch(1 0 0 / 0.06), 0 8px 20px -4px oklch(0 0 0 / 0.55);
+  --cz-shadow-lg: inset 0 1px 0 0 oklch(1 0 0 / 0.08), 0 0 0 1px oklch(1 0 0 / 0.07), 0 18px 40px -8px oklch(0 0 0 / 0.65);
+  --cz-shadow-xl: inset 0 1px 0 0 oklch(1 0 0 / 0.09), 0 0 0 1px oklch(1 0 0 / 0.08), 0 32px 72px -16px oklch(0 0 0 / 0.75);
 }
