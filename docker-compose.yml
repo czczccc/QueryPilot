@@ -15,6 +15,8 @@ services:
       - querypilot-data:/app/data
       - querypilot-logs:/app/logs
     restart: unless-stopped
+    # 重新部署时给进行中的订阅检查 / 转存留时间做完（应用里最多等 60 秒）
+    stop_grace_period: 90s
     # 日志只留最近约 30MB（隐私说明里承诺的），自动滚动覆盖
     logging:
       driver: json-file
