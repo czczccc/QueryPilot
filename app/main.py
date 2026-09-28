@@ -82,6 +82,19 @@ from app.services.usage import today as usage_today
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
+
+def _asset_version() -> str:
+    """静态文件内容的短哈希，拼在 CSS/JS 地址后面：发版后浏览器一定拿到新文件，
+    不会出现新页面配旧样式（StaticFiles 不带 Cache-Control，浏览器会按启发式缓存旧文件）。"""
+    h = hashlib.sha256()
+    for name in ("styles.css", "app.js"):
+        with contextlib.suppress(OSError):
+            h.update((BASE_DIR / "static" / name).read_bytes())
+    return h.hexdigest()[:10]
+
+
+ASSET_VERSION = _asset_version()
+
 _settings = load_settings()
 logging.basicConfig(
     level=_settings.log_level,
@@ -357,7 +370,9 @@ def create_app(
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
         """服务端渲染的搜索页面。"""
-        return templates.TemplateResponse(request, "index.html")
+        resp = templates.TemplateResponse(request, "index.html", {"asset_v": ASSET_VERSION})
+        resp.headers["Cache-Control"] = "no-cache"  # 页面每次都向服务器确认，才能拿到新的资源版本号
+        return resp
 
     @app.get("/health")
     async def health() -> dict:
