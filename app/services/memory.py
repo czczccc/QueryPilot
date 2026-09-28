@@ -24,6 +24,7 @@ from app.models import (
     Subscription,
     SubscriptionHistory,
     UserPrefs,
+    unreleased,
 )
 
 _SCHEMA = """
@@ -109,6 +110,19 @@ CREATE TABLE IF NOT EXISTS subscription_history (
     reason         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sub_history_client ON subscription_history(client_id, completed);
+-- 订阅整个系列：系列级设置（新作自动加入、给新作用的订阅规则）；整个系列只占 1 个订阅名额
+CREATE TABLE IF NOT EXISTS collections (
+    client_id     TEXT NOT NULL,
+    collection_id TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    poster        TEXT,
+    auto_join     INTEGER NOT NULL DEFAULT 0,
+    settings      TEXT NOT NULL,
+    known         TEXT NOT NULL,
+    created       REAL NOT NULL,
+    checked       REAL,
+    PRIMARY KEY (client_id, collection_id)
+);
 CREATE TABLE IF NOT EXISTS prefs (
     client_id TEXT PRIMARY KEY,
     data      TEXT NOT NULL,
@@ -148,6 +162,11 @@ _MIGRATIONS = [
     ("subscriptions", "schedule", "TEXT"),  # 播出日历（JSON）
     ("subscriptions", "season_year", "TEXT"),
     ("subscriptions", "last_error", "TEXT"),
+    ("subscriptions", "collection_id", "TEXT"),
+    ("subscriptions", "collection_name", "TEXT"),
+    ("subscriptions", "collection_index", "INTEGER"),
+    ("subscriptions", "series", "INTEGER NOT NULL DEFAULT 0"),
+    ("subscriptions", "release_date", "TEXT"),
 ]
 
 # 订阅 v2 的可编辑字段：Subscription 属性名 → 列名
@@ -158,6 +177,8 @@ SUB_FIELDS = {
     "resolution": "resolution", "include": "include_words", "exclude": "exclude_words",
     "auto_save": "auto_save", "folder": "folder", "upgrade": "upgrade",
     "upgrade_to": "upgrade_to", "season_year": "season_year",
+    "collection_id": "collection_id", "collection_name": "collection_name",
+    "collection_index": "collection_index", "series": "series", "release_date": "release_date",
 }
 
 _PUNCT_RE = re.compile(r"[\s\-_·:：,，.。!！?？'\"“”‘’()（）\[\]【】《》<>]+")
@@ -179,6 +200,7 @@ def _state(row: sqlite3.Row) -> str:
     state = row["state"] or "active"
     if state == "active" and (
         row["media"] is None or (row["media"] == "tv" and not row["total_episodes"])
+        or (row["media"] == "movie" and unreleased(row["release_date"], bool(row["series"])))
     ):
         return "pending"
     return state
@@ -362,14 +384,13 @@ class LinkStore:
     ) -> Subscription | None:
         key = resource_key(resource)
         with self._lock:
-            count = self._conn.execute(
-                "SELECT COUNT(*) FROM subscriptions WHERE client_id = ?", (client_id,)
-            ).fetchone()[0]
+            count = self._count(client_id)
             exists = self._conn.execute(
                 "SELECT id FROM subscriptions WHERE client_id = ? AND resource_key = ?",
                 (client_id, key),
             ).fetchone()
-            if exists is None and count >= limit:
+            # 整个系列里的各部不单独占名额（系列本身在 add_collection 时算 1 个）
+            if exists is None and count >= limit and not fields.get("series"):
                 return None
             self._conn.execute(
                 "INSERT INTO subscriptions (client_id, query, resource, resource_key, created, "
@@ -390,11 +411,100 @@ class LinkStore:
             ).fetchone()
         return self._row_to_sub(row)
 
+    def _count(self, client_id: str) -> int:
+        """占用的订阅名额：单独的订阅各算 1 个，整个系列算 1 个（调用方持有锁）。"""
+        single = self._conn.execute(
+            "SELECT COUNT(*) FROM subscriptions WHERE client_id = ? AND series = 0", (client_id,)
+        ).fetchone()[0]
+        series = self._conn.execute(
+            "SELECT COUNT(*) FROM collections WHERE client_id = ?", (client_id,)
+        ).fetchone()[0]
+        return int(single) + int(series)
+
+    def _gc_collection(self, client_id: str, cid: str | None) -> None:
+        """系列里的订阅都完成 / 删掉了、又没开新作自动加入：系列不再占名额（调用方持有锁）。"""
+        if not cid:
+            return
+        left = self._conn.execute(
+            "SELECT COUNT(*) FROM subscriptions WHERE client_id = ? AND collection_id = ? "
+            "AND series = 1", (client_id, cid),
+        ).fetchone()[0]
+        if not left:
+            self._conn.execute(
+                "DELETE FROM collections WHERE client_id = ? AND collection_id = ? "
+                "AND auto_join = 0", (client_id, cid),
+            )
+
+    def _add_collection(
+        self, client_id: str, cid: str, name: str, poster: str | None, auto_join: bool,
+        settings: dict, known: list[str], now: float, limit: int,
+    ) -> bool:
+        with self._lock:
+            exists = self._conn.execute(
+                "SELECT known FROM collections WHERE client_id = ? AND collection_id = ?",
+                (client_id, cid),
+            ).fetchone()
+            if exists is None and self._count(client_id) >= limit:
+                return False
+            if exists is not None:
+                known = sorted({*json.loads(exists["known"]), *known})
+            self._conn.execute(
+                "INSERT INTO collections (client_id, collection_id, name, poster, auto_join, "
+                "settings, known, created, checked) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(client_id, collection_id) DO UPDATE SET name = excluded.name, "
+                "poster = excluded.poster, auto_join = excluded.auto_join, "
+                "settings = excluded.settings, known = excluded.known",
+                (client_id, cid, name, poster, int(auto_join),
+                 json.dumps(settings, ensure_ascii=False), json.dumps(known), now, now),
+            )
+            self._conn.commit()
+        return True
+
+    def _collections(self, client_id: str | None) -> list[dict]:
+        sql = "SELECT c.*, (SELECT COUNT(*) FROM subscriptions s WHERE s.client_id = c.client_id "
+        sql += "AND s.collection_id = c.collection_id AND s.series = 1) AS active FROM collections c"
+        args: tuple = ()
+        if client_id is not None:
+            sql += " WHERE c.client_id = ?"
+            args = (client_id,)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY c.created", args).fetchall()
+        return [{
+            "client_id": r["client_id"], "collection_id": r["collection_id"], "name": r["name"],
+            "poster": r["poster"], "auto_join": bool(r["auto_join"]),
+            "settings": json.loads(r["settings"]), "known": json.loads(r["known"]),
+            "created": r["created"], "checked": r["checked"], "subscriptions": r["active"],
+        } for r in rows]
+
+    def _delete_collection(self, client_id: str, cid: str) -> bool:
+        with self._lock:
+            ids = [r["id"] for r in self._conn.execute(
+                "SELECT id FROM subscriptions WHERE client_id = ? AND collection_id = ? "
+                "AND series = 1", (client_id, cid)).fetchall()]
+            cur = self._conn.execute(
+                "DELETE FROM collections WHERE client_id = ? AND collection_id = ?",
+                (client_id, cid))
+            self._conn.commit()
+        for sub_id in ids:
+            self._delete_subscription(client_id, sub_id)
+        return cur.rowcount > 0 or bool(ids)
+
+    def _history_tmdb_ids(self, client_id: str) -> set[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM subscription_history WHERE client_id = ?", (client_id,)
+            ).fetchall()
+        ids = {json.loads(r["data"] or "{}").get("tmdb_id") for r in rows}
+        return {i for i in ids if i}
+
     @staticmethod
     def _row_to_sub(row: sqlite3.Row) -> Subscription:
         return Subscription(
             id=row["id"], query=row["query"], resource=row["resource"], created=row["created"],
             last_checked=row["last_checked"], last_error=row["last_error"],
+            collection_id=row["collection_id"], collection_name=row["collection_name"],
+            collection_index=row["collection_index"], series=bool(row["series"]),
+            release_date=row["release_date"],
             best_episodes=row["best_episodes"], season_year=row["season_year"],
             best_score=row["best_score"], best_resolution=row["best_resolution"],
             auto_save=bool(row["auto_save"]), auto_save_status=row["auto_save_status"],
@@ -421,6 +531,9 @@ class LinkStore:
 
     def _delete_subscription(self, client_id: str, sub_id: int) -> bool:
         with self._lock:
+            row = self._conn.execute(
+                "SELECT collection_id FROM subscriptions WHERE id = ? AND client_id = ? "
+                "AND series = 1", (sub_id, client_id)).fetchone()
             cur = self._conn.execute(
                 "DELETE FROM subscriptions WHERE id = ? AND client_id = ?", (sub_id, client_id)
             )
@@ -430,6 +543,8 @@ class LinkStore:
             )
             if cur.rowcount:
                 self._conn.execute("DELETE FROM auto_saves WHERE subscription_id = ?", (sub_id,))
+            if row is not None:
+                self._gc_collection(client_id, row["collection_id"])
             self._conn.commit()
         return cur.rowcount > 0
 
@@ -552,7 +667,7 @@ class LinkStore:
         data = sub.model_dump(include={
             "media", "season", "year", "tmdb_id", "douban_id", "poster", "total_episodes",
             "start_episode", "resolution", "include", "exclude", "auto_save", "folder",
-            "upgrade", "upgrade_to",
+            "upgrade", "upgrade_to", "collection_id", "collection_name", "collection_index",
         })
         data["saved_count"] = len(set(sub.saved_episodes))
         with self._lock:
@@ -566,6 +681,8 @@ class LinkStore:
             self._conn.execute(
                 "DELETE FROM subscriptions WHERE id = ? AND client_id = ?", (sub.id, client_id)
             )
+            if sub.series:
+                self._gc_collection(client_id, sub.collection_id)
             self._conn.commit()
         return int(cur.lastrowid or 0)
 
@@ -666,6 +783,60 @@ class LinkStore:
         data = json.dumps([e.model_dump() for e in schedule], ensure_ascii=False)
         await asyncio.to_thread(
             self._exec, "UPDATE subscriptions SET schedule = ? WHERE id = ?", (data, sub_id))
+
+    async def add_collection(
+        self, client_id: str, cid: str, name: str, poster: str | None, auto_join: bool,
+        settings: dict, known: list[str], limit: int = 20,
+    ) -> bool:
+        """订阅整个系列（已订阅过就更新设置）；新系列超出名额时返回 False。
+        `known`：已经见过的各部 TMDB id，新作自动加入只加不在里面的。"""
+        return await asyncio.to_thread(self._add_collection, client_id, cid, name, poster,
+                                       auto_join, settings, known, time.time(), limit)
+
+    async def list_collections(self, client_id: str | None = None) -> list[dict]:
+        return await asyncio.to_thread(self._collections, client_id)
+
+    async def set_collection(
+        self, client_id: str, cid: str, auto_join: bool | None = None,
+        known: list[str] | None = None, checked: float | None = None,
+    ) -> bool:
+        sets, args = [], []
+        for col, v in (("auto_join", None if auto_join is None else int(auto_join)),
+                       ("known", None if known is None else json.dumps(sorted(set(known)))),
+                       ("checked", checked)):
+            if v is not None:
+                sets.append(f"{col} = ?")
+                args.append(v)
+        if not sets:
+            return False
+        n = await asyncio.to_thread(
+            self._exec, f"UPDATE collections SET {', '.join(sets)} "
+            "WHERE client_id = ? AND collection_id = ?", (*args, client_id, cid))
+        if auto_join is False:
+            def gc() -> None:
+                with self._lock:
+                    self._gc_collection(client_id, cid)
+                    self._conn.commit()
+            await asyncio.to_thread(gc)
+        return n > 0
+
+    async def delete_collection(self, client_id: str, cid: str) -> bool:
+        """退订整个系列：连同系列里还没完成的订阅一起删掉。"""
+        return await asyncio.to_thread(self._delete_collection, client_id, cid)
+
+    async def history_tmdb_ids(self, client_id: str) -> set[str]:
+        """订阅历史里完成过的条目（TMDB id）。"""
+        return await asyncio.to_thread(self._history_tmdb_ids, client_id)
+
+    async def add_notification(
+        self, client_id: str, sub: Subscription, kind: str, message: str,
+    ) -> None:
+        await asyncio.to_thread(
+            self._exec,
+            "INSERT INTO notifications (subscription_id, client_id, resource, kind, message, "
+            "share, ts) VALUES (?, ?, ?, ?, ?, NULL, ?)",
+            (sub.id, client_id, sub.resource, kind, message, time.time()),
+        )
 
     async def set_check_error(self, sub_id: int, message: str) -> None:
         """检查失败：记下时间和原因，卡片不再一直停在「首次搜索中」。"""

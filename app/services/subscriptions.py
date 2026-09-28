@@ -12,11 +12,20 @@
 
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 
 import httpx
 
-from app.models import ParsedResource, QuarkLink, SearchRequest, Subscription
+from app.models import (
+    CollectionInfo,
+    CollectionPart,
+    ParsedResource,
+    QuarkLink,
+    SearchRequest,
+    Subscription,
+    unreleased,
+)
 from app.services.memory import LinkStore, resource_key
 from app.services.quality import RESOLUTION_RANK, meets_requirement
 from app.services.relevance import build_target, judge
@@ -117,6 +126,9 @@ class SubscriptionWatcher:
         也把目前集数最多的分享里网盘缺的集补齐（已有的跳过）。
         """
         if sub.state == "paused":
+            return []
+        if sub.media == "movie" and unreleased(sub.release_date, sub.series):  # 还没上映：先不搜
+            await self._store.update_subscription(client_id, sub, [])
             return []
         await self._refresh_meta(sub)
         # 强制全网搜索，且记忆里的链接也全部重新验证（集数可能已经变了）
@@ -311,9 +323,71 @@ class SubscriptionWatcher:
                     sub.total_episodes = total
                 return
 
+    async def add_part(
+        self, owner: str, info: CollectionInfo, part: CollectionPart, settings: dict,
+    ) -> Subscription | None:
+        """把系列里的一部加成订阅（共用系列的规则）；已经订阅着的返回 None。"""
+        key = resource_key(part.title)
+        for _, x in await self._store.list_subscriptions(owner):
+            if x.tmdb_id == part.id or resource_key(x.resource) == key:
+                return None
+        fields = {k: v for k, v in settings.items() if v not in (None, False, "")}
+        sub = await self._store.add_subscription(
+            owner, part.title, part.title, await self.baseline(part.title),
+            media="movie", year=part.year, tmdb_id=part.id, poster=part.poster or info.poster,
+            collection_id=info.id, collection_name=info.name, collection_index=part.index,
+            series=True, release_date=part.release_date, **fields,
+        )
+        if sub is None:
+            return None
+        # 还没上映的显示「待定」，上映后才开始搜；其余等第一次搜索
+        state = "active" if unreleased(part.release_date, True) else "new"
+        return await self._store.edit_subscription(owner, sub.id, state=state) or sub
+
+    async def join_new_parts(self) -> int:
+        """订阅的系列每天查一次 TMDB：更新各部上映日期；开了「新作自动加入」的，
+        出了新的一部就订阅并通知。返回新加的部数。"""
+        fetch = getattr(self.lookup, "collection", None)
+        if fetch is None:
+            return 0
+        added, now = 0, time.time()
+        for c in await self._store.list_collections():
+            if (c["checked"] or 0) > now - 86400:
+                continue
+            owner, cid = c["client_id"], c["collection_id"]
+            await self._store.set_collection(owner, cid, checked=now)
+            info = await fetch(cid, fresh=True)
+            if info is None:
+                continue
+            # 已订阅的各部：更新上映日期（定档了才开始搜）
+            dates = {p.id: p.release_date for p in info.parts}
+            for _, x in await self._store.list_subscriptions(owner):
+                if x.collection_id == cid and x.tmdb_id in dates \
+                        and dates[x.tmdb_id] != x.release_date:
+                    await self._store.edit_subscription(owner, x.id,
+                                                        release_date=dates[x.tmdb_id])
+            if not c["auto_join"]:
+                continue
+            new = [p for p in info.parts if p.id not in c["known"]]
+            for part in new:
+                sub = await self.add_part(owner, info, part, c["settings"])
+                if sub is not None:
+                    added += 1
+                    await self._store.add_notification(
+                        owner, sub, "series_new",
+                        f"《{info.name}》系列新增《{part.title}》，已为你订阅")
+            if new:
+                await self._store.set_collection(owner, cid, known=[
+                    *c["known"], *(p.id for p in new)])
+        return added
+
     async def run_once(self, limit: int = 20) -> int:
         """检查最久没检查的一批订阅（暂停的跳过）；单个失败只记日志。返回产生的通知数。"""
-        total = 0
+        try:
+            total = await self.join_new_parts()
+        except Exception:  # 查系列新作失败不影响订阅检查
+            logger.exception("系列新作检查失败")
+            total = 0
         subs = [x for x in await self._store.list_subscriptions() if x[1].state != "paused"]
         for client_id, sub in subs[:limit]:
             try:
