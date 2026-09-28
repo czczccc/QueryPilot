@@ -196,6 +196,25 @@ class SubscriptionWatcher:
             notes += await self._maybe(sub, links)
         ok = [lk for lk in links if lk.state == "valid" and lk.quality
               and lk.relevance == "match" and meets_requirement(lk.quality, required)]
+        # 每一步剩多少条，排查「网上很多资源却只找到一个」用
+        valid = [lk for lk in resp.links if lk.state == "valid"]
+        logger.info(
+            "订阅检查漏斗 id=%s query=%s 候选=%d 有效=%d 相关=%d 过滤后=%d 满足清晰度=%d 最多集数=%d"
+            " 无效=%d 未验证=%d 片名不符=%d 待核对=%d",
+            sub.id, sub.query, len(resp.links), len(valid),
+            sum(1 for lk in valid if lk.relevance == "match"), len(links), len(ok), episodes,
+            sum(1 for lk in resp.links if lk.state == "invalid"),
+            sum(1 for lk in resp.links if lk.state == "unknown"),
+            sum(1 for lk in valid if lk.relevance == "mismatch"),
+            sum(1 for lk in valid if lk.relevance == "uncertain"),
+        )
+        reasons: dict[str, int] = {}
+        for lk in valid:
+            if lk.relevance != "match":
+                note = (lk.relevance_note or lk.relevance)[:20]
+                reasons[note] = reasons.get(note, 0) + 1
+        if reasons:
+            logger.info("订阅检查被筛掉的原因 id=%s %s", sub.id, reasons)
         if sub.auto_save and self.auto_saver is not None:
             notes += await self._auto_save(client_id, sub, movie, ok, notes, sync_save)
         done = self._completed(sub, movie, ok)

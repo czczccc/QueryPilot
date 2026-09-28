@@ -950,11 +950,11 @@ def create_app(
             await store.set_auto_save_status(sub.id, None)
         if not result.done:  # 任务还在夸克后台跑：先不记成已存，下次检查按目录核对
             message = f"{name}的转存任务已提交，夸克还在处理，下次检查会核对是否存好"
-            await store.log_auto_save(sub.id, link.share, False, 0, result.folder, message + why)
+            await store.log_auto_save(sub.id, link.share, False, 0, None, message + why)
             return []
         if result.file_count == 0 and not result.skipped:
             message = f"{name}没能在分享「{result.title or link.name}」里找到要的集，没有转存"
-            await store.log_auto_save(sub.id, link.share, False, 0, result.folder, message + why)
+            await store.log_auto_save(sub.id, link.share, False, 0, None, message + why)
             return [("auto_save_failed", message, link.share)]
         have = {episode_no(n, sub.season, any_ext=True) for n in result.present
                 if kind_of(n) in ("video", "archive")} - {None}
