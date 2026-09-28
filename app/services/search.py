@@ -141,6 +141,11 @@ class QuarkSearchService:
         return providers
 
     @property
+    def http(self) -> httpx.AsyncClient:
+        """访问夸克分享页用的 HTTP 客户端（agent 的 inspect_share 工具复用）。"""
+        return self._client
+
+    @property
     def pansou_enabled(self) -> bool:
         return bool(self._pansou_url)
 

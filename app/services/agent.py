@@ -59,6 +59,7 @@ from app.services.search import (
     is_fresh,
     sort_links,
 )
+from app.services.share_inspect import list_share, summarize
 
 logger = logging.getLogger(__name__)
 
@@ -190,10 +191,33 @@ LOOKUP_TOOL = {
 }
 
 
+INSPECT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "inspect_share",
+        "description": (
+            "打开已验证有效的分享看里面的文件（目录、文件名、大小），判断是视频、多集 / 多季合集"
+            "还是游戏 / 程序，含哪些季和集；看完会按文件重新判定是否是要找的作品。"
+            "用在拿不准的资源上（标题没写片名、疑似游戏、想确认集数），一次最多 3 个。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "shares": {"type": "array", "items": {"type": "string"},
+                           "description": "分享码（链接 /s/ 后面那段），最多 3 个"},
+            },
+            "required": ["shares"],
+        },
+    },
+}
+MAX_INSPECT = 6  # 一次搜索最多打开几个分享
+
+
 def tools_for(pansou: bool, lookup: bool = False) -> list[dict]:
     """没配 PanSou / 条目查询时 LLM 看不到对应工具。"""
     tools = [*TOOLS[:2], PANSOU_TOOL, *TOOLS[2:]] if pansou else list(TOOLS)
-    return [*tools[:-1], LOOKUP_TOOL, tools[-1]] if lookup else tools
+    extra = [LOOKUP_TOOL] if lookup else []
+    return [*tools[:-1], *extra, INSPECT_TOOL, tools[-1]]
 
 
 SYSTEM_PROMPT = (
@@ -201,7 +225,7 @@ SYSTEM_PROMPT = (
     "的分享链接。你只能通过工具行动，每次调用一个工具，并在 content 里用一句话说明理由。\n"
     "策略：先 recall_memory；记忆不够就 search，然后 verify；"
     "满足要求的链接不够时，换别名、英文名、加「4K」「1080P」「全集」「夸克网盘」等词再搜，"
-    "不要重复用过的查询词；搜不到或片名对不上时可以 lookup_media 查原名、年份和每季集数；"
+    "不要重复用过的查询词；拿不准的资源可以 inspect_share 打开看文件；搜不到或片名对不上时可以 lookup_media 查原名、年份和每季集数；"
     "valid_but_wrong_title 多时说明搜到了同名作品或别的季，"
     "查询里应加上年份或季数；达到目标或继续搜索收益很低时 finish。\n"
     "预算：最多 {steps} 步。"
@@ -232,6 +256,7 @@ class AgentState:
     pansou_keywords: list[str] = field(default_factory=list)
     lookup: bool = False  # 能查影视条目（有 lookup_media 工具）
     looked_up: list[str] = field(default_factory=list)  # 查过的名字
+    inspected: dict[str, dict] = field(default_factory=dict)  # 打开看过的分享 → 概况
     raw_count: int = 0
     fresh_after: float = 0.0
 
@@ -327,6 +352,9 @@ class RulePlanner:
             })
         if state.unverified() and state.verify_calls < 4:
             return Action("verify", {"limit": MAX_VERIFY_PER_CALL})
+        todo = to_inspect(state)
+        if not state.satisfied() and todo and not state.inspected:
+            return Action("inspect_share", {"shares": todo})
         if not state.satisfied() and state.lookup and not state.looked_up:
             return Action("lookup_media", {"name": state.parsed.resource})
         if not state.satisfied() and state.search_calls == 1:
@@ -336,6 +364,14 @@ class RulePlanner:
         return Action("finish", {
             "reason": "已找到足够满足要求的有效链接" if state.satisfied() else "可用的搜索手段已用完",
         })
+
+
+def to_inspect(state: AgentState, n: int = 3) -> list[str]:
+    """值得打开看的分享：验证有效、但片名拿不准的（最近验证的在前）。"""
+    left = MAX_INSPECT - len(state.inspected)
+    return [c.share for c in state.candidates.values()
+            if c.state == "valid" and c.relevance == "uncertain"
+            and c.share not in state.inspected][: max(0, min(n, left))]
 
 
 def _key_in(name: str, names: list[str]) -> bool:
@@ -683,6 +719,8 @@ class SearchAgent:
                 return await self._pansou(action.args, state, providers)
             if action.tool == "verify":
                 return await self._verify(action.args, state)
+            if action.tool == "inspect_share":
+                return await self._inspect(action.args, state)
             if action.tool == "lookup_media" and state.lookup:
                 return await self._lookup_media(action.args, state)
             if action.tool == "finish":
@@ -691,6 +729,31 @@ class SearchAgent:
         except Exception as exc:
             logger.exception("工具执行异常: %s", action.tool)
             return {"error": type(exc).__name__}
+
+    async def _inspect(self, args: dict, state: AgentState) -> dict:
+        """打开分享看文件：文件名补进 files_preview 后重新判定相关性。"""
+        shares = [str(x) for x in (args.get("shares") or []) if x][:3]
+        out: dict[str, dict] = {}
+        for share in shares:
+            link = state.candidates.get(share)
+            if link is None or link.state != "valid":
+                out[share] = {"error": "不在候选里或不是有效分享"}
+                continue
+            if share in state.inspected or len(state.inspected) >= MAX_INSPECT:
+                out[share] = state.inspected.get(share) or {"error": "打开次数已用完"}
+                continue
+            got = await list_share(share, self._service.http, link.pwd)
+            if got is None:
+                state.inspected[share] = out[share] = {"error": "打不开"}
+                continue
+            info = summarize(*got)
+            names = [f"{f['path']}/{f['name']}".lstrip("/") for f in got[1] if not f["dir"]]
+            link.files_preview = list(dict.fromkeys([*link.files_preview, *names]))[:40]
+            link.share_title = link.share_title or info["title"]
+            judge(link, state.target)
+            info["relevance"] = link.relevance
+            state.inspected[share] = out[share] = info
+        return {"shares": out, "matching": len(state.matching())}
 
     async def _lookup_media(self, args: dict, state: AgentState) -> dict:
         """查条目：把查到的中文名 / 原名加进片名判定和补搜用的别名，已判过的候选重判一遍。"""
