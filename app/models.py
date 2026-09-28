@@ -374,23 +374,27 @@ class SubscriptionHistory(BaseModel):
 
 
 class CollectionPart(BaseModel):
-    """系列电影里的一部（TMDB collection 的 parts，按上映日期排好）。"""
+    """系列电影里的一部（TMDB collection 的 parts，按上映日期排好），或剧集的一季。"""
 
-    index: int  # 第几部，从 1 开始
-    id: str  # 这一部的 TMDB 电影 id
+    index: int  # 第几部，从 1 开始；剧集是季号
+    id: str  # 这一部的 TMDB 电影 id；剧集是 s<季号>
     title: str
     original_title: str | None = None
     year: str | None = None
     release_date: str | None = None  # YYYY-MM-DD；没有表示还没定档
     poster: str | None = None
     released: bool = False  # 已上映
+    episodes: int | None = None  # 剧集：这一季的总集数
 
 
 class CollectionInfo(BaseModel):
-    id: str  # TMDB collection id
-    name: str  # 去掉「（系列）」等后缀，如「谍影重重」
+    id: str  # TMDB collection id；整部剧是 tv:<TMDB 剧集 id>
+    name: str  # 去掉「（系列）」等后缀，如「谍影重重」；整部剧是剧名
     poster: str | None = None
     parts: list[CollectionPart] = Field(default_factory=list)
+    media: MediaType = "movie"  # tv：整部剧的各季
+    tmdb_id: str | None = None  # 整部剧的 TMDB id
+    year: str | None = None  # 整部剧的首播年
 
 
 class MediaCandidate(BaseModel):
