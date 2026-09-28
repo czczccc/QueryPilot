@@ -648,7 +648,8 @@ async function doSearch(query, refresh = false, followupOf = null) {
   if (!resp.ok) {
     done();
     const body = await resp.json().catch(() => ({}));
-    const detail = typeof body.detail === "string" ? body.detail : "搜索失败，请稍后重试。";
+    const detail = resp.status === 429 ? rateLimitText(resp, body)
+      : typeof body.detail === "string" ? body.detail : "搜索失败，请稍后重试。";
     if (resp.status === 401) {
       // 未登录免费次数用完：直接引导扫码登录，登录成功后自动重新搜索
       searchFailed("需要登录", detail);
@@ -882,7 +883,19 @@ async function subApi(path, method, payload) {
   const sep = path.includes("?") ? "&" : "?";
   const resp = await fetch("/api/subscriptions" + path + sep + cidParam(), opts);
   const body = await resp.json().catch(() => ({}));
+  if (resp.status === 429) body.detail = rateLimitText(resp, body);
   return { ok: resp.ok, status: resp.status, body };
+}
+
+// 被限流（429）时的友好提示：带上服务器给的 Retry-After 等待时间
+function rateLimitText(resp, body) {
+  const raw = body && typeof body.detail === "string" ? body.detail : "";
+  const base = raw && !/请求过于频繁/.test(raw) ? raw.replace(/[。.]$/, "") : "操作太频繁了";
+  const secs = Math.ceil(Number(resp.headers.get("Retry-After")) || Number(body && body.retry_after) || 0);
+  if (/秒后|明天/.test(base)) return base; // 原因里已经说了要等多久
+  if (secs <= 0) return base + "，请稍后再试";
+  if (secs >= 3600) return base + "，明天再试";           // 当天额度用完：等到明天 0 点
+  return base + "（" + (secs < 60 ? secs + " 秒" : Math.ceil(secs / 60) + " 分钟") + "后可以再试）";
 }
 
 // 需要登录的操作失败时引导扫码；扫码成功返回 true（调用方可重试）
@@ -2167,6 +2180,7 @@ function openSubscribeDialog(target, opts) {
       try {
         const resp = await fetch("/api/media/search?q=" + encodeURIComponent(name));
         cands = resp.ok ? await resp.json() : [];
+        if (resp.status === 429) toast(rateLimitText(resp, await resp.json().catch(() => ({}))), "error", 4000);
       } catch (_) { cands = []; }
       list.innerHTML = "";
       cands.slice(0, 10).forEach((c, i) => list.appendChild(candidateOption(c, i, "sd-cand")));
@@ -2572,7 +2586,7 @@ function saveButton(l) {
         saveStatus.logged_in = false;
         renderAccount();
       }
-      setText(btn, ok ? "已转存 ✓" : "转存失败");
+      setText(btn, ok ? "已转存 ✓" : resp.status === 429 ? "今天已达上限" : "转存失败");
       btn.classList.toggle("done", ok);
       const msg = body.message || body.detail || (ok ? "已转存" : "转存失败");
       toast(ok ? "转存成功" + (body.folder ? "，已放进「" + body.folder + "」" : "") : msg,
