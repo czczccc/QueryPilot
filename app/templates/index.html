@@ -45,6 +45,10 @@
           <p class="account-menu-name">已登录夸克：<b id="account-name"></b></p>
           <p class="account-menu-hint">转存会保存到你自己的夸克网盘</p>
           <button id="logout-btn" type="button" class="secondary-btn small" role="menuitem">退出登录</button>
+          <div class="account-menu-links">
+            <button type="button" class="link-btn" data-privacy role="menuitem">隐私说明</button>
+            <button type="button" class="link-btn danger" data-delete-data role="menuitem">删除我的数据</button>
+          </div>
         </div>
       </div>
       <button id="theme-btn" type="button" class="icon-btn" aria-label="切换深浅色" title="切换深浅色">
@@ -215,6 +219,7 @@
 
   <footer class="site-footer">
     <p>结果来自公开搜索源，仅供合规用途；链接可达性与内容有效性请自行判断。</p>
+    <p class="footer-links"><button type="button" class="link-btn" data-privacy>隐私说明</button><span aria-hidden="true">·</span><button type="button" class="link-btn" data-delete-data>删除我的数据</button></p>
   </footer>
 
   <button id="to-top" type="button" class="to-top" aria-label="回到顶部">

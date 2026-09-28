@@ -2676,6 +2676,136 @@ logoutBtn.addEventListener("click", async () => {
   logoutBtn.disabled = false;
 });
 
+// ---- 隐私说明 + 删除我的数据（frontend-api.md §17） ----
+// 文字以后端 GET /api/privacy 为准；接口不可用时用这份简版兜底
+const PRIVACY_FALLBACK = [
+  { title: "夸克登录凭证", text: "扫码登录后，夸克登录凭证加密保存在服务器上，只用来转存到你的网盘、检查和整理订阅。退出登录会删除这台设备的凭证。" },
+  { title: "订阅和用量", text: "保存你的订阅、订阅历史、通知、转存记录、偏好设置，以及每天的搜索和 AI 用量（用于额度限制）。" },
+  { title: "删除我的数据", text: "可以随时删除上面这些数据并退出登录。已经存到你网盘里的文件不受影响。" },
+];
+
+const DATA_LABELS = [
+  ["subscriptions", "个订阅"], ["history", "条订阅历史"], ["collections", "个系列订阅"],
+  ["notifications", "条提醒"], ["auto_saves", "条转存记录"], ["prefs", "份偏好设置"], ["quark_logins", "个设备上的登录凭证"],
+];
+
+function dataSummary(counts) {
+  return DATA_LABELS.filter(([k]) => counts && counts[k] > 0).map(([k, unit]) => counts[k] + " " + unit);
+}
+
+function dialogShell(title, cls) {
+  const dlg = el("dialog", "sub-dialog " + cls);
+  const head = el("div", "sd-head");
+  head.appendChild(el("p", "sd-title", title));
+  const x = el("button", "ghost-btn small icon-only", "✕");
+  x.type = "button";
+  x.setAttribute("aria-label", "关闭");
+  head.appendChild(x);
+  dlg.appendChild(head);
+  document.body.appendChild(dlg);
+  const close = () => { if (dlg.open) dlg.close(); dlg.remove(); };
+  x.addEventListener("click", close);
+  dlg.addEventListener("cancel", close);
+  return { dlg, close };
+}
+
+async function openPrivacyDialog() {
+  const { dlg, close } = dialogShell("隐私说明", "privacy-dialog");
+  const body = el("div", "privacy-body");
+  for (let i = 0; i < 3; i++) body.appendChild(el("div", "privacy-skel"));
+  const foot = el("div", "sd-foot");
+  const del = el("button", "ghost-btn small danger", "删除我的数据");
+  del.type = "button";
+  const ok = el("button", "primary-btn small", "知道了");
+  ok.type = "button";
+  foot.append(del, ok);
+  dlg.append(body, foot);
+  ok.addEventListener("click", close);
+  del.addEventListener("click", () => { close(); openDeleteDialog(); });
+  dlg.showModal();
+
+  let data = null;
+  try {
+    const resp = await fetch("/api/privacy");
+    if (resp.ok) data = await resp.json();
+  } catch (_) { /* 用兜底文字 */ }
+  const sections = data && Array.isArray(data.sections) && data.sections.length ? data.sections : PRIVACY_FALLBACK;
+  body.innerHTML = "";
+  sections.forEach((sec) => {
+    body.appendChild(el("h3", "privacy-h", sec.title || ""));
+    String(sec.text || "").split(/\n+/).filter(Boolean).forEach((t) => body.appendChild(el("p", "privacy-p", t)));
+  });
+  if (data && data.updated) body.appendChild(el("p", "privacy-updated", "更新于 " + data.updated));
+}
+
+// 删除前二次确认：先列出将删除的数据条数，要输入「删除」两个字才能点
+async function openDeleteDialog() {
+  const { dlg, close } = dialogShell("删除我的数据", "delete-dialog");
+  const lead = el("p", "delete-lead", "会立即删除服务器上和你有关的数据并退出登录，删除后不能恢复。");
+  const counts = el("ul", "privacy-list delete-counts");
+  counts.appendChild(el("li", "muted", "正在统计…"));
+  const keep = el("p", "sd-hint", "不会删除：已经存到你网盘里的文件、全站共享的链接库。为防止刷额度，今天的用量计数会保留到明天；开启邀请制时，再登录需要新的邀请码。");
+  const label = el("label", "delete-confirm");
+  label.appendChild(el("span", "", "请输入「删除」确认"));
+  const input = el("input");
+  input.type = "text";
+  input.autocomplete = "off";
+  input.placeholder = "删除";
+  label.appendChild(input);
+  const foot = el("div", "sd-foot");
+  const cancel = el("button", "secondary-btn small", "取消");
+  cancel.type = "button";
+  const go = el("button", "primary-btn small danger-btn", "永久删除");
+  go.type = "button";
+  go.disabled = true;
+  foot.append(cancel, go);
+  dlg.append(lead, counts, keep, label, foot);
+  cancel.addEventListener("click", close);
+  input.addEventListener("input", () => { go.disabled = input.value.trim() !== "删除"; });
+  dlg.showModal();
+  input.focus();
+
+  fetch("/api/me/data?" + cidParam()).then((r) => (r.ok ? r.json() : null)).then((d) => {
+    counts.innerHTML = "";
+    const items = d ? dataSummary(d.counts) : [];
+    if (!d) items.push("订阅、订阅历史、系列订阅、提醒、转存记录、偏好设置", "所有设备上的夸克登录凭证和账号记录");
+    else if (!items.length) items.push("服务器上暂时没有你的订阅或设置");
+    if (d && d.logged_in) items.push("你的夸克账号记录（会退出登录）");
+    items.forEach((t) => counts.appendChild(el("li", "", t)));
+  }).catch(() => { counts.innerHTML = ""; });
+
+  go.addEventListener("click", async () => {
+    go.disabled = true;
+    go.classList.add("loading");
+    let res;
+    try {
+      const resp = await fetch("/api/me/data?" + cidParam() + "&confirm=DELETE", { method: "DELETE" });
+      res = { ok: resp.ok, body: await resp.json().catch(() => ({})) };
+    } catch (_) {
+      res = { ok: false, body: { detail: "网络连接失败，请稍后重试" } };
+    }
+    if (!res.ok) {
+      go.classList.remove("loading");
+      go.disabled = false;
+      toast(res.body.detail || "删除失败，请稍后重试", "error");
+      return;
+    }
+    // 服务器已删除并清掉登录 cookie：清掉本地记录（订阅身份、缓存等），换一个新身份回到未登录首页
+    try {
+      Object.keys(localStorage).filter((k) => k.startsWith("qp_")).forEach((k) => localStorage.removeItem(k));
+    } catch (_) { /* 存储不可用 */ }
+    close();
+    const done = dataSummary(res.body.deleted);
+    toast("已删除" + (done.length ? "：" + done.join("、") : "你的数据") + "，页面即将刷新", "ok", 3000);
+    setTimeout(() => location.replace("/"), 1600);
+  });
+}
+
+document.addEventListener("click", (e) => {
+  if (e.target.closest("[data-privacy]")) { setMenuOpen(false); openPrivacyDialog(); }
+  else if (e.target.closest("[data-delete-data]")) { setMenuOpen(false); openDeleteDialog(); }
+});
+
 document.addEventListener("click", (e) => {
   if (!accountMenu.hidden && !accountEl.contains(e.target)) setMenuOpen(false);
 });
