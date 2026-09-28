@@ -47,6 +47,7 @@ from app.services.relevance import (
     RelevanceTarget,
     add_aliases,
     build_target,
+    clean_keyword,
     judge,
     llm_judge,
 )
@@ -674,7 +675,8 @@ class SearchAgent:
         queries = [
             str(q).strip()[:100] for q in args.get("queries") or [] if str(q).strip()
         ][:MAX_QUERIES_PER_SEARCH] or [state.parsed.resource]
-        keyword = str(args.get("keyword") or state.parsed.resource).strip()[:50]
+        # 网盘搜索站 / PanSou 按整串匹配：只发片名，季和清晰度等结果回来再筛
+        keyword = clean_keyword(str(args.get("keyword") or state.parsed.resource))[:50]
         state.search_calls += 1
         state.used_queries += [q for q in queries if q not in state.used_queries]
         new_keyword = keyword not in state.used_keywords
@@ -694,7 +696,7 @@ class SearchAgent:
     async def _pansou(
         self, args: dict, state: AgentState, providers: dict[str, ProviderStatus]
     ) -> dict:
-        keyword = str(args.get("keyword") or state.parsed.resource).strip()[:50]
+        keyword = clean_keyword(str(args.get("keyword") or state.parsed.resource))[:50]
         if keyword in state.pansou_keywords:
             return {"error": "这个关键词已经用 PanSou 搜过了"}
         state.pansou_keywords.append(keyword)
