@@ -1172,7 +1172,14 @@ function seriesGroup(subs) {
   const li = el("li", "sub-group");
   const head = el("div", "sg-head");
   const title = el("div", "sg-title");
-  title.append(el("b", "", isTv ? name : name + " 系列"), el("span", "sg-count", "订阅中 " + subs.length + " " + unit));
+  const open = groupOpen(cid);
+  const toggle = el("button", "sg-toggle");
+  toggle.type = "button";
+  toggle.setAttribute("aria-expanded", String(open));
+  toggle.title = open ? "收起" : "展开";
+  toggle.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="m9 6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  toggle.append(el("b", "", isTv ? name : name + " 系列"));
+  title.append(toggle, el("span", "sg-count", "订阅中 " + subs.length + " " + unit + " · " + groupSummary(subs, isTv)));
   const tools = el("div", "sg-tools");
 
   if (info.collection_id !== undefined) { // 后端有系列设置时才显示开关
@@ -1224,9 +1231,42 @@ function seriesGroup(subs) {
   head.append(title, tools);
 
   const list = el("ul", "sg-list");
+  list.hidden = !open;
   subs.forEach((sub) => list.appendChild(subItem(sub, true)));
+  toggle.addEventListener("click", () => {
+    const next = list.hidden;
+    list.hidden = !next;
+    toggle.setAttribute("aria-expanded", String(next));
+    toggle.title = next ? "收起" : "展开";
+    setGroupOpen(cid, next);
+  });
   li.append(head, list);
   return li;
+}
+
+// 分组默认收起，展开过的记在本机（按系列 / 剧集 id）
+const GROUP_OPEN_KEY = "qp_group_open";
+function openGroups() {
+  try { return new Set(JSON.parse(localStorage.getItem(GROUP_OPEN_KEY) || "[]")); } catch (_) { return new Set(); }
+}
+function groupOpen(cid) {
+  return openGroups().has(cid);
+}
+function setGroupOpen(cid, open) {
+  const set = openGroups();
+  if (open) set.add(cid); else set.delete(cid);
+  try { localStorage.setItem(GROUP_OPEN_KEY, JSON.stringify([...set].slice(-200))); } catch (_) { /* 无痕模式 */ }
+}
+
+// 收起时组头的一句汇总：电影看存进网盘几部，剧集看存齐几季、还缺几集
+function groupSummary(subs, isTv) {
+  if (!isTv) {
+    const saved = subs.filter((s) => s.saved_episodes && s.saved_episodes.length).length;
+    return "已存 " + saved + "/" + subs.length + " 部";
+  }
+  const full = subs.filter((s) => s.total_episodes && !(s.lack_episodes || []).length).length;
+  const lack = subs.reduce((n, s) => n + (s.lack_episodes || []).length, 0);
+  return "存齐 " + full + "/" + subs.length + " 季" + (lack ? "，缺 " + lack + " 集" : "");
 }
 
 // 没识别出类型的关键词订阅归到「剧集」
@@ -1241,8 +1281,11 @@ const SUBS_TABS = {
   history: { count: () => historyCache.length, empty: "还没有完成的订阅。集齐或手动完成的订阅会出现在这里，可以一键重新订阅。" },
 };
 
+// 追剧日历暂时不开放（后端接口和渲染代码保留，从这里去掉并恢复模板里的入口即可）
+const HIDDEN_TABS = new Set(["calendar"]);
+
 function renderSubsTab() {
-  if (!SUBS_TABS[subsTab]) subsTab = "tv";
+  if (!SUBS_TABS[subsTab] || HIDDEN_TABS.has(subsTab)) subsTab = "tv";
   subsTabs.querySelectorAll("[data-tab]").forEach((b) => {
     const tab = b.dataset.tab;
     b.setAttribute("aria-selected", String(tab === subsTab));
@@ -3258,6 +3301,10 @@ function syncNav() {
 
 function showView(view, tab) {
   if (!VIEWS.includes(view)) view = "discover";
+  if (view === "subs" && HIDDEN_TABS.has(tab)) { // 旧链接 #/subs/calendar 跳到剧集
+    history.replaceState(null, "", "#/subs/tv");
+    tab = "tv";
+  }
   const changed = view !== currentView();
   document.body.dataset.view = view;
   document.querySelectorAll(".view[data-view]").forEach((v) => { v.hidden = v.dataset.view !== view; });
