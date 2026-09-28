@@ -913,7 +913,7 @@ async function loadSubs() {
   try {
     const [subsResp, notifResp, histResp, collResp] = await Promise.all([
       fetch("/api/subscriptions?" + cidParam()),
-      fetch("/api/notifications?" + cidParam()),
+      fetch("/api/notifications?include_read=true&" + cidParam()),
       fetch("/api/subscriptions/history?" + cidParam()).catch(() => null),
       fetch("/api/subscriptions/collections?" + cidParam()).catch(() => null),
     ]);
@@ -928,7 +928,7 @@ async function loadSubs() {
       if (subscribeBox.hidden) renderSubscribeBox(lastResult);
     }
 
-    notesCache = applyLocalRead(notes);
+    notesCache = notes;
     renderNotifs();
 
     renderSubsTab();
@@ -968,7 +968,8 @@ function noteParts(n) {
     (n.share && /^[0-9a-zA-Z]{6,}$/.test(n.share) ? "https://pan.quark.cn/s/" + n.share : "");
   const share = n.share && /^[0-9a-zA-Z]{6,}$/.test(n.share) ? n.share : (url.match(/\/s\/([0-9a-zA-Z]+)/) || [])[1] || "";
   const titleM = msg.match(/资源[「『]([^」』]+)[」』]/);
-  const kind = NOTE_KIND[n.type || n.kind];
+  let kind = NOTE_KIND[n.type || n.kind];
+  if ((n.type || n.kind) === "series_new" && /第\s*\d+\s*季/.test(msg)) kind = NOTE_KIND.season_new; // 剧集出了新的一季
   let summary = n.summary || (kind && kind[2]) || "";
   let path = "";
   const savedM = msg.match(/转存.*?(\d+)\s*个新?文件到[「『]([^」』]+)[」』]/);
@@ -1090,36 +1091,37 @@ function noteItem(n) {
     });
     acts.appendChild(btn);
   }
+  if (n.id !== undefined) {
+    const del = el("button", "ghost-btn small note-del-btn", "删除");
+    del.type = "button";
+    del.title = "删除这条，以后同一个资源不再提醒";
+    del.addEventListener("click", () => {
+      li.classList.add("leaving");
+      setTimeout(() => deleteNote(n), 220);
+    });
+    acts.appendChild(del);
+  }
   if (acts.children.length) li.appendChild(acts);
   return li;
 }
 
 // 先在本地标记（界面立即收起），再告诉服务器；失败时下次刷新会恢复
-// 后端目前只支持「全部标记已读」；单条已读先记在本机，全部读完时再告诉服务器
-const NOTES_READ_KEY = "qp_notes_read";
-function localReadIds() {
-  try { return new Set(JSON.parse(localStorage.getItem(NOTES_READ_KEY) || "[]")); } catch { return new Set(); }
-}
-function saveLocalRead(ids) {
-  try { localStorage.setItem(NOTES_READ_KEY, JSON.stringify([...ids].slice(-500))); } catch { /* 无痕模式等 */ }
-}
-function applyLocalRead(list) {
-  const ids = localReadIds();
-  list.forEach((n) => { if (ids.has(n.id)) n.read = true; });
-  return list;
-}
-
 async function markNotesRead(list) {
   list.forEach((n) => { n.read = true; });
   renderNotifs();
-  if (notesCache.some((n) => !n.read)) {
-    const ids = localReadIds();
-    list.forEach((n) => { if (n.id !== undefined) ids.add(n.id); });
-    saveLocalRead(ids);
+  if (!notesCache.some((n) => !n.read)) {
+    await fetch("/api/notifications/read?" + cidParam(), { method: "POST" }).catch(() => {});
     return;
   }
-  saveLocalRead(new Set());
-  await fetch("/api/notifications/read?" + cidParam(), { method: "POST" }).catch(() => {});
+  await Promise.all(list.filter((n) => n.id !== undefined).map((n) =>
+    fetch(`/api/notifications/${n.id}/read?` + cidParam(), { method: "POST" }).catch(() => {})));
+}
+
+// 删除一条：以后同一个分享也不会再提醒
+async function deleteNote(n) {
+  notesCache = notesCache.filter((x) => x !== n);
+  renderNotifs();
+  await fetch(`/api/notifications/${n.id}?` + cidParam(), { method: "DELETE" }).catch(() => {});
 }
 
 // 「订阅整个系列」建的订阅按系列折叠成一组，放在该系列第一部出现的位置
@@ -1142,11 +1144,14 @@ function seriesGroup(subs) {
   subs.sort((a, b) => (a.collection_index || 0) - (b.collection_index || 0));
   const cid = String(subs[0].collection_id);
   const info = collectionsCache.find((c) => String(c.collection_id) === cid) || {};
-  const name = collectionName(info.name || subs[0].collection_name) || "系列";
+  const isTv = cid.startsWith("tv:"); // 一部剧的全部季，和系列电影共用一套接口
+  const name = (isTv ? tidyTitle(info.name || subs[0].collection_name) : collectionName(info.name || subs[0].collection_name)) || (isTv ? "剧集" : "系列");
+  const unit = isTv ? "季" : "部";
+  const label = isTv ? "《" + name + "》" : "《" + name + "》系列";
   const li = el("li", "sub-group");
   const head = el("div", "sg-head");
   const title = el("div", "sg-title");
-  title.append(el("b", "", name + " 系列"), el("span", "sg-count", "订阅中 " + subs.length + " 部"));
+  title.append(el("b", "", isTv ? name : name + " 系列"), el("span", "sg-count", "订阅中 " + subs.length + " " + unit));
   const tools = el("div", "sg-tools");
 
   if (info.collection_id !== undefined) { // 后端有系列设置时才显示开关
@@ -1156,8 +1161,8 @@ function seriesGroup(subs) {
     cb.checked = !!info.auto_join;
     const track = el("span", "switch-track");
     track.setAttribute("aria-hidden", "true");
-    sw.append(cb, track, "新作自动加入");
-    sw.title = "每天查一次这个系列有没有新片，有就自动订阅并通知你";
+    sw.append(cb, track, isTv ? "新季自动加入" : "新作自动加入");
+    sw.title = isTv ? "每天查一次这部剧有没有新的一季，有就自动订阅并通知你" : "每天查一次这个系列有没有新片，有就自动订阅并通知你";
     cb.addEventListener("change", async () => {
       cb.disabled = true;
       const res = await subApi("/collection/" + encodeURIComponent(cid), "PATCH", { auto_join: cb.checked })
@@ -1165,7 +1170,7 @@ function seriesGroup(subs) {
       cb.disabled = false;
       if (res.ok) {
         info.auto_join = cb.checked;
-        toast(cb.checked ? "《" + name + "》系列以后出新作会自动订阅" : "已关闭《" + name + "》系列的新作自动加入", "ok");
+        toast(cb.checked ? label + "以后出新" + (isTv ? "季" : "作") + "会自动订阅" : "已关闭" + label + "的新" + (isTv ? "季" : "作") + "自动加入", "ok");
       } else if (res.status === 404) {
         loadSubs();
       } else {
@@ -1176,19 +1181,21 @@ function seriesGroup(subs) {
     tools.appendChild(sw);
   }
 
-  const del = el("button", "ghost-btn small danger", "退订整个系列");
+  const delText = isTv ? "退订全部季" : "退订整个系列";
+  const del = el("button", "ghost-btn small danger", delText);
   del.type = "button";
-  del.title = "系列里还在订阅中的部一起取消；单独订阅的部和已完成的历史不受影响";
+  del.title = isTv ? "这部剧还在订阅中的季一起取消；已完成的历史不受影响"
+    : "系列里还在订阅中的部一起取消；单独订阅的部和已完成的历史不受影响";
   del.addEventListener("click", async () => {
     if (!del.classList.contains("confirm")) { // 第一次点只是确认
       del.classList.add("confirm");
-      setText(del, "确定退订 " + subs.length + " 部？");
-      setTimeout(() => { del.classList.remove("confirm"); setText(del, "退订整个系列"); }, 3000);
+      setText(del, "确定退订 " + subs.length + " " + unit + "？");
+      setTimeout(() => { del.classList.remove("confirm"); setText(del, delText); }, 3000);
       return;
     }
     del.disabled = true;
     const res = await subApi("/collection/" + encodeURIComponent(cid), "DELETE").catch(() => ({ ok: false, body: {} }));
-    if (res.ok) toast("已退订《" + name + "》系列");
+    if (res.ok) toast("已退订" + label);
     else toast(res.body.detail || "操作失败", "error");
     loadSubs();
   });
@@ -1386,6 +1393,9 @@ function stateBadge(sub) {
   if (sub.state === "pending" && sub.media === "movie" && (sub.collection_id || sub.release_date) &&
       (!sub.release_date || sub.release_date > today)) {
     return badge("未上映", "state-neutral", sub.release_date ? "上映日期 " + sub.release_date + "，上映后自动开始搜" : "还没定档，上映后自动开始搜");
+  }
+  if (sub.state === "pending" && sub.media === "tv" && String(sub.collection_id || "").startsWith("tv:")) {
+    return badge("未开播", "state-neutral", "这一季还没开播，开播后自动开始搜");
   }
   const st = STATE_BADGE[sub.state] || STATE_BADGE.active;
   return badge(st[0], "state-" + st[1], st[2]);
@@ -2027,8 +2037,10 @@ function subItem(sub, grouped) { // grouped：在系列分组里，副标题只�
   }
   info.appendChild(titleRow);
   const tags = [
-    sub.season_year || sub.year || "", // 季订阅显示这一季的开播年，不是剧集首播年
-    sub.collection_name
+    sub.season_year || (sub.state === "pending" && sub.season ? "" : sub.year) || "", // 季订阅显示这一季的开播年，不是剧集首播年；未开播的季不写年份
+    String(sub.collection_id || "").startsWith("tv:") // 「全部季」建的季订阅
+      ? (grouped ? "" : "剧集 · ") + "第 " + (sub.season || sub.collection_index || 1) + " 季"
+      : sub.collection_name
       ? (grouped ? "" : collectionName(sub.collection_name) + " 系列 · ") + (sub.collection_index ? "第 " + sub.collection_index + " 部" : "电影")
       : sub.media === "movie" ? "电影" : sub.media === "tv" ? "剧集" : "按关键词",
     sub.last_error ? "" : sub.last_checked ? "检查于 " + formatTime(sub.last_checked) : "尚未检查",
@@ -2169,13 +2181,14 @@ async function subscribeCollection(payload, name) {
   return null;
 }
 
-// 订阅一部剧的全部季：后端为每一季建一个订阅（已订阅 / 已完成的季跳过）
+// 订阅一部剧的全部季：和整个系列同一个接口（collection_id 为 "tv:<id>"），
+// 后端为每一季建一个订阅（已订阅 / 已完成的季跳过），整部剧只占 1 个名额
 async function subscribeSeasons(payload, name) {
-  const res = await subApi("/seasons", "POST", Object.assign({ client_id: clientId }, payload));
+  const res = await subApi("/collection", "POST", Object.assign({ client_id: clientId }, payload));
   if (res.ok) {
     const list = Array.isArray(res.body) ? res.body : [];
     toast(list.length
-      ? "已订阅《" + name + "》的 " + list.length + " 季" + (payload.auto_join ? "，以后出新季会自动加入" : "")
+      ? "已订阅《" + name + "》的 " + list.length + " 季（只占 1 个订阅名额）" + (payload.auto_join ? "，以后出新季会自动加入" : "")
       : "《" + name + "》的每一季都已经订阅过或已完成", "ok", 4000);
     subsTab = "tv";
     loadSubs();
@@ -2232,7 +2245,7 @@ function candidateOption(c, idx, name) {
       o.value = String(s);
       sel.appendChild(o);
     });
-    if (seasons.length > 1) { // 一次订阅全部季，不用一季一季点
+    if (seasons.length > 1 && c.source !== "douban" && c.id) { // 一次订阅全部季（只有 TMDB 的剧有）
       const all = el("option", "", "全部季（" + seasons.length + " 季）");
       all.value = "all";
       sel.appendChild(all);
@@ -2433,11 +2446,8 @@ function openSubscribeDialog(target, opts) {
       if (seasonSel && seasonSel.value === "all") { // 全部季：每季一个订阅，列表里折叠成一组
         const rules = readRules(rulesGrid, null);
         const t = tidyTitle(c.title) || c.title;
-        const body = { media: "tv", resource: t, query: t.length >= 2 ? t : name, year: c.year || undefined,
-          poster: c.poster || undefined, auto_join: joinCb.checked, auto_save: !!(autoCb && autoCb.checked) };
-        body[c.source === "douban" ? "douban_id" : "tmdb_id"] = c.id ? String(c.id) : undefined;
-        ["resolution", "include", "exclude"].forEach((k) => { if (rules[k] !== undefined && rules[k] !== "") body[k] = rules[k]; });
-        Object.keys(body).forEach((k) => body[k] === undefined && delete body[k]);
+        const body = { collection_id: "tv:" + c.id, auto_join: joinCb.checked, auto_save: !!(autoCb && autoCb.checked) };
+        ["resolution", "include", "exclude", "upgrade", "upgrade_to"].forEach((k) => { if (rules[k] !== undefined && rules[k] !== "") body[k] = rules[k]; });
         ok.disabled = true;
         ok.classList.add("loading");
         dlg.close();
