@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 from app.services.classify import VIDEO_EXT, episode_no, safe_name
 from app.services.quality import RESOLUTION_RANK, required_resolution
+from app.services.relevance import seasons_in
 
 SUB_EXT = re.compile(r"\.(srt|ass|ssa|sub|idx|sup|vtt)$", re.IGNORECASE)
 ARCHIVE_EXT = re.compile(r"\.(zip|rar|7z|tar|gz|001|part\d+\.rar)$", re.IGNORECASE)
@@ -83,13 +84,46 @@ def versioned_name(name: str, res: str | None) -> str:
     return f"{stem} {res}.{ext}" if dot else f"{name} {res}"
 
 
+_SXXEYY = re.compile(r"S(\d{1,2})[ ._-]?E\d{1,3}", re.IGNORECASE)
+
+
+def season_of(f: dict) -> int | None:
+    """文件属于第几季：先看文件名（S02E05、「第二季」），再从近到远看所在目录名
+    （「Season 2」「第二季」「S02」）；都没写返回 None。
+
+    `_path` 是分享里的目录路径（转存时展开分享记下的），`folder` 是网盘里的目录。"""
+    name = str(f.get("file_name") or "")
+    m = _SXXEYY.search(name)
+    if m:
+        return int(m.group(1))
+    found = seasons_in(name.rsplit(".", 1)[0])
+    if len(found) == 1:
+        return min(found)
+    for part in reversed(str(f.get("_path") or f.get("folder") or "").split("/")):
+        found = seasons_in(part)
+        if len(found) == 1:
+            return min(found)
+    return None
+
+
+def season_label(f: dict) -> str:
+    """认集号用的文件名：多季合集里挑出来的文件记成「S02E05.2160p.mkv」这样，
+    后面去重、筛集、重命名、记清晰度都按它来（原文件名可能只有「05.mkv」）。"""
+    return str(f.get("_label") or f.get("file_name") or "")
+
+
 def pick_files(
-    files: list[dict], movie: bool, season: int | None = None,
+    files: list[dict], movie: bool, season: int | None = None, offset: int = 0,
+    total: int | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """从分享（已展平）的文件里挑要存的：(要存的, 没选的)。
 
     按集判断：有视频版本的集只存最好的视频；某一集只有压缩包时存这一集的压缩包
     （否则订阅永远补不齐）。电影同理：有视频存视频，没有才存压缩包。
+
+    剧集按季：多季合集只取订阅那一季（文件名或所在目录写明的季）；没写季的文件只在
+    合集里没有别的季时才算。`offset`：前面各季的总集数，这一季按绝对集号编
+    （第 2 季写成 13~25）时换算回本季集号。
     """
     names = [str(f.get("file_name") or "") for f in files]
     media = [f for f, n in zip(files, names, strict=True) if kind_of(n) in ("video", "archive")]
@@ -98,17 +132,41 @@ def pick_files(
         if media:
             chosen = [max(media, key=version_rank)]  # 视频排在压缩包前面
     else:
+        want = season or 1
+        labeled = {season_of(f) for f in media} - {None}
+        only_this = labeled <= {want}
+
+        def mine(f: dict) -> bool:
+            s = season_of(f)
+            return s == want or (s is None and only_this)
+
+        def ep_of(f: dict) -> int | None:
+            name = str(f.get("file_name") or "")
+            if _SXXEYY.search(name):
+                return episode_no(name, want, any_ext=True)
+            return episode_no(name, None, any_ext=True)
+
+        eps = {id(f): ep_of(f) for f in files if mine(f)}
+        found = [e for e in eps.values() if e is not None]
+        if offset and found and min(found) > offset and max(found) > (total or offset) and (
+            not total or max(found) - offset <= total
+        ):
+            eps = {k: (e - offset if e is not None else None) for k, e in eps.items()}
         best: dict[int, dict] = {}
         for f in media:
-            ep = episode_no(str(f.get("file_name") or ""), season, any_ext=True)
+            ep = eps.get(id(f))
             if ep is None:
                 continue
             if ep not in best or version_rank(f) > version_rank(best[ep]):
                 best[ep] = f
         chosen = [best[e] for e in sorted(best)]
-        eps = set(best)
         chosen += [f for f in files if kind_of(str(f.get("file_name") or "")) == "subtitle"
-                   and episode_no(str(f.get("file_name") or ""), season, any_ext=True) in eps]
+                   and eps.get(id(f)) in best]
+        for f in chosen:
+            name = str(f.get("file_name") or "")
+            res = required_resolution(name)
+            f["_label"] = (f"S{want:02d}E{eps[id(f)]:02d}" + (f".{res}" if res else "")
+                           + _suffix(name))
     ids = {id(f) for f in chosen}
     return chosen, [f for f in files if id(f) not in ids]
 
@@ -138,7 +196,7 @@ def plan_tidy(
     keep_ids = {f["fid"] for f in chosen}
     for f in chosen:
         name = f["file_name"]
-        ep = None if movie else episode_no(name, season, any_ext=True)
+        ep = None if movie else episode_no(season_label(f), season, any_ext=True)
         to_name = standard_name(title, _suffix(name), season, ep, year)
         # 洗版存的「片名 S01E06 2160p.mkv」已经是标准名，不再改
         if f["folder"] != target or _VERSION_TAG.sub("", name) != to_name:
@@ -146,7 +204,8 @@ def plan_tidy(
                                "to_name": to_name, "size": f.get("size") or 0})
     for f in rest:
         name = f["file_name"]
-        ep = episode_no(name, season, any_ext=True)
+        other = not movie and season_of(f) not in (None, season or 1)
+        ep = None if other else episode_no(name, season, any_ext=True)
         if not movie and ep is None:
             plan.untouched.append({"fid": f["fid"], "name": name, "folder": f["folder"]})
             continue

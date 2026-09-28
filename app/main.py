@@ -775,7 +775,9 @@ def create_app(
 
                 default_res = link.quality.resolution if link.quality else None
                 tidy = Tidy(strip_season(sub.resource), movie, sub.season, sub.year,
-                            better=better, default_res=default_res)
+                            better=better, default_res=default_res,
+                            offset=0 if movie else await _season_offset(sub),
+                            total=sub.total_episodes)
                 result = await saver.save(link.share, link.pwd, to_path=folder, only_new=True,
                                           keep=keep, tidy=tidy)
         except LoginExpiredError:
@@ -812,6 +814,16 @@ def create_app(
         await store.log_auto_save(sub.id, link.share, True, result.file_count, result.folder,
                                   message)
         return [("auto_saved", message, link.share)] if result.file_count else []
+
+    async def _season_offset(sub: Subscription) -> int:
+        """前面各季的总集数（TMDB），给按绝对集号编的合集换算本季集号；查不到为 0。"""
+        if media_lookup is None or not sub.season or sub.season <= 1 or not sub.tmdb_id:
+            return 0
+        infos = await media_lookup(strip_season(sub.resource), sub.year)
+        info = next((i for i in infos if i.id == sub.tmdb_id and i.source == "tmdb"), None)
+        if info is None or any(s not in info.episodes for s in range(1, sub.season)):
+            return 0
+        return sum(info.episodes[s] for s in range(1, sub.season))
 
     def _record_versions(
         sub: Subscription, movie: bool, names: list[str], default_res: str | None,

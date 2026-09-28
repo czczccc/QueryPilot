@@ -244,3 +244,54 @@ def test_plan_ignores_unknown_files():
     plan = plan_tidy(entries, "/T", "剧", movie=False)
     assert [u["name"] for u in plan.untouched] == ["花絮.mkv"]
     assert [m["to_name"] for m in plan.moves] == ["剧 S01E01.mkv"]
+
+
+# ---------------- 多季合集：按文件名 / 目录名认季 ----------------
+
+def _pack(*paths):
+    out = []
+    for p in paths:
+        folder, _, name = p.rpartition("/")
+        out.append({**F(name), "fid": p, "_path": "/" + folder if folder else ""})
+    return out
+
+
+def _labels(files, season, **kw):
+    chosen, _ = pick_files(files, movie=False, season=season, **kw)
+    return [(f["fid"], f["_label"]) for f in chosen]
+
+
+def test_multi_season_pack_by_folder_and_name():
+    pack = _pack("全集/Season 1/01.1080p.mkv", "全集/Season 1/02.1080p.mkv",
+                 "全集/第二季/01.2160p.mkv", "全集/第二季/02.2160p.mkv", "全集/第二季/02.chs.srt")
+    assert _labels(pack, 1) == [("全集/Season 1/01.1080p.mkv", "S01E01.1080p.mkv"),
+                                ("全集/Season 1/02.1080p.mkv", "S01E02.1080p.mkv")]
+    assert _labels(pack, 2) == [("全集/第二季/01.2160p.mkv", "S02E01.2160p.mkv"),
+                                ("全集/第二季/02.2160p.mkv", "S02E02.2160p.mkv"),
+                                ("全集/第二季/02.chs.srt", "S02E02.chs.srt")]
+    assert _labels(pack, 3) == []
+    # 文件名写了季
+    flat = _pack("S01E01.mkv", "S02E01.mkv", "S02E02.mkv")
+    assert [lb for _, lb in _labels(flat, 2)] == ["S02E01.mkv", "S02E02.mkv"]
+    # 都没写季：单季分享，照常算订阅的季；有别的季写明了，没写季的就不算
+    assert [lb for _, lb in _labels(_pack("01.mkv", "02.mkv"), 2)] == ["S02E01.mkv", "S02E02.mkv"]
+    assert _labels(_pack("S01E01.mkv", "05.mkv"), 2) == []
+
+
+def test_absolute_episode_numbers_converted():
+    pack = _pack("第二季/第24集.mkv", "第二季/第25集.mkv", "第二季/第26集.mkv")
+    got = _labels(pack, 2, offset=23, total=25)
+    assert [lb for _, lb in got] == ["S02E01.mkv", "S02E02.mkv", "S02E03.mkv"]
+    # 本来就是本季集号：不换算
+    assert [lb for _, lb in _labels(_pack("第二季/第01集.mkv"), 2, offset=23, total=25)] == [
+        "S02E01.mkv"]
+
+
+def test_tidy_keeps_other_seasons_untouched():
+    target = "/QueryPilot/动漫/无职转生 (2021)/Season 01"
+    entries = [
+        {"fid": "a", "file_name": "S01E01.mkv", "folder": target, "size": 1},
+        {"fid": "b", "file_name": "S02E01.mkv", "folder": target, "size": 1},
+    ]
+    plan = plan_tidy(entries, target, "无职转生", False, 1, "2021")
+    assert plan.deletes == [] and [u["fid"] for u in plan.untouched] == ["b"]
