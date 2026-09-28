@@ -1,132 +1,149 @@
 # QueryPilot
 
-> 可解释的 AI 搜索与链接验证引擎 —— 用自然语言描述需求，系统理解意图、聚合多源检索结果，并对每条结果做**严格的有效性验证**。
+QueryPilot 是一个面向影视资源搜索的开源 Web 应用。用户输入片名、季数和清晰度等条件后，系统会解析搜索意图、从多个来源召回夸克网盘分享链接，验证链接状态并整理结果。项目还提供搜索记忆、订阅提醒、夸克扫码登录与自动转存。
 
-**一句话亮点**：不是简单的"关键词搜索"，而是一条可观察的搜索流水线 —— LLM 意图解析 → 多引擎并发召回 → 去重排序 → 逐个验证结果是否真实可用。
+## 功能
 
----
+- **多源搜索**：组合 Tavily、Bing 中文、Telegram 公开频道、自定义资源站；可选接入 PanSou。搜索结果经过提取、去重、验证和质量判断。
+- **AI Agent 与规则降级**：可使用 OpenAI Chat Completions 兼容接口规划搜索；LLM 不可用时使用规则规划。支持逐步 SSE 输出和基于上一轮结果的追问。
+- **结果验证与排序**：通过夸克分享接口检查分享状态和文件列表，识别清晰度、HDR、片源、字幕、集数，并根据片名、年份和季数判断相关性。
+- **SQLite 记忆库**：缓存链接验证结果、搜索记录、订阅、通知、用户设置与用量数据；后台可定期复验旧链接。
+- **追剧订阅**：订阅电影、剧集季或系列，按配置定期检查更新；可设置清晰度、关键词过滤、自动转存和通知 Webhook。
+- **夸克网盘操作**：用户可扫码登录并转存到自己的网盘；也支持部署者配置自用网盘。自动分类、缺集补存和订阅目录整理均由服务端处理。
+- **账号与管理**：可配置邀请码、每日用量限制和管理员后台；管理员可查看用量、管理账号与 IP 封禁。
+- **原生前端**：FastAPI/Jinja2 页面搭配原生 JavaScript 和 CSS，无前端构建步骤。
 
-## 为什么值得看（面向 FDE 面试官）
-
-| 能力 | 实现 |
-| --- | --- |
-| **AI 集成与输出控制** | DeepSeek `deepseek-v4-flash` 解析自然语言（资源名/清晰度/别名/英文名 + 5~6 个查询变体）；LLM 输出经 `_coerce` 归一化 + **Pydantic 类型校验**后才进入下游，不可信 JSON 不会污染搜索层 |
-| **URL 输入识别** | 直接粘贴**豆瓣链接**（`movie.douban.com/subject/<id>`），自动抓取移动版页面识别片名/年份/类型，再进入搜索链路 |
-| **可换模型** | `.env` 里填 `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` 即可换成任何兼容 OpenAI chat/completions 格式的服务（硅基流动、OpenRouter、本地 Ollama 等），默认 DeepSeek 官方；只支持流式的中转站会自动切换成流式调用（`LLM_STREAM`） |
-| **失败降级** | DeepSeek 超时/无 key/坏 JSON → 自动规则降级（关键词清洗 + 默认查询词），系统仍然可用；单个搜索引擎失败不影响其他引擎 |
-| **多源聚合** | Tavily API + Bing 中文（HTML 解析，含跳转链接 base64 解码）+ 垂直搜索站，三路引擎**并发执行**、内部**受控并发**（Semaphore 限流），统一标准化为内部模型 |
-| **严格结果验证** | 逆向目标平台分享页前端（share.js），两步 API 验证（token + detail）：区分「有效 / 已失效 / 待确认」，而不是只看 HTTP 200 壳页假象 |
-| **资源质量识别** | 验证时保留分享文件列表，规则识别分辨率（4K/1080p/720p，文件名优先、单文件体积兜底）、HDR、片源（REMUX/BluRay/WEB-DL）、枪版、字幕、集数与体积；质量分参与排序，前端可按最低清晰度过滤 |
-| **资源记忆** | SQLite 链接库记住每条验证结果：同一资源再次搜索时复用近期有效链接（足够多则跳过全网搜索，秒出结果），近期已失效链接直接跳过不占验证名额，后台定期复验旧链接；`GET /api/memory/stats` 查看统计 |
-| **搜索 Agent** | 自研 tool-calling 循环（DeepSeek function calling，不依赖 agent 框架）：LLM 只决定下一步（查记忆 / 换词搜索 / 验证 / 结束），搜索、验证、质量识别、目标判断和预算（8 步 / 90 秒 / 90 次验证）由代码控制；结果不够时自动用别名、英文名、清晰度词补搜；无 key 或 LLM 出错时规则规划器无缝接管；SSE 实时推送每一步（`GET /api/agent/stream`） |
-| **相关性与偏好** | 用分享标题与文件名校验是不是要找的那部（片名、年份、季数，支持「第1-3季」「S01-S06」范围），规则判不了的交给 LLM 批量判定；按浏览器保存偏好（默认最低清晰度作为 agent 目标、字幕/HDR 优先），用户复制过的链接排序加权 |
-| **更多搜索源** | Telegram 公开频道（抓 `t.me/s/<频道>?q=` 网页预览，无需账号；可配代理）与自定义资源站（URL 模板，经 SSRF 校验），与原有引擎并发召回 |
-| **对话式追问** | 结果下方可继续说「要第二季」「只要中字的」「4K 的呢」「再找找」：追问被解释为对上一轮条件的修改（有 key 用 LLM，否则规则），上一轮已验证链接直接复用，够了只筛选、不够再按新条件补搜 |
-| **追剧订阅** | 借鉴 MoviePilot 的订阅思路（只借鉴设计，未使用其 GPL 代码）：订阅对象是影视条目（TMDB / 豆瓣识别，识别不到按关键词），电影与剧集分开，剧集按季订阅、总集数随 TMDB 更新、可设起止集；新订阅立即搜一次，之后定期（默认 6 小时）重搜，有资源、新集、更高清时提醒；开了自动转存就把网盘缺的集存进去，按网盘目录清点缺集，集齐后订阅完成并移入「订阅历史」（可一键重新订阅）；每个订阅可设清晰度要求、包含 / 排除关键词、暂停；可选 `NOTIFY_WEBHOOK` 推送到飞书/Slack 等机器人 |
-| **一键转存** | 点「转存到网盘」弹出夸克扫码登录，每个用户存到自己的网盘：凭证按浏览器会话用 AES-256-GCM 加密入库（密钥 `COOKIE_SECRET` 或自动生成的密钥文件，只存会话哈希，浏览器只拿 HttpOnly 会话，可随时退出清除，过期自动清理）。另外保留部署者自用模式：有效链接旁的「转存到网盘」把分享整体保存到部署者自己的夸克网盘（token → detail → save → 轮询任务）。夸克 cookie 只放服务器 `.env` 的 `QUARK_COOKIE`，不入库、不打日志、不回显、不从网页接收；接口另需口令 `SAVE_TOKEN`，两者都配置才开启 |
-| **转存自动分类** | 转存时识别电影/电视剧/动漫/综艺/纪录片和地区（华语/欧美/日韩），自动在网盘建目录，如 `QueryPilot/电视剧/国产剧/漫长的季节 (2023)`、`QueryPilot/电影/欧美`；先查 TMDB（`TMDB_API_KEY`）和豆瓣的影视资料，再由 LLM 结合资料决定分类与片名；没有 LLM 时按资料映射，资料都查不到才用文件名规则兜底，结果里会写明依据；`SAVE_CLASSIFY=false` 关闭 |
-| **防 token 滥用** | 未登录按 IP、登录按账号限制每天 AI 搜索次数，用完自动降级为不耗 token 的基础搜索（不拒绝）；同一 IP 每天搜索总数上限；同一句搜索 60 分钟内直接复用结果；全站每天 token 预算到顶后全站降级；数值都在 `.env` 配置，`GET /api/quota` 查看剩余次数 |
-| **账号分级** | 夸克扫码登录即账号，不另设用户名密码；未登录每天可免费搜索若干次（`ANON_DAILY_SEARCHES`），用完引导登录；追剧订阅需要登录，订阅跟着账号走（换浏览器也在）；可选邀请制（`INVITE_REQUIRED` + `INVITE_CODES`）；`GET /api/me` 返回登录状态与额度 |
-| **站长后台** | `ADMIN_TOKEN` 保护的 `/api/admin/*` 接口：全站与每个账号/IP 的搜索次数、LLM 调用次数和 token 花费（今天、最近 14 天）；封禁 / 解封账号与 IP；给单个账号单独设每日 AI 次数；生成和删除邀请码 |
-| **订阅自动转存** | 订阅可单独打开自动转存（默认关，需扫码登录）：发现新集或更高清版本时，用订阅者自己的夸克登录凭证把网盘里还没有的集（按 `S01E05`/`第5集` 等比对）存进自动分类的目录，不重复转存；登录失效时暂停并提醒一次，重新扫码后自动恢复 |
-| **PanSou 搜索源（可选）** | 自建 [PanSou](https://github.com/fish2018/pansou)（MIT）聚合服务作为又一路搜索源，作为内置 agent 的 `pansou_search` 工具（没有 AI 额度、走规则模式时也会调用），只取夸克链接，照常走本项目的验证/质量/相关性/记忆；插件白名单排除成人与 BT 盗版站；`docker compose up -d` 会一起启动（不开端口），`.env` 写 `PANSOU_URL=http://pansou:8888` 才启用 |
-| **可观测性** | 每次请求返回 `request_id`、各 provider 状态/召回数/耗时、原始/去重数量、是否降级 |
-| **工程质量** | 48 项 pytest（全部用 MockTransport 假客户端，不消耗真实 API）、ruff 全绿、GitHub Actions CI、Docker 多阶段构建（内置国内镜像源加速） |
-
-## 架构
+## 工作流程
 
 ```mermaid
-flowchart TD
-    Browser["浏览器（Jinja2 + 原生 JS）"] --> API["POST /api/search"]
-    API --> Service["SearchService（编排）"]
-    Service --> Parser["DeepSeek 意图解析"]
-    Parser -->|失败| Fallback["规则降级"]
-    Service --> Tavily["Tavily API"]
-    Service --> Bing["Bing 中文（HTML 解析）"]
-    Service --> Qkyunso["垂直搜索站"]
-    Service --> Verify["链接有效性验证（token+detail 两步 API）"]
-    Service --> API
+flowchart LR
+    Browser[浏览器] --> API[FastAPI]
+    API --> Agent[搜索 Agent]
+    Agent --> Planner[LLM 或规则规划]
+    Agent --> Sources[Tavily / Bing / Telegram / 自定义站点 / PanSou]
+    Sources --> Verify[夸克链接验证]
+    Verify --> Memory[(SQLite 记忆库)]
+    Verify --> Results[相关性与质量整理]
+    Results --> Browser
+    API --> Subs[订阅与通知]
+    Subs --> Quark[夸克登录 / 转存]
 ```
-
-请求生命周期：输入校验 → 意图解析（LLM/降级）→ 引擎并发召回 → 提取候选结果 → 按唯一标识去重 → 并发验证 → 置信度排序 → 返回可解释响应。
 
 ## 技术栈
 
-- **后端**：Python 3.12 · FastAPI · Pydantic v2 · HTTPX（异步）
-- **AI**：DeepSeek Chat Completions（`deepseek-v4-flash`，OpenAI 兼容格式）
-- **搜索**：Tavily Search API · Bing 中文 · 垂直搜索站（HTML 解析）
-- **前端**：Jinja2 服务端渲染 + 原生 JavaScript/CSS（无构建步骤）
-- **质量**：pytest + pytest-asyncio · Ruff
-- **交付**：Docker · GitHub Actions · 国内轻量服务器（Nginx）
+- Python 3.12、FastAPI、Pydantic v2、HTTPX
+- SQLite
+- Jinja2、原生 JavaScript、CSS
+- pytest、pytest-asyncio、Ruff
+- Docker Compose、GitHub Actions
 
-## 快速开始（本地开发）
+## 本地运行
+
+需要 Python 3.12。克隆仓库后创建虚拟环境并安装开发依赖：
 
 ```powershell
-py -m venv .venv
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements-dev.txt
-Copy-Item .env.example .env   # 填入 DEEPSEEK_API_KEY / TAVILY_API_KEY
+Copy-Item .env.example .env
+```
+
+macOS / Linux：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+cp .env.example .env
+```
+
+按需编辑 `.env`，配置 LLM 和搜索服务密钥，然后启动：
+
+```bash
 python -m uvicorn app.main:app --reload
 ```
 
-访问 `http://127.0.0.1:8000`，接口文档在 `/docs`（FastAPI OpenAPI）。
+访问 <http://127.0.0.1:8000>。FastAPI 接口文档位于 `/docs`，健康检查接口为 `/health`。没有配置 LLM 密钥时会使用规则规划；需要联网搜索时，仍须有可用的搜索来源。
 
-> 未配置 key 也能启动：意图解析走规则降级，无搜索源时返回受控 503。
+## 配置
 
-## 开发命令
+完整变量和默认值见 [.env.example](.env.example)。常用配置如下：
 
-| 命令 | 用途 |
+| 变量 | 用途 |
 | --- | --- |
-| `python -m uvicorn app.main:app --reload` | 启动本地服务 |
-| `python -m pytest -q -p no:cacheprovider` | 运行 48 项测试 |
-| `python -m ruff check app tests` | 静态检查 |
-| `docker compose up -d --build` | 容器化部署 |
+| `DEEPSEEK_API_KEY` 或 `LLM_API_KEY` | LLM 密钥；也可通过 `LLM_BASE_URL` 和 `LLM_MODEL` 使用兼容接口 |
+| `TAVILY_API_KEY` | 启用 Tavily 搜索来源 |
+| `TMDB_API_KEY` | 影视条目识别、系列和播出日历 |
+| `TG_CHANNELS`、`TG_PROXY` | 可选 Telegram 频道搜索及代理 |
+| `EXTRA_SITES` | 可选自定义资源站 URL 模板，使用 `{q}` 作为搜索词占位符 |
+| `PANSOU_URL`、`PANSOU_TOKEN` | 可选 PanSou 服务地址和访问令牌 |
+| `MEMORY_DB_PATH` | SQLite 数据库路径；留空可关闭链接记忆 |
+| `QUARK_LOGIN`、`COOKIE_SECRET` | 是否开放夸克扫码登录及登录凭证加密密钥 |
+| `QUARK_COOKIE`、`SAVE_TOKEN` | 可选部署者自用转存凭证与接口口令；两者都配置才启用 |
+| `ADMIN_TOKEN` | 管理员 API 口令；留空时管理接口关闭 |
+| `RATE_LIMIT_PER_MINUTE`、`IP_DAILY_SEARCHES`、`ANON_DAILY_AI_SEARCHES`、`USER_DAILY_AI_SEARCHES`、`SITE_DAILY_TOKEN_BUDGET` | 请求与用量限制 |
+| `TRUST_PROXY` | 应用位于可信反向代理后时，按转发头读取客户端 IP；直连公网时保持关闭 |
+
+请勿提交 `.env`、API 密钥或网盘 Cookie。扫码登录返回的夸克凭证使用 AES-GCM 加密存入数据库；若未配置 `COOKIE_SECRET`，服务会在数据目录生成密钥文件。部署时应持久化数据库和该密钥文件，并通过 HTTPS 提供登录服务。
+
+## Docker Compose 部署
+
+```bash
+cp .env.example .env
+# 编辑 .env，填写所需配置
+docker compose up -d --build
+```
+
+Compose 会启动 Web 服务和 PanSou 容器；只有配置 `PANSOU_URL` 后，QueryPilot 才会调用 PanSou。容器内数据保存在 `querypilot-data` 卷中。生产环境建议在可信反向代理后提供 HTTPS，并限制外部直接访问应用端口。
+
+## 常用接口
+
+| 接口 | 用途 |
+| --- | --- |
+| `POST /api/search` | 普通资源搜索 |
+| `POST /api/agent/search` | Agent 搜索并返回执行步骤 |
+| `GET /api/agent/stream?query=...` | SSE 流式搜索 |
+| `GET /api/trending` | 获取热门影视 |
+| `GET /api/media/search?q=...` | 搜索影视条目 |
+| `/api/subscriptions` | 创建、查询和管理订阅；详见 `/docs` |
+| `GET /api/calendar` | 获取订阅播出日历 |
+| `GET /api/quota`、`GET /api/me` | 当前身份和用量状态 |
+| `/api/admin/*` | 管理员用量与账号管理接口 |
+
+完整请求字段和响应结构以 `/docs` 中的 OpenAPI 文档为准。
+
+## 测试与代码检查
+
+```bash
+python -m pytest -q -p no:cacheprovider
+python -m ruff check app tests
+```
+
+测试为静态仓库的一部分；CI 工作流会在推送和 Pull Request 时运行测试、Ruff 检查及 Docker 构建。
+
+## GitHub Actions 触发规则
+
+- `.github/workflows/ci.yml` 对所有分支的 `push` 和 Pull Request 触发，没有按文件路径过滤。因此，**只修改 README 并推送也会运行 CI**。
+- `.github/workflows/deploy.yml` 只在向 `main` 推送时触发，并通过 SSH 在服务器执行部署。因此，推送 README 到 `main` 也会触发部署。
 
 ## 项目结构
 
-```
+```text
 app/
-├─ main.py               # FastAPI 入口、路由、lifespan
-├─ config.py             # 环境变量配置（密钥绝不落仓库）
-├─ models.py             # Pydantic 数据契约
-├─ providers/
-│  ├─ base.py            # SearchProvider 接口 + 类型化错误
-│  └─ tavily.py          # Tavily 适配器
-├─ services/
-│  ├─ intent.py          # DeepSeek 意图解析 + 规则降级
-│  ├─ search.py          # 编排：并发、部分成功、验证、排序
-│  └─ quark.py           # 结果提取、深度抓取、严格验证、Bing/垂直站引擎
-├─ templates/            # 服务端渲染页面
-└─ static/               # 原生 JS/CSS
-tests/                   # 48 项测试（MockTransport，不调用真实 API）
+├── main.py                 # FastAPI 应用、路由和生命周期
+├── admin.py                # 管理员 API
+├── config.py               # 环境变量配置
+├── models.py               # 请求、响应和领域模型
+├── providers/              # 搜索提供方接口与适配器
+├── services/               # 搜索、Agent、验证、记忆、订阅、夸克登录与转存
+├── templates/              # Jinja2 页面
+└── static/                 # 前端 JavaScript、CSS 和管理员页面
+tests/                      # 自动化测试
+evals/                      # 搜索评测与合成数据
+docs/                       # PRD、开发文档与设计决策
+quark_search_gui.py         # 旧版 Tkinter 原型，仅供参考
 ```
 
-## 在线 Demo
-
-`http://124.223.112.9:8000`（部署于国内轻量服务器，Docker + Nginx）
-
-## 项目文档
-
-- [产品需求文档（PRD）](docs/PRD.md)
-- [开发与架构文档](docs/DEVELOPMENT.md)
-- [面试 Q&A 准备](docs/INTERVIEW.md)
-
-## 部署（国内服务器）
-
-```bash
-cp .env.example .env   # 填入真实 key
-docker compose up -d --build
-curl http://127.0.0.1:8000/health
-```
-
-> Dockerfile 内置阿里云 pip 镜像加速（`PIP_INDEX_URL` build-arg），国内构建不再卡在默认 PyPI。
-
-## 安全与合规
-
-- API Key 只通过环境变量/服务器 `.env` 管理；`config.json`、`.env` 已被 Git 忽略，仓库历史零密钥；
-- 本项目聚合**公开网络信息**并验证其可用性，不托管、不传播受版权保护的内容；
-- 结果有效性由验证层客观判断，是否使用由用户自行决定；仅供学习与合规用途。
-
-## License
+## 许可证
 
 [MIT](LICENSE)
