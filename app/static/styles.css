@@ -1541,6 +1541,7 @@ body.searched .hero .memory-stats { display: none; }
 .sub-info { display: grid; gap: 0.1rem; min-width: 0; }
 .sub-title { font-weight: 650; overflow-wrap: anywhere; }
 .sub-meta { font-size: 0.78rem; color: var(--muted); }
+.sub-error { display: block; margin-top: 0.15rem; font-size: 0.78rem; font-weight: 500; color: var(--warn); overflow-wrap: anywhere; }
 .sub-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; }
 .switch.small { font-size: 0.82rem; }
 .switch.small .switch-track { width: 32px; height: 19px; }
