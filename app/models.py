@@ -209,6 +209,7 @@ class Subscription(BaseModel):
     resource: str
     created: float
     last_checked: float | None = None
+    last_error: str | None = None  # 上次检查失败的原因（给用户看的）；成功检查后清空
     best_episodes: int = 0  # 目前见过的最多集数（有效且相关的链接里）
     best_score: int = 0  # 目前见过的最高质量分
     best_resolution: str | None = None
@@ -221,7 +222,8 @@ class Subscription(BaseModel):
     state: Literal["new", "active", "pending", "paused"] = "active"
     media: MediaType | None = None
     season: int | None = None
-    year: str | None = None
+    year: str | None = None  # 片子（剧集首播）年份：网盘目录名、相关性都按它
+    season_year: str | None = None  # 这一季开播年份（TMDB）：卡片展示用，没有时显示 year
     tmdb_id: str | None = None
     douban_id: str | None = None
     poster: str | None = None

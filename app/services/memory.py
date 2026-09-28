@@ -146,6 +146,8 @@ _MIGRATIONS = [
     ("subscriptions", "upgrade_to", "TEXT"),
     ("subscriptions", "versions", "TEXT"),
     ("subscriptions", "schedule", "TEXT"),  # 播出日历（JSON）
+    ("subscriptions", "season_year", "TEXT"),
+    ("subscriptions", "last_error", "TEXT"),
 ]
 
 # 订阅 v2 的可编辑字段：Subscription 属性名 → 列名
@@ -155,7 +157,7 @@ SUB_FIELDS = {
     "start_episode": "start_episode", "manual_total": "manual_total",
     "resolution": "resolution", "include": "include_words", "exclude": "exclude_words",
     "auto_save": "auto_save", "folder": "folder", "upgrade": "upgrade",
-    "upgrade_to": "upgrade_to",
+    "upgrade_to": "upgrade_to", "season_year": "season_year",
 }
 
 _PUNCT_RE = re.compile(r"[\s\-_·:：,，.。!！?？'\"“”‘’()（）\[\]【】《》<>]+")
@@ -392,7 +394,8 @@ class LinkStore:
     def _row_to_sub(row: sqlite3.Row) -> Subscription:
         return Subscription(
             id=row["id"], query=row["query"], resource=row["resource"], created=row["created"],
-            last_checked=row["last_checked"], best_episodes=row["best_episodes"],
+            last_checked=row["last_checked"], last_error=row["last_error"],
+            best_episodes=row["best_episodes"], season_year=row["season_year"],
             best_score=row["best_score"], best_resolution=row["best_resolution"],
             auto_save=bool(row["auto_save"]), auto_save_status=row["auto_save_status"],
             state=_state(row), media=row["media"], season=row["season"], year=row["year"],
@@ -437,10 +440,11 @@ class LinkStore:
         with self._lock:
             self._conn.execute(
                 "UPDATE subscriptions SET last_checked = ?, best_episodes = ?, best_score = ?, "
-                "best_resolution = ?, total_episodes = ?, saved_episodes = ?, versions = ?, "
+                "best_resolution = ?, total_episodes = ?, season_year = ?, last_error = NULL, "
+                "saved_episodes = ?, versions = ?, "
                 "state = CASE WHEN state = 'paused' THEN state ELSE 'active' END WHERE id = ?",
                 (now, sub.best_episodes, sub.best_score, sub.best_resolution,
-                 sub.total_episodes, json.dumps(sorted(set(sub.saved_episodes))),
+                 sub.total_episodes, sub.season_year, json.dumps(sorted(set(sub.saved_episodes))),
                  json.dumps({str(k): v for k, v in sorted(sub.versions.items())}), sub.id),
             )
             for kind, message, share in notes:
@@ -662,6 +666,15 @@ class LinkStore:
         data = json.dumps([e.model_dump() for e in schedule], ensure_ascii=False)
         await asyncio.to_thread(
             self._exec, "UPDATE subscriptions SET schedule = ? WHERE id = ?", (data, sub_id))
+
+    async def set_check_error(self, sub_id: int, message: str) -> None:
+        """检查失败：记下时间和原因，卡片不再一直停在「首次搜索中」。"""
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE subscriptions SET last_checked = ?, last_error = ?, "
+            "state = CASE WHEN state = 'new' THEN 'active' ELSE state END WHERE id = ?",
+            (time.time(), message, sub_id),
+        )
 
     async def meta_due(self, sub_id: int, hours: float) -> bool:
         """距上次刷新元数据超过 `hours` 就返回 True 并记下这次刷新时间。"""
