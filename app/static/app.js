@@ -852,7 +852,8 @@ loadPrefs();
 // 右上角按钮来自 SUB_ACTIONS，设置面板的字段来自 SUB_RULES，以后加功能往数组里加一项即可。
 const subsPanel = document.getElementById("subs-panel");
 const subsList = document.getElementById("subs-list");
-const notifList = document.getElementById("notif-list");
+const notifBox = document.getElementById("notif-box");
+let notesCache = [];
 const subsUnread = document.getElementById("subs-unread");
 const subsTabs = document.getElementById("subs-tabs");
 const newSubBtn = document.getElementById("new-sub-btn");
@@ -927,18 +928,90 @@ async function loadSubs() {
       if (subscribeBox.hidden) renderSubscribeBox(lastResult);
     }
 
-    const unread = notes.filter((n) => !n.read).length;
-    subsUnread.hidden = unread === 0;
-    setText(subsUnread, unread + " 条新提醒");
-
-    notifList.innerHTML = "";
-    notes.slice(0, 10).forEach((n) => {
-      const li = el("li", (n.read ? "" : "unread-item ") + "kind-" + n.kind, formatTime(n.ts) + "　" + n.message);
-      notifList.appendChild(li);
-    });
+    notesCache = notes;
+    renderNotifs();
 
     renderSubsTab();
   } catch (_) { /* 网络问题：下次再试 */ }
+}
+
+// ---- 订阅提醒：未读的一条条「已读」，已读的折叠起来 ----
+function renderNotifs() {
+  const unread = notesCache.filter((n) => !n.read);
+  const read = notesCache.filter((n) => n.read);
+  subsUnread.hidden = unread.length === 0;
+  setText(subsUnread, unread.length + " 条新提醒");
+  notifBox.innerHTML = "";
+  if (unread.length) {
+    const head = el("div", "notif-head");
+    head.appendChild(el("span", "notif-count", "新提醒 " + unread.length + " 条"));
+    const all = el("button", "link-btn", "全部已读");
+    all.type = "button";
+    all.addEventListener("click", () => markNotesRead(unread));
+    head.appendChild(all);
+    const ul = el("ul", "notif-list");
+    unread.slice(0, 20).forEach((n) => ul.appendChild(noteItem(n)));
+    notifBox.append(head, ul);
+  }
+  if (read.length) {
+    const fold = el("details", "notif-read");
+    if (notifBox.dataset.readOpen === "1") fold.open = true;
+    fold.addEventListener("toggle", () => { notifBox.dataset.readOpen = fold.open ? "1" : ""; });
+    fold.appendChild(el("summary", "", "已读的提醒（" + read.length + "）"));
+    const ul = el("ul", "notif-list");
+    read.slice(0, 30).forEach((n) => ul.appendChild(noteItem(n)));
+    fold.appendChild(ul);
+    notifBox.appendChild(fold);
+  }
+}
+
+// 提醒文字里的分享链接可以直接点开
+function linkify(text) {
+  const frag = document.createDocumentFragment();
+  let last = 0;
+  String(text).replace(/https?:\/\/[^\s，。；」』）)]+/g, (url, at) => {
+    if (at > last) frag.appendChild(document.createTextNode(text.slice(last, at)));
+    const a = el("a", "", url);
+    a.href = url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    frag.appendChild(a);
+    last = at + url.length;
+    return url;
+  });
+  if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+  return frag;
+}
+
+function noteItem(n) {
+  const li = el("li", (n.read ? "" : "unread-item ") + "kind-" + n.kind);
+  const text = el("span", "note-text");
+  text.append(el("span", "note-time", formatTime(n.ts)), linkify(n.message));
+  li.appendChild(text);
+  if (!n.read) {
+    const btn = el("button", "ghost-btn small note-read-btn", "已读");
+    btn.type = "button";
+    btn.setAttribute("aria-label", "标为已读");
+    btn.addEventListener("click", () => {
+      li.classList.add("leaving");
+      setTimeout(() => markNotesRead([n]), 220);
+    });
+    li.appendChild(btn);
+  }
+  return li;
+}
+
+// 先在本地标记（界面立即收起），再告诉服务器；失败时下次刷新会恢复
+async function markNotesRead(list) {
+  const ids = list.map((n) => n.id).filter((id) => id !== undefined);
+  list.forEach((n) => { n.read = true; });
+  renderNotifs();
+  const allUnread = !notesCache.some((n) => !n.read);
+  await fetch("/api/notifications/read?" + cidParam(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(allUnread ? {} : { ids }),
+  }).catch(() => {});
 }
 
 // 「订阅整个系列」建的订阅按系列折叠成一组，放在该系列第一部出现的位置
@@ -2335,11 +2408,6 @@ subscribeBtn.addEventListener("click", () => {
 // 订阅面板里的「＋ 新订阅」：不用先搜资源
 newSubBtn.addEventListener("click", () => openSubscribeDialog({ query: "", resource: "", empty: true }));
 
-subsPanel.addEventListener("toggle", async () => {
-  if (!subsPanel.open || subsUnread.hidden) return;
-  await fetch("/api/notifications/read?" + cidParam(), { method: "POST" }).catch(() => {});
-  subsUnread.hidden = true;
-});
 
 loadSubs();
 setInterval(loadSubs, 5 * 60 * 1000);

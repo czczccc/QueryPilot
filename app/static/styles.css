@@ -565,7 +565,7 @@ body.searched .hero .features { display: none; }
   word-break: break-all;
   color: var(--muted);
 }
-.notif-list li.unread-item { color: var(--text); font-weight: 600; }
+.notif-list li.unread-item { color: var(--text); font-weight: 500; }
 .subs-list li {
   display: flex;
   justify-content: space-between;
@@ -1944,3 +1944,18 @@ body.searched .hero .memory-stats { display: none; }
 .delete-confirm input:focus { border-color: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft, rgba(220, 38, 38, 0.15)); }
 .primary-btn.danger-btn { background: var(--danger); box-shadow: none; }
 .primary-btn.danger-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ---- 订阅提醒：已读按钮 + 已读折叠 ---- */
+.notif-box { display: grid; gap: 0.35rem; }
+.notif-box:empty { display: none; }
+.notif-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; font-size: 0.8rem; }
+.notif-count { font-weight: 600; color: var(--text); }
+.notif-list li { display: flex; align-items: flex-start; gap: 0.6rem; transition: opacity 0.2s ease, transform 0.2s ease; }
+.notif-list li::before { flex: none; }
+.notif-list li.leaving { opacity: 0; transform: translateX(12px); }
+.note-text { flex: 1; min-width: 0; }
+.note-time { margin-right: 0.6em; font-weight: 500; color: var(--muted); }
+.note-text a { color: var(--accent); }
+.note-read-btn { flex: none; padding: 0.15rem 0.55rem; font-size: 0.75rem; }
+.notif-read summary { font-size: 0.8rem; color: var(--muted); cursor: pointer; padding: 0.2rem 0; }
+.notif-read .notif-list li { font-weight: 400; }
