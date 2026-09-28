@@ -1,0 +1,52 @@
+{
+  "name": "@cz/design-system",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CZ Design System：面向 AI Native 产品的设计 token 与 React 组件库",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tokens": "./src/tokens/index.ts",
+    "./motion": "./src/motion/index.ts",
+    "./styles.css": "./src/styles/index.css"
+  },
+  "scripts": {
+    "tokens": "tsx scripts/build-tokens.ts",
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test && npm run build"
+  },
+  "peerDependencies": {
+    "react": ">=19",
+    "react-dom": ">=19"
+  },
+  "dependencies": {
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "framer-motion": "13.4.4",
+    "lucide-react": "1.48.0",
+    "radix-ui": "1.6.7",
+    "tailwind-merge": "3.7.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@testing-library/react": "16.3.3",
+    "@types/culori": "4.0.1",
+    "@types/node": "22.20.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "culori": "4.0.2",
+    "jsdom": "30.1.1",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "tailwindcss": "4.3.3",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.1",
+    "vite-plugin-singlefile": "2.3.3",
+    "vitest": "5.0.2"
+  }
+}

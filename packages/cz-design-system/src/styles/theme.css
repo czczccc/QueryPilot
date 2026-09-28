@@ -1,0 +1,167 @@
+/* 由 scripts/build-tokens.ts 生成，请勿手改。 */
+
+@theme inline {
+  --color-*: initial;
+  --font-*: initial;
+  --text-*: initial;
+  --font-weight-*: initial;
+  --tracking-*: initial;
+  --leading-*: initial;
+  --radius-*: initial;
+  --shadow-*: initial;
+  --inset-shadow-*: initial;
+  --drop-shadow-*: initial;
+  --ease-*: initial;
+  --animate-*: initial;
+
+  --spacing: var(--cz-spacing);
+  --color-transparent: transparent;
+  --color-current: currentColor;
+  --color-canvas: var(--cz-color-canvas);
+  --color-surface: var(--cz-color-surface);
+  --color-raised: var(--cz-color-raised);
+  --color-sunken: var(--cz-color-sunken);
+  --color-overlay: var(--cz-color-overlay);
+  --color-hover: var(--cz-color-hover);
+  --color-pressed: var(--cz-color-pressed);
+  --color-selected: var(--cz-color-selected);
+  --color-inverse: var(--cz-color-inverse);
+  --color-fg: var(--cz-color-fg);
+  --color-fg-muted: var(--cz-color-fg-muted);
+  --color-fg-subtle: var(--cz-color-fg-subtle);
+  --color-fg-disabled: var(--cz-color-fg-disabled);
+  --color-fg-inverse: var(--cz-color-fg-inverse);
+  --color-line-subtle: var(--cz-color-line-subtle);
+  --color-line: var(--cz-color-line);
+  --color-line-strong: var(--cz-color-line-strong);
+  --color-focus: var(--cz-color-focus);
+  --color-accent: var(--cz-color-accent);
+  --color-accent-hover: var(--cz-color-accent-hover);
+  --color-accent-fg: var(--cz-color-accent-fg);
+  --color-accent-soft: var(--cz-color-accent-soft);
+  --color-accent-soft-hover: var(--cz-color-accent-soft-hover);
+  --color-accent-line: var(--cz-color-accent-line);
+  --color-on-accent: var(--cz-color-on-accent);
+  --color-knob: var(--cz-color-knob);
+  --color-success: var(--cz-color-success);
+  --color-success-fg: var(--cz-color-success-fg);
+  --color-success-soft: var(--cz-color-success-soft);
+  --color-success-line: var(--cz-color-success-line);
+  --color-warning: var(--cz-color-warning);
+  --color-warning-fg: var(--cz-color-warning-fg);
+  --color-warning-soft: var(--cz-color-warning-soft);
+  --color-warning-line: var(--cz-color-warning-line);
+  --color-danger: var(--cz-color-danger);
+  --color-danger-fg: var(--cz-color-danger-fg);
+  --color-danger-soft: var(--cz-color-danger-soft);
+  --color-danger-line: var(--cz-color-danger-line);
+  --color-info: var(--cz-color-info);
+  --color-info-fg: var(--cz-color-info-fg);
+  --color-info-soft: var(--cz-color-info-soft);
+  --color-info-line: var(--cz-color-info-line);
+
+  --font-sans: var(--cz-font-sans);
+  --font-mono: var(--cz-font-mono);
+  --font-weight-regular: var(--cz-font-weight-regular);
+  --font-weight-medium: var(--cz-font-weight-medium);
+  --font-weight-semibold: var(--cz-font-weight-semibold);
+  --text-caption: var(--cz-text-caption);
+  --text-caption--line-height: var(--cz-text-caption-leading);
+  --text-caption--letter-spacing: var(--cz-text-caption-tracking);
+  --text-caption--font-weight: var(--cz-text-caption-weight);
+  --text-footnote: var(--cz-text-footnote);
+  --text-footnote--line-height: var(--cz-text-footnote-leading);
+  --text-footnote--letter-spacing: var(--cz-text-footnote-tracking);
+  --text-footnote--font-weight: var(--cz-text-footnote-weight);
+  --text-body: var(--cz-text-body);
+  --text-body--line-height: var(--cz-text-body-leading);
+  --text-body--letter-spacing: var(--cz-text-body-tracking);
+  --text-body--font-weight: var(--cz-text-body-weight);
+  --text-body-lg: var(--cz-text-body-lg);
+  --text-body-lg--line-height: var(--cz-text-body-lg-leading);
+  --text-body-lg--letter-spacing: var(--cz-text-body-lg-tracking);
+  --text-body-lg--font-weight: var(--cz-text-body-lg-weight);
+  --text-title-sm: var(--cz-text-title-sm);
+  --text-title-sm--line-height: var(--cz-text-title-sm-leading);
+  --text-title-sm--letter-spacing: var(--cz-text-title-sm-tracking);
+  --text-title-sm--font-weight: var(--cz-text-title-sm-weight);
+  --text-title: var(--cz-text-title);
+  --text-title--line-height: var(--cz-text-title-leading);
+  --text-title--letter-spacing: var(--cz-text-title-tracking);
+  --text-title--font-weight: var(--cz-text-title-weight);
+  --text-heading: var(--cz-text-heading);
+  --text-heading--line-height: var(--cz-text-heading-leading);
+  --text-heading--letter-spacing: var(--cz-text-heading-tracking);
+  --text-heading--font-weight: var(--cz-text-heading-weight);
+  --text-display-sm: var(--cz-text-display-sm);
+  --text-display-sm--line-height: var(--cz-text-display-sm-leading);
+  --text-display-sm--letter-spacing: var(--cz-text-display-sm-tracking);
+  --text-display-sm--font-weight: var(--cz-text-display-sm-weight);
+  --text-display: var(--cz-text-display);
+  --text-display--line-height: var(--cz-text-display-leading);
+  --text-display--letter-spacing: var(--cz-text-display-tracking);
+  --text-display--font-weight: var(--cz-text-display-weight);
+  --text-display-lg: var(--cz-text-display-lg);
+  --text-display-lg--line-height: var(--cz-text-display-lg-leading);
+  --text-display-lg--letter-spacing: var(--cz-text-display-lg-tracking);
+  --text-display-lg--font-weight: var(--cz-text-display-lg-weight);
+
+  --spacing-control-sm: var(--cz-control-sm);
+  --spacing-control-md: var(--cz-control-md);
+  --spacing-control-lg: var(--cz-control-lg);
+
+  --radius-none: var(--cz-radius-none);
+  --radius-xs: var(--cz-radius-xs);
+  --radius-sm: var(--cz-radius-sm);
+  --radius-md: var(--cz-radius-md);
+  --radius-lg: var(--cz-radius-lg);
+  --radius-xl: var(--cz-radius-xl);
+  --radius-2xl: var(--cz-radius-2xl);
+  --radius-full: var(--cz-radius-full);
+  --radius-control: var(--cz-radius-control);
+  --radius-card: var(--cz-radius-card);
+  --radius-popover: var(--cz-radius-popover);
+  --radius-dialog: var(--cz-radius-dialog);
+  --radius-pill: var(--cz-radius-pill);
+
+  --shadow-xs: var(--cz-shadow-xs);
+  --shadow-sm: var(--cz-shadow-sm);
+  --shadow-md: var(--cz-shadow-md);
+  --shadow-lg: var(--cz-shadow-lg);
+  --shadow-xl: var(--cz-shadow-xl);
+  --shadow-ring: var(--cz-ring);
+
+  --ease-standard: var(--cz-ease-standard);
+  --ease-enter: var(--cz-ease-enter);
+  --ease-exit: var(--cz-ease-exit);
+  --ease-emphasized: var(--cz-ease-emphasized);
+  --ease-linear: var(--cz-ease-linear);
+
+  --animate-shimmer: cz-shimmer var(--cz-duration-ambient) var(--cz-ease-linear) infinite;
+  --animate-breathe: cz-breathe var(--cz-duration-ambient) var(--cz-ease-standard) infinite;
+  --animate-halo: cz-halo var(--cz-duration-ambient) var(--cz-ease-exit) infinite;
+  --animate-spin: cz-spin 900ms var(--cz-ease-linear) infinite;
+
+  --default-transition-duration: var(--cz-duration-fast);
+  --default-transition-timing-function: var(--cz-ease-standard);
+}
+
+/* 时长工具类：duration-fast、duration-base…… */
+@utility duration-instant {
+  transition-duration: var(--cz-duration-instant);
+}
+@utility duration-fast {
+  transition-duration: var(--cz-duration-fast);
+}
+@utility duration-base {
+  transition-duration: var(--cz-duration-base);
+}
+@utility duration-slow {
+  transition-duration: var(--cz-duration-slow);
+}
+@utility duration-slower {
+  transition-duration: var(--cz-duration-slower);
+}
+@utility duration-ambient {
+  transition-duration: var(--cz-duration-ambient);
+}
