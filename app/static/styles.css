@@ -2173,3 +2173,5 @@ body[data-view="subs"] .workspace, body[data-view="settings"] .settings-card {
 .report-btns .ghost-btn:hover { color: var(--danger); }
 .report-done { font-size: 0.78rem; color: var(--muted); }
 .result-card.reported { opacity: 0.7; }
+
+.sub-check { display: block; font-size: 0.78rem; color: var(--muted); }
