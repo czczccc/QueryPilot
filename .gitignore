@@ -26,3 +26,7 @@ Thumbs.db
 
 # ---- 评测报告（本地生成）----
 evals/reports/
+
+# ---- 前端包（packages/*）----
+node_modules/
+packages/*/dist/

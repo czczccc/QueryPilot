@@ -1,0 +1,11 @@
+/*
+ * CZ Design System 样式入口。
+ * 使用方：在自己的入口 CSS 里 @import "@cz/design-system/styles.css"; 即可获得 token、主题映射和基础样式。
+ */
+@import "tailwindcss";
+@import "./tokens.css";
+@import "./theme.css";
+@import "./base.css";
+
+/* 让 Tailwind 扫描组件源码里的类名 */
+@source "../components";
