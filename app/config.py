@@ -35,6 +35,9 @@ class Settings:
     notify_webhook: str = ""  # 订阅有更新时额外推送到这个 webhook（可选）
     alert_tg_bot_token: str = field(default="", repr=False)  # 失败告警（只发站长）
     alert_tg_chat_id: str = ""
+    selfcheck_titles: tuple[str, ...] = ()  # 每日自检片单，空为不跑
+    selfcheck_user: str = ""  # 自检转存用哪个扫码登录的账号（用户 id），空则用 QUARK_COOKIE
+    selfcheck_hour: int = 5  # 北京时间几点跑
     # 一键转存：夸克登录 cookie 与接口口令只放本地 .env / 环境变量，不入库、不回显
     quark_cookie: str = field(default="", repr=False)
     save_token: str = field(default="", repr=False)
@@ -108,6 +111,9 @@ def load_settings() -> Settings:
         notify_webhook=os.getenv("NOTIFY_WEBHOOK", ""),
         alert_tg_bot_token=os.getenv("ALERT_TG_BOT_TOKEN", "").strip(),
         alert_tg_chat_id=os.getenv("ALERT_TG_CHAT_ID", "").strip(),
+        selfcheck_titles=_list("SELFCHECK_TITLES"),
+        selfcheck_user=os.getenv("SELFCHECK_USER", "").strip(),
+        selfcheck_hour=_int("SELFCHECK_HOUR", 5) % 24,
         quark_cookie=os.getenv("QUARK_COOKIE", "").strip(),
         save_token=os.getenv("SAVE_TOKEN", "").strip(),
         cookie_secret=os.getenv("COOKIE_SECRET", "").strip(),

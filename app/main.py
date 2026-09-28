@@ -77,6 +77,7 @@ from app.services.quark_save import (
 from app.services.relevance import clean_keyword, seasons_in
 from app.services.resilience import RetryTransport
 from app.services.search import QuarkSearchService, SearchUnavailableError
+from app.services.selfcheck import SelfCheck, seconds_until
 from app.services.series import build_candidates
 from app.services.subscriptions import RES_TEXT, SubscriptionWatcher, strip_season
 from app.services.trending import Trending
@@ -158,6 +159,16 @@ async def _reverify_loop(service: QuarkSearchService, interval_hours: float) -> 
             logger.info("记忆复验完成，新增失效 %d 条", died)
         except Exception:
             logger.exception("记忆复验异常")
+
+
+async def _selfcheck_loop(check: SelfCheck, hour: int) -> None:
+    """每天北京时间 `hour` 点跑一次自检；出错只记日志。"""
+    while True:
+        await asyncio.sleep(seconds_until(hour))
+        try:
+            await check.run()
+        except Exception:
+            logger.exception("每日自检异常")
 
 
 async def _subscribe_loop(
@@ -269,6 +280,9 @@ def create_app(
             tasks.append(asyncio.create_task(_reverify_loop(resolved, interval)))
         if watcher is not None and sub_interval > 0:
             tasks.append(asyncio.create_task(_subscribe_loop(watcher, sub_interval, quota)))
+        if getattr(app.state, "selfcheck", None) is not None:
+            tasks.append(asyncio.create_task(
+                _selfcheck_loop(app.state.selfcheck, _settings.selfcheck_hour)))
         try:
             yield
         finally:
@@ -847,6 +861,20 @@ def create_app(
         return QuarkSaver(cookie, "0", client=quark_http, classifier=classifier,
                           root_dir=root_dir, pacer=pacer, pace_key=owner), account[0]
 
+    async def _selfcheck_saver() -> QuarkSaver | None:
+        """每日自检转存用的账号：SELFCHECK_USER 指定的扫码账号，否则 QUARK_COOKIE。"""
+        if _settings.selfcheck_user and login_enabled:
+            got = await _account_saver(f"u:{_settings.selfcheck_user}")
+            return got[0] if got else None
+        if _settings.quark_cookie:
+            return QuarkSaver(_settings.quark_cookie, "0", client=quark_http, classifier=classifier,
+                              root_dir=root_dir, pacer=pacer, pace_key="selfcheck")
+        return None
+
+    app.state.selfcheck = SelfCheck(
+        resolved_agent, list(_settings.selfcheck_titles), _selfcheck_saver, alerter,
+    ) if service is None and _settings.selfcheck_titles else None
+
     def _is_movie(sub: Subscription, link: QuarkLink | None = None) -> bool:
         if sub.media:
             return sub.media == "movie"
@@ -1308,6 +1336,7 @@ def create_app(
         quota,
         rate_limit_dep,
         links=resolved.store,
+        selfcheck=lambda: getattr(app.state, "selfcheck", None),
     ))
 
     @app.get("/api/quota")
