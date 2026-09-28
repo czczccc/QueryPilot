@@ -1100,6 +1100,20 @@ const STATE_BADGE = {
   paused: ["已暂停", "neutral", "暂停期间不检查，恢复后立即检查一次"],
 };
 
+// 状态徽章：检查失败时不再显示「首次搜索中」；没上映的电影显示「未上映」而不是「待定」
+function stateBadge(sub) {
+  if (sub.last_error && (sub.state === "new" || sub.state === "active")) {
+    return badge("检查失败", "state-warn", "上次检查失败，服务器稍后会自动重试");
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  if (sub.state === "pending" && sub.media === "movie" && (sub.collection_id || sub.release_date) &&
+      (!sub.release_date || sub.release_date > today)) {
+    return badge("未上映", "state-neutral", sub.release_date ? "上映日期 " + sub.release_date + "，上映后自动开始搜" : "还没定档，上映后自动开始搜");
+  }
+  const st = STATE_BADGE[sub.state] || STATE_BADGE.active;
+  return badge(st[0], "state-" + st[1], st[2]);
+}
+
 // 把集号压缩成「3、5–7、10」
 function episodeRanges(list) {
   const out = [];
@@ -1727,8 +1741,7 @@ function subItem(sub) {
   const info = el("div", "sub-info");
   const titleRow = el("div", "sub-title-row");
   titleRow.appendChild(el("b", "sub-title", "《" + tidyTitle(sub.resource) + "》"));
-  const st = STATE_BADGE[sub.state] || STATE_BADGE.active;
-  titleRow.appendChild(badge(st[0], "state-" + st[1], st[2]));
+  titleRow.appendChild(stateBadge(sub));
   if (sub.upgrade) {
     const goal = RES_LABEL[sub.upgrade_to || "2160p"];
     titleRow.appendChild(sub.upgrade_done
@@ -1737,13 +1750,17 @@ function subItem(sub) {
   }
   info.appendChild(titleRow);
   const tags = [
-    sub.year || "",
+    sub.season_year || sub.year || "", // 季订阅显示这一季的开播年，不是剧集首播年
     sub.collection_name
       ? collectionName(sub.collection_name) + " 系列" + (sub.collection_index ? " · 第 " + sub.collection_index + " 部" : "")
       : sub.media === "movie" ? "电影" : sub.media === "tv" ? "剧集" : "按关键词",
-    sub.last_checked ? "检查于 " + formatTime(sub.last_checked) : "尚未检查",
+    sub.last_error ? "" : sub.last_checked ? "检查于 " + formatTime(sub.last_checked) : "尚未检查",
   ].filter(Boolean).join(" · ");
   info.appendChild(el("span", "sub-meta", tags));
+  if (sub.last_error) {
+    info.appendChild(el("span", "sub-error", "上次检查失败：" + sub.last_error +
+      (sub.last_checked ? " · " + formatTime(sub.last_checked) : "")));
+  }
   const acts = el("div", "sub-actions");
   SUB_ACTIONS.forEach((make) => { const b = make(sub, li); if (b) acts.appendChild(b); });
   head.append(info, acts);
@@ -1944,8 +1961,8 @@ function collectionOption(c, idx, name) {
   const sel = el("select", "cand-season cand-part");
   sel.setAttribute("aria-label", "选择第几部");
   parts.forEach((p) => {
-    const o = el("option", "", ["第 " + p.index + " 部", tidyTitle(p.title), p.year || "",
-      p.released === false ? "未上映" : ""].filter(Boolean).join(" · "));
+    const o = el("option", "", ["第 " + p.index + " 部", tidyTitle(p.title), p.year || ""].filter(Boolean).join(" · ") +
+      (p.released === false ? "（未上映）" : ""));
     o.value = String(p.index);
     sel.appendChild(o);
   });
