@@ -852,7 +852,8 @@ loadPrefs();
 // 右上角按钮来自 SUB_ACTIONS，设置面板的字段来自 SUB_RULES，以后加功能往数组里加一项即可。
 const subsPanel = document.getElementById("subs-panel");
 const subsList = document.getElementById("subs-list");
-const notifList = document.getElementById("notif-list");
+const notifBox = document.getElementById("notif-box");
+let notesCache = [];
 const subsUnread = document.getElementById("subs-unread");
 const subsTabs = document.getElementById("subs-tabs");
 const newSubBtn = document.getElementById("new-sub-btn");
@@ -927,18 +928,198 @@ async function loadSubs() {
       if (subscribeBox.hidden) renderSubscribeBox(lastResult);
     }
 
-    const unread = notes.filter((n) => !n.read).length;
-    subsUnread.hidden = unread === 0;
-    setText(subsUnread, unread + " 条新提醒");
-
-    notifList.innerHTML = "";
-    notes.slice(0, 10).forEach((n) => {
-      const li = el("li", (n.read ? "" : "unread-item ") + "kind-" + n.kind, formatTime(n.ts) + "　" + n.message);
-      notifList.appendChild(li);
-    });
+    notesCache = applyLocalRead(notes);
+    renderNotifs();
 
     renderSubsTab();
   } catch (_) { /* 网络问题：下次再试 */ }
+}
+
+// ---- 订阅提醒：卡片样式，按订阅分组；未读的一条条「已读」，已读的折叠起来 ----
+// 每种提醒的标签和一句话说明；后端给了结构化字段就用字段，没给就从 message 里取
+const NOTE_KIND = {
+  episodes: ["新集", "accent", ""],
+  maybe: ["可能相关", "warn", "找到一个可能相关的资源，请自己核对是不是这部"],
+  found: ["有资源了", "accent", "找到了新资源"],
+  quality: ["更高清", "info", "出现了更高清的版本"],
+  upgraded: ["已洗版", "accent", "已转存更高清的版本"],
+  auto_saved: ["已转存", "ok", ""],
+  auto_save_failed: ["转存失败", "danger", ""],
+  auto_save_paused: ["转存暂停", "warn", ""],
+  completed: ["已完成", "ok", ""],
+  series_new: ["系列新作", "accent", ""],
+  season_new: ["新的一季", "accent", ""],
+  check_failed: ["检查失败", "warn", ""],
+};
+
+function relTime(ts) {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 60) return "刚刚";
+  if (s < 3600) return Math.floor(s / 60) + " 分钟前";
+  if (s < 86400) return Math.floor(s / 3600) + " 小时前";
+  if (s < 86400 * 7) return Math.floor(s / 86400) + " 天前";
+  return formatTime(ts);
+}
+
+// 结构化字段优先（frontend-api.md），旧通知从文字里拆：「资源标题」和分享链接
+function noteParts(n) {
+  const msg = String(n.message || "");
+  const url = n.url || (msg.match(/https?:\/\/pan\.quark\.cn\/s\/[0-9a-zA-Z]+/) || [])[0] ||
+    (n.share && /^[0-9a-zA-Z]{6,}$/.test(n.share) ? "https://pan.quark.cn/s/" + n.share : "");
+  const share = n.share && /^[0-9a-zA-Z]{6,}$/.test(n.share) ? n.share : (url.match(/\/s\/([0-9a-zA-Z]+)/) || [])[1] || "";
+  const titleM = msg.match(/资源[「『]([^」』]+)[」』]/);
+  const kind = NOTE_KIND[n.type || n.kind];
+  let summary = n.summary || (kind && kind[2]) || "";
+  let path = "";
+  const savedM = msg.match(/转存.*?(\d+)\s*个新?文件到[「『]([^」』]+)[」』]/);
+  if (!summary && savedM) { // 「已自动转存《…》的 N 个新文件到「路径」」→ 短句 + 灰色路径
+    summary = `转存了 ${savedM[1]} 个新文件`;
+    path = savedM[2];
+  }
+  if (!summary) { // 没有固定说法的：去掉片名和链接后的那句话
+    summary = msg.replace(/https?:\/\/\S+/g, "").replace(/^《[^》]+》/, "").replace(/[：:，,]\s*$/, "").trim() || msg;
+  }
+  return {
+    label: kind ? kind[0] : "提醒",
+    tone: kind ? kind[1] : "neutral",
+    summary,
+    title: n.resource_title || (titleM ? titleM[1] : "") || (path ? "保存到 " + path : ""),
+    url,
+    share,
+    pwd: n.pwd || null,
+  };
+}
+
+function noteGroups(list) {
+  const groups = [];
+  const byKey = {};
+  list.forEach((n) => {
+    const key = n.subscription_id != null ? "s" + n.subscription_id : "r" + (n.resource || "");
+    if (!byKey[key]) {
+      byKey[key] = { key, name: n.subscription_name || n.resource || "", notes: [] };
+      groups.push(byKey[key]);
+    }
+    byKey[key].notes.push(n);
+  });
+  return groups;
+}
+
+function renderNotifs() {
+  const unread = notesCache.filter((n) => !n.read);
+  const read = notesCache.filter((n) => n.read);
+  subsUnread.hidden = unread.length === 0;
+  setText(subsUnread, unread.length + " 条新提醒");
+  notifBox.innerHTML = "";
+  if (unread.length) {
+    const head = el("div", "notif-head");
+    head.appendChild(el("span", "notif-count", "新提醒 " + unread.length + " 条"));
+    const all = el("button", "link-btn", "全部已读");
+    all.type = "button";
+    all.addEventListener("click", () => markNotesRead(unread));
+    head.appendChild(all);
+    notifBox.appendChild(head);
+    noteGroups(unread.slice(0, 30)).forEach((g) => notifBox.appendChild(noteGroup(g)));
+  }
+  if (read.length) {
+    const fold = el("details", "notif-read");
+    if (notifBox.dataset.readOpen === "1") fold.open = true;
+    fold.addEventListener("toggle", () => { notifBox.dataset.readOpen = fold.open ? "1" : ""; });
+    fold.appendChild(el("summary", "", "已读的提醒（" + read.length + "）"));
+    noteGroups(read.slice(0, 30)).forEach((g) => fold.appendChild(noteGroup(g)));
+    notifBox.appendChild(fold);
+  }
+}
+
+// 同一个订阅的多条提醒合成一组：组头是片名和季，下面一条一张小卡片
+function noteGroup(g) {
+  const box = el("section", "note-group");
+  const sub = subsCache.find((x) => "s" + x.id === g.key);
+  const head = el("div", "note-group-head");
+  head.appendChild(posterEl(sub && sub.poster, g.name, "tiny"));
+  head.appendChild(el("b", "note-group-name", "《" + tidyTitle(g.name) + "》"));
+  if (g.notes.length > 1) head.appendChild(el("span", "note-group-n", g.notes.length + " 条"));
+  const unread = g.notes.filter((n) => !n.read);
+  if (unread.length > 1) {
+    const all = el("button", "link-btn", "这组已读");
+    all.type = "button";
+    all.addEventListener("click", () => markNotesRead(unread));
+    head.appendChild(all);
+  }
+  box.appendChild(head);
+  const ul = el("ul", "note-cards");
+  g.notes.forEach((n) => ul.appendChild(noteItem(n)));
+  box.appendChild(ul);
+  return box;
+}
+
+function noteItem(n) {
+  const p = noteParts(n);
+  const li = el("li", "note-card" + (n.read ? " is-read" : ""));
+  const top = el("div", "note-top");
+  top.append(el("span", "note-tag tone-" + p.tone, p.label), el("span", "note-summary", p.summary));
+  const time = el("time", "note-time", relTime(n.ts));
+  time.title = formatTime(n.ts);
+  top.appendChild(time);
+  li.appendChild(top);
+  if (p.title) {
+    const t = el("p", "note-res", p.title);
+    t.title = p.title;
+    li.appendChild(t);
+  }
+  const acts = el("div", "note-acts");
+  if (p.url) {
+    const open = el("a", "ghost-btn small", "打开链接");
+    open.href = p.url;
+    open.target = "_blank";
+    open.rel = "noopener noreferrer";
+    acts.appendChild(open);
+  }
+  if (p.share && saveEnabled && (n.type || n.kind) !== "auto_saved") {
+    const save = saveButton({ share: p.share, pwd: p.pwd });
+    save.className = "ghost-btn small";
+    setText(save, "转存");
+    acts.appendChild(save);
+  }
+  if (!n.read) {
+    const btn = el("button", "ghost-btn small note-read-btn", "已读");
+    btn.type = "button";
+    btn.setAttribute("aria-label", "标为已读");
+    btn.addEventListener("click", () => {
+      li.classList.add("leaving");
+      setTimeout(() => markNotesRead([n]), 220);
+    });
+    acts.appendChild(btn);
+  }
+  if (acts.children.length) li.appendChild(acts);
+  return li;
+}
+
+// 先在本地标记（界面立即收起），再告诉服务器；失败时下次刷新会恢复
+// 后端目前只支持「全部标记已读」；单条已读先记在本机，全部读完时再告诉服务器
+const NOTES_READ_KEY = "qp_notes_read";
+function localReadIds() {
+  try { return new Set(JSON.parse(localStorage.getItem(NOTES_READ_KEY) || "[]")); } catch { return new Set(); }
+}
+function saveLocalRead(ids) {
+  try { localStorage.setItem(NOTES_READ_KEY, JSON.stringify([...ids].slice(-500))); } catch { /* 无痕模式等 */ }
+}
+function applyLocalRead(list) {
+  const ids = localReadIds();
+  list.forEach((n) => { if (ids.has(n.id)) n.read = true; });
+  return list;
+}
+
+async function markNotesRead(list) {
+  list.forEach((n) => { n.read = true; });
+  renderNotifs();
+  if (notesCache.some((n) => !n.read)) {
+    const ids = localReadIds();
+    list.forEach((n) => { if (n.id !== undefined) ids.add(n.id); });
+    saveLocalRead(ids);
+    return;
+  }
+  saveLocalRead(new Set());
+  await fetch("/api/notifications/read?" + cidParam(), { method: "POST" }).catch(() => {});
 }
 
 // 「订阅整个系列」建的订阅按系列折叠成一组，放在该系列第一部出现的位置
@@ -2335,11 +2516,6 @@ subscribeBtn.addEventListener("click", () => {
 // 订阅面板里的「＋ 新订阅」：不用先搜资源
 newSubBtn.addEventListener("click", () => openSubscribeDialog({ query: "", resource: "", empty: true }));
 
-subsPanel.addEventListener("toggle", async () => {
-  if (!subsPanel.open || subsUnread.hidden) return;
-  await fetch("/api/notifications/read?" + cidParam(), { method: "POST" }).catch(() => {});
-  subsUnread.hidden = true;
-});
 
 loadSubs();
 setInterval(loadSubs, 5 * 60 * 1000);
