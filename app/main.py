@@ -1062,13 +1062,33 @@ def create_app(
         return {"deleted": True}
 
     @app.get("/api/notifications", response_model=list[Notification])
-    async def notifications(request: Request, client_id: str = ClientId) -> list[Notification]:
-        return await _store_or_404().notifications(await _owner(request, client_id))
+    async def notifications(
+        request: Request, client_id: str = ClientId, include_read: bool = False,
+    ) -> list[Notification]:
+        """最近的通知，默认只返回未读的（已读的、删掉的、已自动收起的都不返回）。"""
+        return await _store_or_404().notifications(
+            await _owner(request, client_id), include_read=include_read)
 
     @app.post("/api/notifications/read")
     async def notifications_read(request: Request, client_id: str = ClientId) -> dict:
+        """全部标为已读。"""
         await _store_or_404().mark_read(await _owner(request, client_id))
         return {"ok": True}
+
+    @app.post("/api/notifications/{nid}/read")
+    async def notification_read(nid: int, request: Request, client_id: str = ClientId) -> dict:
+        """单条标为已读。"""
+        if not await _store_or_404().mark_notification(await _owner(request, client_id), nid):
+            raise HTTPException(status_code=404, detail="通知不存在")
+        return {"ok": True}
+
+    @app.delete("/api/notifications/{nid}")
+    async def notification_delete(nid: int, request: Request, client_id: str = ClientId) -> dict:
+        """删除一条通知（之后同一个分享也不会再提醒）。"""
+        if not await _store_or_404().mark_notification(
+                await _owner(request, client_id), nid, dismiss=True):
+            raise HTTPException(status_code=404, detail="通知不存在")
+        return {"deleted": True}
 
     SESSION_COOKIE = "qp_quark"
 

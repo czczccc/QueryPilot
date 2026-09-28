@@ -162,6 +162,7 @@ _MIGRATIONS = [
     ("subscriptions", "schedule", "TEXT"),  # 播出日历（JSON）
     ("subscriptions", "season_year", "TEXT"),
     ("subscriptions", "last_error", "TEXT"),
+    ("notifications", "dismissed", "INTEGER NOT NULL DEFAULT 0"),  # 用户删掉的（留着防重复提醒）
     ("subscriptions", "collection_id", "TEXT"),
     ("subscriptions", "collection_name", "TEXT"),
     ("subscriptions", "collection_index", "INTEGER"),
@@ -602,13 +603,17 @@ class LinkStore:
                     "message, share, ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (sub.id, client_id, sub.resource, kind, message, share, now),
                 )
+            self._tidy_notifications(sub, now, archived=False)
             self._conn.commit()
 
-    def _notifications(self, client_id: str, limit: int) -> list[Notification]:
+    def _notifications(
+        self, client_id: str, limit: int, include_read: bool
+    ) -> list[Notification]:
+        unread = "" if include_read else " AND read = 0"
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM notifications WHERE client_id = ? ORDER BY ts DESC, id DESC "
-                "LIMIT ?",
+                f"SELECT * FROM notifications WHERE client_id = ? AND dismissed = 0{unread} "
+                "ORDER BY ts DESC, id DESC LIMIT ?",
                 (client_id, limit),
             ).fetchall()
         return [
@@ -619,6 +624,24 @@ class LinkStore:
             )
             for r in rows
         ]
+
+    def _tidy_notifications(self, sub: Subscription, now: float, archived: bool) -> None:
+        """自动收起（标已读）过时的通知（调用方持有锁）：
+        - 同一订阅的「可能相关」只留最新一条；
+        - 剧集这一季在网盘里已经存齐：这次检查之前的通知都收起；
+        - 订阅完成移入历史：除「订阅完成」外都收起。"""
+        self._conn.execute(
+            "UPDATE notifications SET read = 1 WHERE subscription_id = ? AND kind = 'maybe' "
+            "AND id < (SELECT MAX(id) FROM notifications WHERE subscription_id = ? "
+            "AND kind = 'maybe')", (sub.id, sub.id))
+        if archived:
+            self._conn.execute(
+                "UPDATE notifications SET read = 1 WHERE subscription_id = ? "
+                "AND kind <> 'completed'", (sub.id,))
+        elif sub.lack_episodes == []:
+            self._conn.execute(
+                "UPDATE notifications SET read = 1 WHERE subscription_id = ? AND ts < ?",
+                (sub.id, now))
 
     def _mark_read(self, client_id: str) -> None:
         with self._lock:
@@ -717,6 +740,7 @@ class LinkStore:
             )
             if sub.series:
                 self._gc_collection(client_id, sub.collection_id)
+            self._tidy_notifications(sub, now, archived=True)
             self._conn.commit()
         return int(cur.lastrowid or 0)
 
@@ -945,8 +969,18 @@ class LinkStore:
         """写回检查结果，并记下通知 (kind, message, share)。"""
         await asyncio.to_thread(self._update_subscription, sub, time.time(), notes, client_id)
 
-    async def notifications(self, client_id: str, limit: int = 30) -> list[Notification]:
-        return await asyncio.to_thread(self._notifications, client_id, limit)
+    async def notifications(
+        self, client_id: str, limit: int = 30, include_read: bool = True
+    ) -> list[Notification]:
+        """最近的通知（用户删掉的不返回）；`include_read=False` 只要未读的。"""
+        return await asyncio.to_thread(self._notifications, client_id, limit, include_read)
+
+    async def mark_notification(self, client_id: str, nid: int, dismiss: bool = False) -> bool:
+        """单条标已读；`dismiss` 时同时删掉（列表里不再出现，但仍用于避免重复提醒）。"""
+        extra = ", dismissed = 1" if dismiss else ""
+        return await asyncio.to_thread(
+            self._exec, f"UPDATE notifications SET read = 1{extra} WHERE id = ? AND client_id = ?",
+            (nid, client_id)) > 0
 
     async def mark_read(self, client_id: str) -> None:
         await asyncio.to_thread(self._mark_read, client_id)
