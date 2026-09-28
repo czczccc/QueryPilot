@@ -41,6 +41,7 @@ class MediaInfo:
     id: str | None = None  # TMDB id 或豆瓣 id（看 source）
     poster: str | None = None  # 海报图地址
     episodes: dict[int, int] = field(default_factory=dict)  # 季 → 总集数（剧集）
+    season_years: dict[int, str] = field(default_factory=dict)  # 季 → 开播年份（剧集）
 
     def brief(self) -> dict:
         return {k: v for k, v in asdict(self).items() if v not in (None, [], "")}
@@ -113,6 +114,12 @@ async def search_tmdb(
                 for x in d.get("seasons") or []
                 if isinstance(x, dict) and isinstance(x.get("season_number"), int)
                 and x["season_number"] > 0 and x.get("episode_count")
+            },
+            season_years={
+                int(x["season_number"]): y
+                for x in d.get("seasons") or []
+                if isinstance(x, dict) and isinstance(x.get("season_number"), int)
+                and x["season_number"] > 0 and (y := _year(x.get("air_date")))
             },
         )
 

@@ -66,6 +66,15 @@ def passes_filters(link: QuarkLink, include: str | None, exclude: str | None) ->
     return not (exclude and any(w in text for w in exclude.lower().split()))
 
 
+def check_error_text(exc: Exception) -> str:
+    """检查失败的原因，给用户看：不带地址、key 等内部细节。"""
+    if isinstance(exc, httpx.TimeoutException):
+        return "搜索服务响应超时，稍后会自动重试"
+    if isinstance(exc, httpx.HTTPError):
+        return "搜索服务暂时不可用，稍后会自动重试"
+    return "检查出错，稍后会自动重试"
+
+
 def _link_text(link: QuarkLink) -> str:
     url = f"https://pan.quark.cn/s/{link.share}"
     return f"{url}（提取码 {link.pwd}）" if link.pwd else url
@@ -284,6 +293,9 @@ class SubscriptionWatcher:
             if eps:
                 sub.schedule = eps
                 await self._store.set_schedule(sub.id, eps)
+                years = sorted(e.air_date[:4] for e in eps if e.air_date)
+                if years:
+                    sub.season_year = years[0]
                 last = max(e.episode for e in eps)
                 if not sub.manual_total and last > (sub.total_episodes or 0):
                     sub.total_episodes = last
@@ -293,6 +305,7 @@ class SubscriptionWatcher:
         infos = await self.lookup(strip_season(sub.resource), sub.year, fresh=True)
         for info in infos:
             if info.id in (sub.tmdb_id, sub.douban_id):
+                sub.season_year = info.season_years.get(sub.season or 1) or sub.season_year
                 total = info.episodes.get(sub.season or 1)
                 if total and total > (sub.total_episodes or 0):
                     sub.total_episodes = total
@@ -305,9 +318,17 @@ class SubscriptionWatcher:
         for client_id, sub in subs[:limit]:
             try:
                 total += len(await self.check(client_id, sub))
-            except Exception:  # 单个订阅失败不影响其余
+            except Exception as exc:  # 单个订阅失败不影响其余
                 logger.exception("订阅检查失败 id=%s", sub.id)
+                await self.failed(sub, exc)
         return total
+
+    async def failed(self, sub: Subscription, exc: Exception) -> None:
+        """检查出错：把原因（不带内部细节）记到订阅上，卡片显示「上次检查失败：…」。"""
+        try:
+            await self._store.set_check_error(sub.id, check_error_text(exc))
+        except Exception:
+            logger.exception("记录订阅检查失败原因出错 id=%s", sub.id)
 
     async def _push(self, notes: list[tuple[str, str, str | None]]) -> None:
         if not self._webhook:

@@ -431,6 +431,8 @@ def create_app(
                     total = match.episodes.get(f["season"])
                     if total:
                         f["total_episodes"] = total
+                    if match.season_years.get(f["season"]):
+                        f["season_year"] = match.season_years[f["season"]]
         if f.get("media") == "tv":
             f.setdefault("season", 1)
         else:
@@ -632,8 +634,9 @@ def create_app(
         try:
             with llm.scope(allowed=allowed) as meter:
                 notes = await app.state.watcher.check(owner, sub, sync_save=True)
-        except Exception:
+        except Exception as exc:
             logger.exception("订阅立即检查失败 id=%s", sub.id)
+            await app.state.watcher.failed(sub, exc)
             return []
         if quota is not None and owner.startswith("u:"):
             await quota.record(f"user:{owner[2:]}", SYSTEM, meter, searched=False)
