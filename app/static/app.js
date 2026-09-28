@@ -2169,6 +2169,24 @@ async function subscribeCollection(payload, name) {
   return null;
 }
 
+// 订阅一部剧的全部季：后端为每一季建一个订阅（已订阅 / 已完成的季跳过）
+async function subscribeSeasons(payload, name) {
+  const res = await subApi("/seasons", "POST", Object.assign({ client_id: clientId }, payload));
+  if (res.ok) {
+    const list = Array.isArray(res.body) ? res.body : [];
+    toast(list.length
+      ? "已订阅《" + name + "》的 " + list.length + " 季" + (payload.auto_join ? "，以后出新季会自动加入" : "")
+      : "《" + name + "》的每一季都已经订阅过或已完成", "ok", 4000);
+    subsTab = "tv";
+    loadSubs();
+    setTimeout(loadSubs, 45000);
+    return list[0] || { resource: name };
+  }
+  const why = payload.auto_save ? "自动转存需要先扫码登录夸克" : "订阅追剧需要先扫码登录夸克";
+  if (await loginIfNeeded(res, why)) return subscribeSeasons(payload, name);
+  return null;
+}
+
 // 片名末尾的全角波浪号（如「无职转生～到了异世界就拿出真本事～」）去掉再拼季，
 // 否则显示成「…本事～ 第3季」
 function tidyTitle(t) {
@@ -2214,6 +2232,11 @@ function candidateOption(c, idx, name) {
       o.value = String(s);
       sel.appendChild(o);
     });
+    if (seasons.length > 1) { // 一次订阅全部季，不用一季一季点
+      const all = el("option", "", "全部季（" + seasons.length + " 季）");
+      all.value = "all";
+      sel.appendChild(all);
+    }
     sel.value = String(seasons[seasons.length - 1]); // 默认最新一季
     sel.addEventListener("click", () => { radio.checked = true; radio.dispatchEvent(new Event("change", { bubbles: true })); });
     opt.appendChild(sel);
@@ -2301,8 +2324,8 @@ function openSubscribeDialog(target, opts) {
     joinCb.type = "checkbox";
     const joinTrack = el("span", "switch-track");
     joinTrack.setAttribute("aria-hidden", "true");
-    joinSw.append(joinCb, joinTrack, "以后出新作自动加入");
-    joinSw.title = "每天查一次这个系列有没有新片，有就自动订阅并通知你";
+    const joinText = el("span", "", "以后出新作自动加入");
+    joinSw.append(joinCb, joinTrack, joinText);
     joinSw.hidden = true;
     optsBox.appendChild(joinSw);
     const more = el("details", "sd-more");
@@ -2345,9 +2368,15 @@ function openSubscribeDialog(target, opts) {
     const syncOpts = () => { // 电影没有起始集
       const c = selected();
       rulesGrid.querySelectorAll(".tv-only").forEach((f) => { f.hidden = !!c && c.media === "movie"; });
-      const part = list.querySelector(".cand input:checked") && list.querySelector(".cand input:checked").closest(".cand").querySelector(".cand-part");
-      joinSw.hidden = !(part && part.value === "all");
-      setText(ok, joinSw.hidden ? "订阅" : "订阅整个系列");
+      const on = list.querySelector(".cand input:checked");
+      const pick = on && on.closest(".cand").querySelector(".cand-part, .cand-season");
+      const all = !!pick && pick.value === "all";
+      const isTv = all && pick.classList.contains("cand-season") && !pick.classList.contains("cand-part");
+      joinSw.hidden = !all;
+      setText(joinText, isTv ? "以后出新季自动加入" : "以后出新作自动加入");
+      joinSw.title = isTv ? "每天查一次这部剧有没有新的一季，有就自动订阅并通知你"
+        : "每天查一次这个系列有没有新片，有就自动订阅并通知你";
+      setText(ok, !all ? "订阅" : isTv ? "订阅全部季" : "订阅整个系列");
       list.querySelectorAll(".cand").forEach((l) => l.classList.toggle("on", l.querySelector("input").checked));
     };
     list.addEventListener("change", syncOpts);
@@ -2394,6 +2423,25 @@ function openSubscribeDialog(target, opts) {
         ok.classList.add("loading");
         dlg.close();
         const sub = await subscribeCollection(body, collectionName(c.collection.name) || c.title);
+        if (sub || closed) { finish(sub); return; }
+        dlg.showModal();
+        ok.disabled = false;
+        ok.classList.remove("loading");
+        return;
+      }
+      const seasonSel = c && c.media === "tv" ? list.querySelector(".cand.on .cand-season") : null;
+      if (seasonSel && seasonSel.value === "all") { // 全部季：每季一个订阅，列表里折叠成一组
+        const rules = readRules(rulesGrid, null);
+        const t = tidyTitle(c.title) || c.title;
+        const body = { media: "tv", resource: t, query: t.length >= 2 ? t : name, year: c.year || undefined,
+          poster: c.poster || undefined, auto_join: joinCb.checked, auto_save: !!(autoCb && autoCb.checked) };
+        body[c.source === "douban" ? "douban_id" : "tmdb_id"] = c.id ? String(c.id) : undefined;
+        ["resolution", "include", "exclude"].forEach((k) => { if (rules[k] !== undefined && rules[k] !== "") body[k] = rules[k]; });
+        Object.keys(body).forEach((k) => body[k] === undefined && delete body[k]);
+        ok.disabled = true;
+        ok.classList.add("loading");
+        dlg.close();
+        const sub = await subscribeSeasons(body, t);
         if (sub || closed) { finish(sub); return; }
         dlg.showModal();
         ok.disabled = false;
