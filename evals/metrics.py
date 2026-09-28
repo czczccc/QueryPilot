@@ -9,8 +9,7 @@ import re
 from dataclasses import dataclass, field
 
 from app.models import QuarkLink
-from app.services.memory import resource_key
-from app.services.relevance import contains_name, seasons_in, years_in
+from app.services.relevance import contains_name, norm, seasons_in, years_in
 
 _BRACKET = re.compile(r"[《》]")
 
@@ -28,7 +27,7 @@ class Case:
 
     @property
     def names(self) -> list[str]:
-        keys = [resource_key(_BRACKET.sub("", n)) for n in [self.title, *self.aliases]]
+        keys = [norm(_BRACKET.sub("", n)) for n in [self.title, *self.aliases]]
         return [k for k in dict.fromkeys(keys) if len(k) >= 2]
 
 
@@ -40,7 +39,7 @@ def gold(link: QuarkLink, case: Case, labels: dict[str, bool] | None = None) -> 
     if not texts:
         return None
     joined = " ".join(texts)
-    if not any(contains_name(n, resource_key(joined)) for n in case.names):
+    if not any(contains_name(n, norm(joined)) for n in case.names):
         return False
     if case.year:
         years = years_in(joined)
