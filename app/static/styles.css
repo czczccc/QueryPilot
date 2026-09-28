@@ -1945,17 +1945,43 @@ body.searched .hero .memory-stats { display: none; }
 .primary-btn.danger-btn { background: var(--danger); box-shadow: none; }
 .primary-btn.danger-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
-/* ---- 订阅提醒：已读按钮 + 已读折叠 ---- */
-.notif-box { display: grid; gap: 0.35rem; }
+/* ---- 订阅提醒：卡片，按订阅分组；已读折叠 ---- */
+.notif-box { display: grid; gap: 0.6rem; margin-bottom: 0.4rem; }
 .notif-box:empty { display: none; }
 .notif-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; font-size: 0.8rem; }
 .notif-count { font-weight: 600; color: var(--text); }
-.notif-list li { display: flex; align-items: flex-start; gap: 0.6rem; transition: opacity 0.2s ease, transform 0.2s ease; }
-.notif-list li::before { flex: none; }
-.notif-list li.leaving { opacity: 0; transform: translateX(12px); }
-.note-text { flex: 1; min-width: 0; }
-.note-time { margin-right: 0.6em; font-weight: 500; color: var(--muted); }
-.note-text a { color: var(--accent); }
-.note-read-btn { flex: none; padding: 0.15rem 0.55rem; font-size: 0.75rem; }
+.note-group { display: grid; gap: 0.4rem; }
+.note-group-head { display: flex; align-items: center; gap: 0.5rem; min-width: 0; font-size: 0.85rem; }
+.note-group-head .poster.tiny { width: 22px; flex: none; border-radius: 5px; }
+.note-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note-group-n { flex: none; font-size: 0.74rem; color: var(--muted); }
+.note-group-head .link-btn { margin-left: auto; flex: none; }
+.note-cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.4rem; }
+.note-card {
+  display: grid; gap: 0.3rem; padding: 0.6rem 0.75rem; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface-solid); transition: opacity 0.2s ease, transform 0.2s ease;
+  animation: fade-up 0.3s var(--ease) both;
+}
+.note-card.is-read { background: transparent; }
+.note-card.is-read .note-summary { color: var(--muted); }
+.note-card.leaving { opacity: 0; transform: translateX(12px); }
+.note-top { display: flex; align-items: baseline; gap: 0.5rem; min-width: 0; }
+.note-tag { flex: none; padding: 0.08rem 0.45rem; font-size: 0.72rem; font-weight: 600; border-radius: 6px; color: var(--muted); background: var(--neutral-soft); }
+.note-tag.tone-warn { color: var(--warn); background: var(--warn-soft); }
+.note-tag.tone-ok { color: var(--ok); background: var(--ok-soft, rgba(22, 163, 74, 0.12)); }
+.note-tag.tone-accent { color: var(--accent); background: var(--accent-soft); }
+.note-tag.tone-info { color: var(--info); background: var(--info-soft, rgba(14, 165, 233, 0.12)); }
+.note-tag.tone-danger { color: var(--danger); background: var(--danger-soft); }
+.note-summary { flex: 1; min-width: 0; font-size: 0.84rem; color: var(--text); overflow-wrap: anywhere; }
+.note-time { flex: none; font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
+.note-res { margin: 0; font-size: 0.76rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.4rem; }
+.note-acts .ghost-btn { padding: 0.2rem 0.65rem; font-size: 0.76rem; text-decoration: none; }
+.notif-read { display: grid; gap: 0.5rem; }
+.notif-read[open] { gap: 0.5rem; }
 .notif-read summary { font-size: 0.8rem; color: var(--muted); cursor: pointer; padding: 0.2rem 0; }
-.notif-read .notif-list li { font-weight: 400; }
+@media (max-width: 600px) {
+  .note-top { flex-wrap: wrap; }
+  .note-summary { flex-basis: 100%; order: 3; }
+  .note-time { margin-left: auto; }
+}

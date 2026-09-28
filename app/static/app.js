@@ -928,14 +928,82 @@ async function loadSubs() {
       if (subscribeBox.hidden) renderSubscribeBox(lastResult);
     }
 
-    notesCache = notes;
+    notesCache = applyLocalRead(notes);
     renderNotifs();
 
     renderSubsTab();
   } catch (_) { /* 网络问题：下次再试 */ }
 }
 
-// ---- 订阅提醒：未读的一条条「已读」，已读的折叠起来 ----
+// ---- 订阅提醒：卡片样式，按订阅分组；未读的一条条「已读」，已读的折叠起来 ----
+// 每种提醒的标签和一句话说明；后端给了结构化字段就用字段，没给就从 message 里取
+const NOTE_KIND = {
+  episodes: ["新集", "accent", ""],
+  maybe: ["可能相关", "warn", "找到一个可能相关的资源，请自己核对是不是这部"],
+  found: ["有资源了", "accent", "找到了新资源"],
+  quality: ["更高清", "info", "出现了更高清的版本"],
+  upgraded: ["已洗版", "accent", "已转存更高清的版本"],
+  auto_saved: ["已转存", "ok", ""],
+  auto_save_failed: ["转存失败", "danger", ""],
+  auto_save_paused: ["转存暂停", "warn", ""],
+  completed: ["已完成", "ok", ""],
+  series_new: ["系列新作", "accent", ""],
+  season_new: ["新的一季", "accent", ""],
+  check_failed: ["检查失败", "warn", ""],
+};
+
+function relTime(ts) {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 60) return "刚刚";
+  if (s < 3600) return Math.floor(s / 60) + " 分钟前";
+  if (s < 86400) return Math.floor(s / 3600) + " 小时前";
+  if (s < 86400 * 7) return Math.floor(s / 86400) + " 天前";
+  return formatTime(ts);
+}
+
+// 结构化字段优先（frontend-api.md），旧通知从文字里拆：「资源标题」和分享链接
+function noteParts(n) {
+  const msg = String(n.message || "");
+  const url = n.url || (msg.match(/https?:\/\/pan\.quark\.cn\/s\/[0-9a-zA-Z]+/) || [])[0] ||
+    (n.share && /^[0-9a-zA-Z]{6,}$/.test(n.share) ? "https://pan.quark.cn/s/" + n.share : "");
+  const share = n.share && /^[0-9a-zA-Z]{6,}$/.test(n.share) ? n.share : (url.match(/\/s\/([0-9a-zA-Z]+)/) || [])[1] || "";
+  const titleM = msg.match(/资源[「『]([^」』]+)[」』]/);
+  const kind = NOTE_KIND[n.type || n.kind];
+  let summary = n.summary || (kind && kind[2]) || "";
+  let path = "";
+  const savedM = msg.match(/转存.*?(\d+)\s*个新?文件到[「『]([^」』]+)[」』]/);
+  if (!summary && savedM) { // 「已自动转存《…》的 N 个新文件到「路径」」→ 短句 + 灰色路径
+    summary = `转存了 ${savedM[1]} 个新文件`;
+    path = savedM[2];
+  }
+  if (!summary) { // 没有固定说法的：去掉片名和链接后的那句话
+    summary = msg.replace(/https?:\/\/\S+/g, "").replace(/^《[^》]+》/, "").replace(/[：:，,]\s*$/, "").trim() || msg;
+  }
+  return {
+    label: kind ? kind[0] : "提醒",
+    tone: kind ? kind[1] : "neutral",
+    summary,
+    title: n.resource_title || (titleM ? titleM[1] : "") || (path ? "保存到 " + path : ""),
+    url,
+    share,
+    pwd: n.pwd || null,
+  };
+}
+
+function noteGroups(list) {
+  const groups = [];
+  const byKey = {};
+  list.forEach((n) => {
+    const key = n.subscription_id != null ? "s" + n.subscription_id : "r" + (n.resource || "");
+    if (!byKey[key]) {
+      byKey[key] = { key, name: n.subscription_name || n.resource || "", notes: [] };
+      groups.push(byKey[key]);
+    }
+    byKey[key].notes.push(n);
+  });
+  return groups;
+}
+
 function renderNotifs() {
   const unread = notesCache.filter((n) => !n.read);
   const read = notesCache.filter((n) => n.read);
@@ -949,45 +1017,69 @@ function renderNotifs() {
     all.type = "button";
     all.addEventListener("click", () => markNotesRead(unread));
     head.appendChild(all);
-    const ul = el("ul", "notif-list");
-    unread.slice(0, 20).forEach((n) => ul.appendChild(noteItem(n)));
-    notifBox.append(head, ul);
+    notifBox.appendChild(head);
+    noteGroups(unread.slice(0, 30)).forEach((g) => notifBox.appendChild(noteGroup(g)));
   }
   if (read.length) {
     const fold = el("details", "notif-read");
     if (notifBox.dataset.readOpen === "1") fold.open = true;
     fold.addEventListener("toggle", () => { notifBox.dataset.readOpen = fold.open ? "1" : ""; });
     fold.appendChild(el("summary", "", "已读的提醒（" + read.length + "）"));
-    const ul = el("ul", "notif-list");
-    read.slice(0, 30).forEach((n) => ul.appendChild(noteItem(n)));
-    fold.appendChild(ul);
+    noteGroups(read.slice(0, 30)).forEach((g) => fold.appendChild(noteGroup(g)));
     notifBox.appendChild(fold);
   }
 }
 
-// 提醒文字里的分享链接可以直接点开
-function linkify(text) {
-  const frag = document.createDocumentFragment();
-  let last = 0;
-  String(text).replace(/https?:\/\/[^\s，。；」』）)]+/g, (url, at) => {
-    if (at > last) frag.appendChild(document.createTextNode(text.slice(last, at)));
-    const a = el("a", "", url);
-    a.href = url;
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    frag.appendChild(a);
-    last = at + url.length;
-    return url;
-  });
-  if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
-  return frag;
+// 同一个订阅的多条提醒合成一组：组头是片名和季，下面一条一张小卡片
+function noteGroup(g) {
+  const box = el("section", "note-group");
+  const sub = subsCache.find((x) => "s" + x.id === g.key);
+  const head = el("div", "note-group-head");
+  head.appendChild(posterEl(sub && sub.poster, g.name, "tiny"));
+  head.appendChild(el("b", "note-group-name", "《" + tidyTitle(g.name) + "》"));
+  if (g.notes.length > 1) head.appendChild(el("span", "note-group-n", g.notes.length + " 条"));
+  const unread = g.notes.filter((n) => !n.read);
+  if (unread.length > 1) {
+    const all = el("button", "link-btn", "这组已读");
+    all.type = "button";
+    all.addEventListener("click", () => markNotesRead(unread));
+    head.appendChild(all);
+  }
+  box.appendChild(head);
+  const ul = el("ul", "note-cards");
+  g.notes.forEach((n) => ul.appendChild(noteItem(n)));
+  box.appendChild(ul);
+  return box;
 }
 
 function noteItem(n) {
-  const li = el("li", (n.read ? "" : "unread-item ") + "kind-" + n.kind);
-  const text = el("span", "note-text");
-  text.append(el("span", "note-time", formatTime(n.ts)), linkify(n.message));
-  li.appendChild(text);
+  const p = noteParts(n);
+  const li = el("li", "note-card" + (n.read ? " is-read" : ""));
+  const top = el("div", "note-top");
+  top.append(el("span", "note-tag tone-" + p.tone, p.label), el("span", "note-summary", p.summary));
+  const time = el("time", "note-time", relTime(n.ts));
+  time.title = formatTime(n.ts);
+  top.appendChild(time);
+  li.appendChild(top);
+  if (p.title) {
+    const t = el("p", "note-res", p.title);
+    t.title = p.title;
+    li.appendChild(t);
+  }
+  const acts = el("div", "note-acts");
+  if (p.url) {
+    const open = el("a", "ghost-btn small", "打开链接");
+    open.href = p.url;
+    open.target = "_blank";
+    open.rel = "noopener noreferrer";
+    acts.appendChild(open);
+  }
+  if (p.share && saveEnabled && (n.type || n.kind) !== "auto_saved") {
+    const save = saveButton({ share: p.share, pwd: p.pwd });
+    save.className = "ghost-btn small";
+    setText(save, "转存");
+    acts.appendChild(save);
+  }
   if (!n.read) {
     const btn = el("button", "ghost-btn small note-read-btn", "已读");
     btn.type = "button";
@@ -996,22 +1088,38 @@ function noteItem(n) {
       li.classList.add("leaving");
       setTimeout(() => markNotesRead([n]), 220);
     });
-    li.appendChild(btn);
+    acts.appendChild(btn);
   }
+  if (acts.children.length) li.appendChild(acts);
   return li;
 }
 
 // 先在本地标记（界面立即收起），再告诉服务器；失败时下次刷新会恢复
+// 后端目前只支持「全部标记已读」；单条已读先记在本机，全部读完时再告诉服务器
+const NOTES_READ_KEY = "qp_notes_read";
+function localReadIds() {
+  try { return new Set(JSON.parse(localStorage.getItem(NOTES_READ_KEY) || "[]")); } catch { return new Set(); }
+}
+function saveLocalRead(ids) {
+  try { localStorage.setItem(NOTES_READ_KEY, JSON.stringify([...ids].slice(-500))); } catch { /* 无痕模式等 */ }
+}
+function applyLocalRead(list) {
+  const ids = localReadIds();
+  list.forEach((n) => { if (ids.has(n.id)) n.read = true; });
+  return list;
+}
+
 async function markNotesRead(list) {
-  const ids = list.map((n) => n.id).filter((id) => id !== undefined);
   list.forEach((n) => { n.read = true; });
   renderNotifs();
-  const allUnread = !notesCache.some((n) => !n.read);
-  await fetch("/api/notifications/read?" + cidParam(), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(allUnread ? {} : { ids }),
-  }).catch(() => {});
+  if (notesCache.some((n) => !n.read)) {
+    const ids = localReadIds();
+    list.forEach((n) => { if (n.id !== undefined) ids.add(n.id); });
+    saveLocalRead(ids);
+    return;
+  }
+  saveLocalRead(new Set());
+  await fetch("/api/notifications/read?" + cidParam(), { method: "POST" }).catch(() => {});
 }
 
 // 「订阅整个系列」建的订阅按系列折叠成一组，放在该系列第一部出现的位置
