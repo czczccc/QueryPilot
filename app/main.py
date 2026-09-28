@@ -29,6 +29,7 @@ from app.config import load_settings
 from app.models import (
     AgentSearchResponse,
     AgentStep,
+    CollectionSubscribeRequest,
     FeedbackRequest,
     MediaCandidate,
     Notification,
@@ -38,6 +39,8 @@ from app.models import (
     SaveRequest,
     SaveResponse,
     SearchRequest,
+    SeriesSubscription,
+    SeriesUpdate,
     SubscribeRequest,
     Subscription,
     SubscriptionHistory,
@@ -405,7 +408,8 @@ def create_app(
         """订阅的条目信息：前端选好的优先，缺的用 TMDB / 豆瓣补；都没有就按关键词订阅。"""
         f: dict = {k: getattr(req, k) for k in (
             "media", "season", "year", "tmdb_id", "douban_id", "poster", "start_episode",
-            "resolution", "include", "exclude", "upgrade_to") if getattr(req, k) is not None}
+            "resolution", "include", "exclude", "upgrade_to", "collection_id", "collection_name",
+            "collection_index") if getattr(req, k) is not None}
         if req.upgrade:
             f["upgrade"] = True
         if f.get("season") is None:
@@ -476,6 +480,85 @@ def create_app(
         if req.auto_save or search_on_subscribe:
             _spawn_check(owner, sub)  # 立即在后台搜一次：已有资源就马上通知 / 转存
         return sub
+
+    def _spawn_checks(owner: str, subs: list[Subscription]) -> None:
+        """一次建了多个订阅（整个系列）：后台逐个检查，不同时发起一堆搜索。"""
+        async def run() -> None:
+            for sub in subs:
+                if _cooldown_ok(sub.id):
+                    await _sync_check(owner, sub)
+
+        task = asyncio.create_task(run())
+        _bg_tasks.add(task)
+        task.add_done_callback(_bg_tasks.discard)
+
+    @app.post("/api/subscriptions/collection", response_model=list[Subscription])
+    async def subscribe_collection(
+        req: CollectionSubscribeRequest, request: Request, _: None = Depends(rate_limit_dep)
+    ) -> list[Subscription]:
+        """订阅整个系列：每部建一个电影订阅（共用这组规则），跳过已订阅的和订阅历史里完成过的。
+
+        整个系列只占 1 个订阅名额；`auto_join` 打开时以后出了新的一部会自动订阅并通知。
+        还没上映的也建订阅（状态待定），上映后才开始搜。返回这次新建的订阅。"""
+        store = _store_or_404()
+        user = await _user_cookie(request)
+        if login_enabled and user is None:
+            raise HTTPException(status_code=401, detail="订阅追剧需要先扫码登录夸克")
+        if req.auto_save and user is None:
+            raise HTTPException(status_code=401, detail="自动转存需要先扫码登录夸克")
+        owner = f"u:{user[3]}" if user else req.client_id
+        fetch = getattr(media_lookup, "collection", None)
+        info = await fetch(req.collection_id) if fetch is not None else None
+        if info is None:
+            raise HTTPException(status_code=404, detail="没找到这个系列（需要配置 TMDB）")
+        settings = req.model_dump(include={
+            "auto_save", "resolution", "include", "exclude", "upgrade", "upgrade_to"})
+        for k in ("include", "exclude"):
+            settings[k] = (settings[k] or "").strip() or None
+        if not await store.add_collection(owner, info.id, info.name, info.poster, req.auto_join,
+                                          settings, [p.id for p in info.parts]):
+            raise HTTPException(status_code=409, detail="订阅数已达上限（20 个）")
+        done = await store.history_tmdb_ids(owner)
+        created = []
+        for part in info.parts:
+            if part.id in done:
+                continue
+            sub = await app.state.watcher.add_part(owner, info, part, settings)
+            if sub is not None:
+                created.append(sub)
+        if created and (req.auto_save or search_on_subscribe):
+            _spawn_checks(owner, [x for x in created if x.state == "new"])
+        return created
+
+    @app.get("/api/subscriptions/collections", response_model=list[SeriesSubscription])
+    async def list_collections(
+        request: Request, client_id: str = ClientId
+    ) -> list[SeriesSubscription]:
+        """订阅了整个系列的系列（系列级设置：新作自动加入）。"""
+        owner = await _owner(request, client_id)
+        return [SeriesSubscription(**c) for c in await _store_or_404().list_collections(owner)]
+
+    @app.patch("/api/subscriptions/collection/{cid}", response_model=SeriesSubscription)
+    async def edit_collection(
+        cid: str, req: SeriesUpdate, request: Request, client_id: str = ClientId,
+    ) -> SeriesSubscription:
+        """开 / 关「新作自动加入」。"""
+        store = _store_or_404()
+        owner = await _owner(request, client_id)
+        await store.set_collection(owner, cid, auto_join=req.auto_join)
+        got = next((c for c in await store.list_collections(owner)
+                    if c["collection_id"] == cid), None)
+        if got is None:  # 关掉自动加入、系列里又没有订阅了：系列已结束
+            raise HTTPException(status_code=404, detail="没有订阅这个系列")
+        return SeriesSubscription(**got)
+
+    @app.delete("/api/subscriptions/collection/{cid}")
+    async def delete_collection(cid: str, request: Request, client_id: str = ClientId) -> dict:
+        """退订整个系列：系列里还在订阅中的各部一起删掉（已完成的历史保留）。"""
+        owner = await _owner(request, client_id)
+        if not await _store_or_404().delete_collection(owner, cid):
+            raise HTTPException(status_code=404, detail="没有订阅这个系列")
+        return {"deleted": True}
 
     @app.get("/api/subscriptions", response_model=list[Subscription])
     async def list_subscriptions(
@@ -704,6 +787,8 @@ def create_app(
             cat.kind = "tv"
         name = safe_name(f"{title} ({cat.year})" if cat.year else title)
         path = cat.folder(root_dir)
+        if movie and sub.collection_name:  # 系列电影：电影/地区/谍影重重 系列/谍影重重3 (2007)
+            path += "/" + safe_name(f"{sub.collection_name} 系列")
         if not path.endswith("/" + name):
             path += "/" + name
         if not movie:

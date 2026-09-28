@@ -3,6 +3,7 @@
 第三方供应商响应在适配器边界转换为 `RawSearchResult`，核心层只认识这些模型。
 """
 
+import time
 from typing import Literal
 
 from pydantic import BaseModel, Field, computed_field
@@ -201,6 +202,46 @@ class SubscribeRequest(BaseModel):
     # 洗版（需同时开自动转存）：已存的集清晰度没达到 upgrade_to 前，出现更高清的就再存一份新版本
     upgrade: bool = False
     upgrade_to: Resolution | None = None  # 洗版目标，默认 2160p
+    # 单独订阅系列电影里的某一部：候选里的系列信息带上，卡片显示「系列 · 第 N 部」
+    collection_id: str | None = Field(default=None, max_length=20)
+    collection_name: str | None = Field(default=None, max_length=100)
+    collection_index: int | None = Field(default=None, ge=1, le=200)
+
+
+class CollectionSubscribeRequest(BaseModel):
+    """订阅整个系列（TMDB collection）：每部建一个电影订阅，共用这组规则；整个系列只占 1 个名额。"""
+
+    client_id: str = Field(min_length=8, max_length=64)
+    collection_id: str = Field(min_length=1, max_length=20)
+    auto_join: bool = False  # 以后出新作自动加入
+    auto_save: bool = False
+    resolution: Resolution | None = None
+    include: str | None = Field(default=None, max_length=100)
+    exclude: str | None = Field(default=None, max_length=100)
+    upgrade: bool = False
+    upgrade_to: Resolution | None = None
+
+
+class SeriesSubscription(BaseModel):
+    """一个整个系列的订阅（系列级设置）。"""
+
+    collection_id: str
+    name: str
+    poster: str | None = None
+    auto_join: bool = False
+    created: float
+    subscriptions: int = 0  # 系列里还在订阅中的部数（完成的移入订阅历史）
+
+
+class SeriesUpdate(BaseModel):
+    auto_join: bool
+
+
+def unreleased(release_date: str | None, series: bool) -> bool:
+    """电影还没上映：上映日期在今天之后；系列里没定档（TMDB 没给日期）的也算。"""
+    if release_date:
+        return release_date > time.strftime("%Y-%m-%d")
+    return series
 
 
 class Subscription(BaseModel):
@@ -240,6 +281,12 @@ class Subscription(BaseModel):
     upgrade_to: Resolution | None = None
     # 已存各集的清晰度（集号 → 2160p/1080p/720p/SD；电影用 0）；认不出清晰度的集不在里面
     versions: dict[int, str] = Field(default_factory=dict)
+    # 系列电影：属于哪个系列、第几部；series=True 表示是「订阅整个系列」建的（不单独占名额）
+    collection_id: str | None = None
+    collection_name: str | None = None
+    collection_index: int | None = None
+    series: bool = False
+    release_date: str | None = None  # 电影上映日期（系列里还没上映的：待定，上映后才开始搜）
     # 这一季的播出日历（TMDB，每天随元数据刷新）；不在订阅接口里返回，见 /api/calendar
     schedule: list[AirEpisode] = Field(default_factory=list, exclude=True)
 
