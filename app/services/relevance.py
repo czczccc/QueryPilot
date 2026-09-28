@@ -72,10 +72,49 @@ class RelevanceTarget:
     year: int | None
     season: int | None
     tokens: tuple[str, ...] = ()  # 搜索词按空格 / 「的」切开的片段（如「靳东」「精英律师」）
+    # 年份只排除「更早」的：剧集订阅的 year 是首播年，后面几季、多季合集写的是更晚的年份
+    year_floor: bool = False
+
+
+# 不是影视：游戏破解组 / 游戏发布特征（「游戏」单独出现不算，有《游戏人生》这类片名）
+GAME_RE = re.compile(
+    r"(?<![a-z])(?:tenoke|fitgirl|dodi|codex|rune|empress|plaza|skidrow|elamigos|razor1911|"
+    r"flt|tinyiso|goldberg|steam|gog|dlc)(?![a-z])|免安装|游戏本体|pc游戏|单机游戏|绿色版|"
+    r"学习版|v\d+\.\d+\.\d+",
+    re.IGNORECASE,
+)
+_WEAK_GAME_RE = re.compile(r"中文版|v\d+\.\d+|build\s*\d+", re.IGNORECASE)
+_PROGRAM_EXT = re.compile(r"\.(exe|apk|msi|dmg|pkg|nsp|xci|bin|dll|appx)$", re.IGNORECASE)
+_MEDIA_EXT = re.compile(
+    r"\.(mkv|mp4|avi|ts|m2ts|rmvb|rm|flv|mov|wmv|iso|webm|mpg|zip|rar|7z|001)$", re.IGNORECASE)
+
+
+def not_video(link: QuarkLink) -> str | None:
+    """分享看起来是游戏 / 软件而不是影视时返回原因。"""
+    text = " ".join(t for t in [link.share_title, *link.files_preview] if t)
+    m = GAME_RE.search(text)
+    if m:
+        return f"像是游戏 / 软件（{m.group(0)}）"
+    files = [f for f in link.files_preview if f]
+    has_media = any(_MEDIA_EXT.search(f) for f in files)
+    if files and not has_media and any(_PROGRAM_EXT.search(f) for f in files):
+        return "分享里只有程序文件，没有视频"
+    if _WEAK_GAME_RE.search(text) and files and not has_media:
+        return "像是游戏 / 软件（没有视频文件）"
+    return None
+
+
+# resource_key 之外再去掉的符号（片名里常见的全角波浪号、破折号，分享标题里写法不一）
+_EXTRA_PUNCT = re.compile(r"[～~〜—–\-‐・/／、;；…]+")
+
+
+def norm(text: str) -> str:
+    """相关性比对用的归一化（比记忆库主键 resource_key 多去掉波浪号等符号）。"""
+    return _EXTRA_PUNCT.sub("", resource_key(text))
 
 
 def _key(text: str) -> str:
-    return resource_key(SEASON_RE.sub("", YEAR_RE.sub("", text)))
+    return norm(SEASON_RE.sub("", YEAR_RE.sub("", text)))
 
 
 _YEAR_AT = re.compile(r"(?:19[5-9]\d|20[0-4]\d)")
@@ -117,7 +156,7 @@ def build_target(parsed: ParsedResource, query: str, douban_year: str | None = N
     season_set = seasons_in(f"{query} {parsed.resource}")
     names = []
     for n in raw_names:
-        key = resource_key(SEASON_RE.sub("", YEAR_RE.sub("", n)))
+        key = _key(n)
         if len(key) >= 2 and key not in names:
             names.append(key)
     year_set = years_in(douban_year or "") or years_in(query)
@@ -164,9 +203,17 @@ def judge(link: QuarkLink, target: RelevanceTarget) -> None:
     texts = primary or [link.name]
     joined = " ".join(texts)
 
+    reason = not_video(link) if primary else None
+    if reason:
+        link.relevance, link.relevance_note = "mismatch", reason
+        return
     if target.year:
         years = years_in(joined)
-        if years and all(abs(y - target.year) > 1 for y in years):
+        if target.year_floor:
+            wrong = years and all(y < target.year - 1 for y in years)
+        else:
+            wrong = years and all(abs(y - target.year) > 1 for y in years)
+        if wrong:
             link.relevance, link.relevance_note = "mismatch", f"年份不符：{min(years)}"
             return
     if target.season:
@@ -186,7 +233,7 @@ def judge(link: QuarkLink, target: RelevanceTarget) -> None:
         else:
             link.relevance, link.relevance_note = "mismatch", f"分享是《{titles[0]}》"
         return
-    normalized = [resource_key(t) for t in texts]
+    normalized = [norm(t) for t in texts]
     if any(contains_name(n, t) for n in target.names for t in normalized):
         if primary:
             link.relevance, link.relevance_note = "match", None
