@@ -20,7 +20,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -369,6 +369,9 @@ def create_app(
     pending_invites: dict[str, str] = {}  # login_id → 用户填的邀请码（扫码成功后才校验）
     quark_http = quark_client or httpx.AsyncClient(timeout=10.0, transport=RetryTransport(retries=2))
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+    web_dir = BASE_DIR / "web"  # 新前端（web/ 用 Vite 构建，Docker 镜像里才有）
+    if (web_dir / "index.html").is_file():
+        app.mount("/next/assets", StaticFiles(directory=str(web_dir / "assets")), name="web-assets")
 
     @app.middleware("http")
     async def request_logging(request: Request, call_next):
@@ -415,6 +418,15 @@ def create_app(
         resp = templates.TemplateResponse(request, "index.html", {"asset_v": ASSET_VERSION})
         resp.headers["Cache-Control"] = "no-cache"  # 页面每次都向服务器确认，才能拿到新的资源版本号
         return resp
+
+    @app.get("/next", include_in_schema=False)
+    @app.get("/next/", include_in_schema=False)
+    async def next_index() -> Response:
+        """新前端（CZ Design System）。资源文件名带内容哈希，入口页每次都向服务器确认。"""
+        index_file = BASE_DIR / "web" / "index.html"
+        if not index_file.is_file():
+            raise HTTPException(status_code=404, detail="新前端还没有构建")
+        return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
 
     @app.get("/health")
     async def health() -> JSONResponse:
