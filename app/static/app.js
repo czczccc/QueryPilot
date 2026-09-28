@@ -1738,7 +1738,9 @@ function subItem(sub) {
   info.appendChild(titleRow);
   const tags = [
     sub.year || "",
-    sub.media === "movie" ? "电影" : sub.media === "tv" ? "剧集" : "按关键词",
+    sub.collection_name
+      ? collectionName(sub.collection_name) + " 系列" + (sub.collection_index ? " · 第 " + sub.collection_index + " 部" : "")
+      : sub.media === "movie" ? "电影" : sub.media === "tv" ? "剧集" : "按关键词",
     sub.last_checked ? "检查于 " + formatTime(sub.last_checked) : "尚未检查",
   ].filter(Boolean).join(" · ");
   info.appendChild(el("span", "sub-meta", tags));
@@ -1863,8 +1865,18 @@ function tidyTitle(t) {
   return name && m[2] ? name + " " + m[2] : name || m[2] || "";
 }
 
-// 候选条目的一行：海报、片名、年份、类型；剧集带选季
+// 系列候选（TMDB collection）的各部，按上映顺序；index 从 1 开始
+function collectionParts(c) {
+  return ((c.collection && c.collection.parts) || []).slice().sort((a, b) => a.index - b.index);
+}
+
+function collectionName(name) {
+  return tidyTitle(String(name || "").replace(/[（(]?系列[）)]?$|\s*Collection$/i, ""));
+}
+
+// 候选条目的一行：海报、片名、年份、类型；剧集带选季，系列带选第几部
 function candidateOption(c, idx, name) {
+  if (c.kind === "collection" && collectionParts(c).length) return collectionOption(c, idx, name);
   const opt = el("label", "cand");
   const radio = el("input");
   radio.type = "radio";
@@ -1894,6 +1906,35 @@ function candidateOption(c, idx, name) {
     sel.addEventListener("click", () => { radio.checked = true; radio.dispatchEvent(new Event("change", { bubbles: true })); });
     opt.appendChild(sel);
   }
+  return opt;
+}
+
+// 系列候选：「系列 · 共 N 部」，下拉框选第几部，交互和剧集选季一样
+function collectionOption(c, idx, name) {
+  const parts = collectionParts(c);
+  const opt = el("label", "cand cand-coll");
+  const radio = el("input");
+  radio.type = "radio";
+  radio.name = name;
+  radio.value = String(idx);
+  const text = el("span", "cand-text");
+  const title = collectionName(c.collection.name || c.title) || c.title;
+  text.appendChild(el("b", "cand-title", title));
+  text.appendChild(el("span", "cand-meta", ["系列 · 共 " + parts.length + " 部",
+    c.source === "douban" ? "豆瓣" : "TMDB"].join(" · ")));
+  const poster = c.collection.poster || c.poster || (parts[0] && parts[0].poster);
+  const sel = el("select", "cand-season cand-part");
+  sel.setAttribute("aria-label", "选择第几部");
+  parts.forEach((p) => {
+    const o = el("option", "", ["第 " + p.index + " 部", tidyTitle(p.title), p.year || "",
+      p.released === false ? "未上映" : ""].filter(Boolean).join(" · "));
+    o.value = String(p.index);
+    sel.appendChild(o);
+  });
+  const def = parts.some((p) => p.index === c.default_part) ? c.default_part : parts[0].index;
+  sel.value = String(def);
+  sel.addEventListener("click", () => { radio.checked = true; radio.dispatchEvent(new Event("change", { bubbles: true })); });
+  opt.append(radio, posterEl(poster, title, "small"), text, sel);
   return opt;
 }
 
@@ -1992,7 +2033,7 @@ function openSubscribeDialog(target, opts) {
         cands = resp.ok ? await resp.json() : [];
       } catch (_) { cands = []; }
       list.innerHTML = "";
-      cands.slice(0, 6).forEach((c, i) => list.appendChild(candidateOption(c, i, "sd-cand")));
+      cands.slice(0, 10).forEach((c, i) => list.appendChild(candidateOption(c, i, "sd-cand")));
       const kw = el("label", "cand cand-kw");
       const kwRadio = el("input");
       kwRadio.type = "radio";
@@ -2013,7 +2054,21 @@ function openSubscribeDialog(target, opts) {
       if (name.length < 2 && !selected()) { toast("片名至少 2 个字", "error"); q.focus(); return; }
       const c = selected();
       const payload = {};
-      if (c) {
+      if (c && c.kind === "collection" && collectionParts(c).length) { // 选了系列里的某一部：按普通电影订阅
+        const sel = list.querySelector(".cand.on .cand-part");
+        const parts = collectionParts(c);
+        const p = parts.find((x) => String(x.index) === (sel && sel.value)) || parts[0];
+        const t = tidyTitle(p.title) || p.title;
+        payload.media = "movie";
+        payload.tmdb_id = p.id ? String(p.id) : undefined;
+        payload.year = p.year || undefined;
+        payload.poster = p.poster || c.collection.poster || undefined;
+        payload.resource = t;
+        payload.query = t.length >= 2 ? t : name;
+        payload.collection_id = c.collection.id ? String(c.collection.id) : undefined;
+        payload.collection_name = collectionName(c.collection.name) || undefined;
+        payload.collection_index = p.index;
+      } else if (c) {
         const sel = list.querySelector(".cand.on .cand-season");
         payload.media = c.media;
         payload.year = c.year || undefined;
