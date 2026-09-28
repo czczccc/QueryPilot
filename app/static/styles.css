@@ -2163,3 +2163,6 @@ body[data-view="subs"] .workspace, body[data-view="settings"] .settings-card {
   .note-acts { justify-content: flex-start; }
   .note-more-menu { right: auto; left: 0; }
 }
+
+/* 搜索时查过你的网盘：提示已经有的集 */
+.drive-hint { margin: 0 0 0.8rem; padding: 0.55rem 0.85rem; border-radius: 12px; background: var(--ok-soft); color: var(--ok); font-size: 0.86rem; }
