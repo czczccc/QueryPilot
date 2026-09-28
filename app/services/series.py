@@ -56,6 +56,16 @@ async def build_candidates(
     for c in colls.values():
         seen.update((norm(p.title), p.year) for p in c.parts)
     seen.update((norm(i.title), i.year) for i in infos if i.source == "tmdb")
+    part_ids = {p.id for c in colls.values() for p in c.parts}
+
+    def duplicate(info: MediaInfo) -> bool:
+        """已经在某个系列里的一部（TMDB 详情没带系列信息时也算），或豆瓣里重复的条目。
+        豆瓣片名常比 TMDB 短（「碟中谍4」对「碟中谍4：幽灵协议」），同年份且一个是另一个的开头也算。"""
+        if info.source == "tmdb":
+            return info.id in part_ids
+        t = norm(info.title)
+        return any(y == info.year and t and s and (s.startswith(t) or t.startswith(s))
+                   for s, y in seen)
 
     out: list[MediaCandidate] = []
     done: set[str] = set()
@@ -71,7 +81,7 @@ async def build_candidates(
                 kind="collection", poster=c.poster, collection=c,
                 default_part=default_part(query, c),
             ))
-        elif info.source == "douban" and (norm(info.title), info.year) in seen:
+        elif duplicate(info):
             continue
         else:
             out.append(_candidate(info))

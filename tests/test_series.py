@@ -123,3 +123,24 @@ def test_media_search_api_returns_series():
     assert [p["title"] for p in series["collection"]["parts"]][:3] == [
         "谍影重重", "谍影重重2", "谍影重重3：最后通牒"]
     assert got[1]["collection"] is None and got[1]["default_part"] is None
+
+
+def test_douban_short_titles_and_tmdb_parts_without_collection_are_merged():
+    coll = {"id": "9", "name": "碟中谍系列", "poster": None}
+    parts = [CollectionPart(index=i, id=str(i), title=t, year=y) for i, t, y in
+             [(4, "碟中谍4：幽灵协议", "2011"), (7, "碟中谍7：致命清算（上）", "2023"),
+              (8, "碟中谍8：最终清算", "2025")]]
+    infos = [
+        MediaInfo(source="tmdb", title="碟中谍4：幽灵协议", year="2011", media="movie", id="4",
+                  collection=coll),
+        MediaInfo(source="tmdb", title="碟中谍8：最终清算", year="2025", media="movie", id="8"),
+        MediaInfo(source="douban", title="碟中谍4", year="2011", media="movie", id="d4"),
+        MediaInfo(source="douban", title="碟中谍7：致命清算", year="2023", media="movie", id="d7"),
+        MediaInfo(source="douban", title="碟中谍4", year="2099", media="movie", id="dx"),
+    ]
+
+    async def fetch(cid):
+        return CollectionInfo(id=cid, name="碟中谍", parts=parts)
+
+    got = asyncio.run(build_candidates("碟中谍", infos, fetch))
+    assert [(c.kind, c.id) for c in got] == [("collection", "9"), ("movie", "dx")]

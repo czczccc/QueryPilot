@@ -1,6 +1,7 @@
 """订阅 v2：以影视条目为订阅对象、按季与集数范围、缺集、状态、完成归档与重新订阅。"""
 
 import asyncio
+from dataclasses import replace
 
 from fastapi.testclient import TestClient
 
@@ -94,7 +95,7 @@ async def test_paused_and_pending_and_meta_refresh():
     assert await watcher.check(C, paused) == [] and tavily.queries == []
     assert await watcher.run_once() == 0 and tavily.queries == []
 
-    lookup = FakeLookup([TV])
+    lookup = FakeLookup([replace(TV, season_years={2: "2025"})])
     watcher.lookup = lookup
     tv = await store.add_subscription(C, "流浪地球", "流浪地球", media="tv", season=2,
                                       tmdb_id="42", total_episodes=5)
