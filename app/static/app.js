@@ -1000,7 +1000,7 @@ function calItem(ep) {
   item.type = "button";
   item.title = tip + "，点击查看订阅";
   const text = el("span", "cal-ep-text");
-  text.append(el("b", "cal-ep-title", ep.resource),
+  text.append(el("b", "cal-ep-title", tidyTitle(ep.resource)),
     el("span", "cal-ep-no", "S" + String(ep.season || 1).padStart(2, "0") + "E" + String(ep.episode).padStart(2, "0") +
       (ep.name && !/^第\s*\d+\s*集$/.test(ep.name) ? " · " + ep.name : "")));
   item.append(posterEl(ep.poster, ep.resource, "tiny"), text, el("span", "cal-ep-state", label));
@@ -1726,7 +1726,7 @@ function subItem(sub) {
   const head = el("div", "sub-head");
   const info = el("div", "sub-info");
   const titleRow = el("div", "sub-title-row");
-  titleRow.appendChild(el("b", "sub-title", "《" + sub.resource + "》"));
+  titleRow.appendChild(el("b", "sub-title", "《" + tidyTitle(sub.resource) + "》"));
   const st = STATE_BADGE[sub.state] || STATE_BADGE.active;
   titleRow.appendChild(badge(st[0], "state-" + st[1], st[2]));
   if (sub.upgrade) {
@@ -1788,7 +1788,7 @@ function historyItem(h) {
   const head = el("div", "sub-head");
   const info = el("div", "sub-info");
   const titleRow = el("div", "sub-title-row");
-  titleRow.appendChild(el("b", "sub-title", "《" + h.resource + "》"));
+  titleRow.appendChild(el("b", "sub-title", "《" + tidyTitle(h.resource) + "》"));
   titleRow.appendChild(badge("已完成", "state-ok"));
   info.append(titleRow, el("span", "sub-meta", [
     h.year || "", h.media === "movie" ? "电影" : h.media === "tv" ? "剧集" : "",
@@ -1855,6 +1855,14 @@ async function subscribe(payload) {
   return null;
 }
 
+// 片名末尾的全角波浪号（如「无职转生～到了异世界就拿出真本事～」）去掉再拼季，
+// 否则显示成「…本事～ 第3季」
+function tidyTitle(t) {
+  const m = String(t || "").trim().match(/^(.*?)\s*(第\s*\d+\s*季)?$/);
+  const name = m[1].replace(/[\s～~〜]+$/, "");
+  return name && m[2] ? name + " " + m[2] : name || m[2] || "";
+}
+
 // 候选条目的一行：海报、片名、年份、类型；剧集带选季
 function candidateOption(c, idx, name) {
   const opt = el("label", "cand");
@@ -1863,7 +1871,7 @@ function candidateOption(c, idx, name) {
   radio.name = name;
   radio.value = String(idx);
   const text = el("span", "cand-text");
-  const title = el("b", "cand-title", c.title);
+  const title = el("b", "cand-title", tidyTitle(c.title) || c.title);
   const meta = [c.year || "", c.media === "movie" ? "电影" : "剧集",
     c.media === "tv" && c.seasons ? "共 " + c.seasons + " 季" : "",
     c.source === "tmdb" ? "TMDB" : "豆瓣"].filter(Boolean).join(" · ");
@@ -2011,11 +2019,12 @@ function openSubscribeDialog(target, opts) {
         payload.year = c.year || undefined;
         payload.poster = c.poster || undefined;
         payload[c.source === "douban" ? "douban_id" : "tmdb_id"] = c.id || undefined;
-        payload.resource = c.title;
-        payload.query = c.title.length >= 2 ? c.title : (target.query || name);
+        const t = tidyTitle(c.title) || c.title;
+        payload.resource = t;
+        payload.query = t.length >= 2 ? t : (target.query || name);
         if (c.media === "tv") {
           payload.season = sel ? Number(sel.value) : 1;
-          if (payload.season > 1) payload.query = c.title + " 第" + payload.season + "季";
+          if (payload.season > 1) payload.query = t + " 第" + payload.season + "季";
         }
       } else {
         payload.resource = name;
