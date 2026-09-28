@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass, field
 
 from app.services.classify import VIDEO_EXT, episode_no, safe_name
+from app.services.packs import part_of_file, year_of_file
 from app.services.quality import RESOLUTION_RANK, required_resolution
 from app.services.relevance import seasons_in
 
@@ -112,9 +113,29 @@ def season_label(f: dict) -> str:
     return str(f.get("_label") or f.get("file_name") or "")
 
 
+def _only_part(
+    media: list[dict], part: int, series: str, title: str | None, year: str | None,
+    pack: bool,
+) -> list[dict]:
+    titles = {part: title} if title else {}
+    ids = {id(f): part_of_file(f, series, titles) for f in media}
+    known = set(ids.values()) - {None}
+    if known and known != {part}:  # 合集：只要标着这一部的
+        return [f for f in media if ids[id(f)] == part]
+    if known or len(media) <= 1 or not year:
+        return media
+    dated = [f for f in media if year in year_of_file(f)]
+    if dated:
+        return dated
+    # 好几个视频、认不出第几部也没有年份：挑合集存的就不存（宁可不存也不存错），
+    # 否则当成同一部的不同版本
+    return [] if pack else media
+
+
 def pick_files(
     files: list[dict], movie: bool, season: int | None = None, offset: int = 0,
-    total: int | None = None,
+    total: int | None = None, part: int | None = None, series: str | None = None,
+    title: str | None = None, year: str | None = None, pack: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """从分享（已展平）的文件里挑要存的：(要存的, 没选的)。
 
@@ -124,11 +145,17 @@ def pick_files(
     剧集按季：多季合集只取订阅那一季（文件名或所在目录写明的季）；没写季的文件只在
     合集里没有别的季时才算。`offset`：前面各季的总集数，这一季按绝对集号编
     （第 2 季写成 13~25）时换算回本季集号。
+
+    系列电影（`part` 第几部、`series` 系列名、`title` 这部的片名）：分享是好几部的合集时
+    只取这一部的文件；认不出哪个是这一部（且不止一个视频）时按年份认，还认不出就不存，
+    免得把别的部存成这一部。
     """
     names = [str(f.get("file_name") or "") for f in files]
     media = [f for f, n in zip(files, names, strict=True) if kind_of(n) in ("video", "archive")]
     chosen: list[dict] = []
     if movie:
+        if part is not None and series:
+            media = _only_part(media, part, series, title, year, pack)
         if media:
             chosen = [max(media, key=version_rank)]  # 视频排在压缩包前面
     else:

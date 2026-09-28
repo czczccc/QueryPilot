@@ -61,6 +61,7 @@ from app.services.memory import LinkStore, resource_key
 from app.services.metadata import MetadataLookup
 from app.services.organize import TidyPlan, file_resolution, kind_of, plan_tidy
 from app.services.pacing import Pacer, seconds_to_cn_midnight
+from app.services.packs import PackChooser
 from app.services.quality import RESOLUTION_RANK
 from app.services.quark_login import LoginError, QuarkQrLogin, qr_svg
 from app.services.quark_save import (
@@ -230,6 +231,8 @@ def create_app(
                       _settings.save_daily_limit) if service is None else Pacer(0, 0, 0)
     if watcher is not None and service is None:
         watcher.stagger = _settings.check_stagger_seconds
+        # 成组订阅统一挑合集：有 LLM key 由 AI 挑（额度用完自动按规则）
+        watcher.chooser = PackChooser(_settings.deepseek_api_key)
     sub_interval = (
         subscribe_interval_hours
         if subscribe_interval_hours is not None
@@ -851,17 +854,21 @@ def create_app(
         return found
 
     async def auto_save(
-        owner: str, sub: Subscription, link: QuarkLink, wanted: set[int] | None = None
+        owner: str, sub: Subscription, link: QuarkLink, wanted: set[int] | None = None,
+        note: str | None = None,
     ) -> list[tuple]:
         """订阅检查发现新集时调用：用订阅者扫码登录的凭证只转存网盘里还没有的集。
 
         存进订阅锁定的目录；每集只存一个最好的版本、展平分享里的嵌套文件夹、不存压缩包，
         存完改成「片名 S01E06」。`wanted`：只要这些集号（订阅范围内缺的）。
+        `note`：成组订阅统一挑的合集 / 全季包时，挑选理由（写进转存记录）；
+        系列电影从合集里只取这一部。
         """
         store = resolved.store
         if not (login_enabled and owner.startswith("u:")):
             return []
         name = f"《{sub.resource}》"
+        why = f"（{note}）" if note else ""
 
         async def pause(status: str, message: str) -> list[tuple]:
             if sub.auto_save_status == status:  # 已经提醒过，不重复打扰
@@ -903,7 +910,10 @@ def create_app(
                 tidy = Tidy(strip_season(sub.resource), movie, sub.season, sub.year,
                             better=better, default_res=default_res,
                             offset=0 if movie else await _season_offset(sub),
-                            total=sub.total_episodes)
+                            total=sub.total_episodes,
+                            part=sub.collection_index if movie else None,
+                            series=sub.collection_name if movie else None,
+                            pack=note is not None)
                 result = await saver.save(link.share, link.pwd, to_path=folder, only_new=True,
                                           keep=keep, tidy=tidy)
         except LoginExpiredError:
@@ -936,14 +946,20 @@ def create_app(
             await store.log_auto_save(sub.id, link.share, True, result.file_count,
                                       result.folder, message)
             return [("upgraded", message, link.share)]
+        if result.file_count == 0 and note and not result.skipped:
+            message = f"{name}没能在挑中的合集「{result.title or link.name}」里认出这一部，没有转存"
+            await store.log_auto_save(sub.id, link.share, False, 0, None, message + why)
+            return []
         if result.file_count == 0:
             message = f"{name}的新内容网盘里都已经有了，没有重复转存"
         else:
             skipped = f"，跳过已有的 {result.skipped} 个" if result.skipped else ""
-            message = f"已自动转存{name}的 {result.file_count} 个新文件到{where}{skipped}"
+            source = f"（来自合集「{result.title}」）" if note and result.title else ""
+            message = (f"已自动转存{name}的 {result.file_count} 个新文件到{where}"
+                       f"{source}{skipped}")
         await store.log_auto_save(sub.id, link.share, True, result.file_count, result.folder,
-                                  message)
-        return [("auto_saved", message, link.share)] if result.file_count else []
+                                  message + why)
+        return [("auto_saved", message + why, link.share)] if result.file_count else []
 
     async def _season_offset(sub: Subscription) -> int:
         """前面各季的总集数（TMDB），给按绝对集号编的合集换算本季集号；查不到为 0。"""
