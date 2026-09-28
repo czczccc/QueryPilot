@@ -146,6 +146,14 @@ class UsageStore:
         """执行一条写语句，返回影响的行数。"""
         return await asyncio.to_thread(self._exec, sql, args)
 
+    async def forget_user(self, user_id: str, today: str) -> int:
+        """「删除我的数据」：删掉账号记录和以前的用量；今天的用量计数留到明天（不能靠删数据刷额度），
+        被封禁的账号保留封禁记录。返回删掉的行数。"""
+        n = await self.execute(
+            "DELETE FROM usage_daily WHERE subject = ? AND day <> ?", (f"user:{user_id}", today))
+        return n + await self.execute(
+            "DELETE FROM users WHERE user_id = ? AND banned = 0", (user_id,))
+
     async def get_ip_ban(self, ip: str) -> str | None:
         """被封的 IP 返回封禁理由（可能是空串），没封返回 None。"""
         rows = await self.query("SELECT reason FROM ip_bans WHERE ip = ?", (ip,))
