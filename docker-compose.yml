@@ -11,6 +11,12 @@ services:
     volumes:
       - querypilot-data:/app/data
     restart: unless-stopped
+    # 日志只留最近约 30MB（隐私说明里承诺的），自动滚动覆盖
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # PanSou 网盘搜索聚合（https://github.com/fish2018/pansou，MIT）：给 QueryPilot 的 agent 当搜索工具。
   # 和 web 在同一个 compose 网络，不映射任何端口，只有 web 能通过 http://pansou:8888 访问。
@@ -29,6 +35,11 @@ services:
       # - PROXY=socks5://host:port   # 国内服务器访问 TG 需要代理
     volumes:
       - pansou-cache:/app/cache
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   querypilot-data:

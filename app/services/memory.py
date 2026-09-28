@@ -489,6 +489,40 @@ class LinkStore:
             self._delete_subscription(client_id, sub_id)
         return cur.rowcount > 0 or bool(ids)
 
+    # 「删除我的数据」：按归属（登录账号 u:<id> 和浏览器标识）统计 / 删除个人数据
+    _PERSONAL = (
+        ("subscriptions", "subscriptions"), ("subscription_history", "history"),
+        ("notifications", "notifications"), ("collections", "collections"), ("prefs", "prefs"),
+    )
+
+    def _personal_data(self, owners: list[str], user_id: str | None, delete: bool) -> dict:
+        marks = ",".join("?" * len(owners))
+        out: dict[str, int] = {}
+        with self._lock:
+            ids = [r["id"] for r in self._conn.execute(
+                f"SELECT id FROM subscriptions WHERE client_id IN ({marks})", owners)]
+            out["auto_saves"] = self._conn.execute(
+                f"SELECT COUNT(*) FROM auto_saves WHERE subscription_id IN "
+                f"({','.join('?' * len(ids)) or 'NULL'})", ids).fetchone()[0]
+            for table, name in self._PERSONAL:
+                out[name] = self._conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE client_id IN ({marks})", owners
+                ).fetchone()[0]
+            out["quark_logins"] = self._conn.execute(
+                "SELECT COUNT(*) FROM quark_accounts WHERE user_id = ?", (user_id,)
+            ).fetchone()[0] if user_id else 0
+            if delete:
+                if ids:
+                    self._conn.execute(
+                        f"DELETE FROM auto_saves WHERE subscription_id IN "
+                        f"({','.join('?' * len(ids))})", ids)
+                for table, _ in self._PERSONAL:
+                    self._conn.execute(f"DELETE FROM {table} WHERE client_id IN ({marks})", owners)
+                if user_id:
+                    self._conn.execute("DELETE FROM quark_accounts WHERE user_id = ?", (user_id,))
+                self._conn.commit()
+        return out
+
     def _history_tmdb_ids(self, client_id: str) -> set[str]:
         with self._lock:
             rows = self._conn.execute(
@@ -823,6 +857,14 @@ class LinkStore:
     async def delete_collection(self, client_id: str, cid: str) -> bool:
         """退订整个系列：连同系列里还没完成的订阅一起删掉。"""
         return await asyncio.to_thread(self._delete_collection, client_id, cid)
+
+    async def personal_data(self, owners: list[str], user_id: str | None) -> dict:
+        """这些归属名下存了多少条个人数据（订阅、历史、通知、系列、偏好、转存记录、夸克登录）。"""
+        return await asyncio.to_thread(self._personal_data, owners, user_id, False)
+
+    async def delete_personal_data(self, owners: list[str], user_id: str | None) -> dict:
+        """删除这些归属名下的全部个人数据和该账号所有设备上的夸克登录凭证；返回删掉的条数。"""
+        return await asyncio.to_thread(self._personal_data, owners, user_id, True)
 
     async def history_tmdb_ids(self, client_id: str) -> set[str]:
         """订阅历史里完成过的条目（TMDB id）。"""

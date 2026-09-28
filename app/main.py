@@ -50,7 +50,7 @@ from app.models import (
 from app.providers.tavily import TavilyProvider
 from app.security import RateLimiter, install_request_id_factory, set_request_id
 from app.services import calendar as cal
-from app.services import llm
+from app.services import llm, privacy
 from app.services.agent import SearchAgent
 from app.services.classify import Category, Classifier, episode_no, safe_name
 from app.services.cookie_box import CookieBox, session_hash
@@ -67,6 +67,7 @@ from app.services.series import build_candidates
 from app.services.subscriptions import RES_TEXT, SubscriptionWatcher, strip_season
 from app.services.trending import Trending
 from app.services.usage import SYSTEM, QuotaConfig, QuotaGuard, UsageStore
+from app.services.usage import today as usage_today
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -1227,6 +1228,39 @@ def create_app(
             await resolved.store.delete_account(user[0])
         response.delete_cookie(SESSION_COOKIE)
         return {"ok": True}
+
+    @app.get("/api/privacy")
+    async def privacy_notice() -> dict:
+        """隐私说明：存了什么、为什么存、怎么删（不需要登录）。"""
+        return {"updated": privacy.UPDATED, "sections": privacy.SECTIONS}
+
+    async def _personal_scope(request: Request, client_id: str) -> tuple[list[str], str | None]:
+        user = await _user_cookie(request)
+        owners = [client_id] + ([f"u:{user[3]}"] if user else [])
+        return owners, user[3] if user else None
+
+    @app.get("/api/me/data")
+    async def my_data(request: Request, client_id: str = ClientId) -> dict:
+        """我在服务器上存了哪些数据（各类条数），给「删除我的数据」前确认用。"""
+        owners, user_id = await _personal_scope(request, client_id)
+        counts = await _store_or_404().personal_data(owners, user_id)
+        return {"logged_in": user_id is not None, "counts": counts}
+
+    @app.delete("/api/me/data")
+    async def delete_my_data(
+        request: Request, response: Response, client_id: str = ClientId,
+        confirm: str = Query(""), _: None = Depends(rate_limit_dep),
+    ) -> dict:
+        """删除我的全部数据并退出登录（不可恢复）。必须带 `confirm=DELETE`。"""
+        if confirm != "DELETE":
+            raise HTTPException(status_code=400, detail="请确认删除（confirm=DELETE）")
+        owners, user_id = await _personal_scope(request, client_id)
+        deleted = await _store_or_404().delete_personal_data(owners, user_id)
+        if user_id:
+            deleted["account"] = await users.forget_user(user_id, usage_today())
+        response.delete_cookie(SESSION_COOKIE)
+        logger.info("用户删除了个人数据")
+        return {"deleted": deleted}
 
     @app.post("/api/save", response_model=SaveResponse)
     async def save_to_drive(
