@@ -10,6 +10,7 @@
   它返回的结果（已转存 / 失败 / 登录失效）也作为通知写进去。
 """
 
+import asyncio
 import logging
 import re
 import time
@@ -27,6 +28,7 @@ from app.models import (
     unreleased,
 )
 from app.services.memory import LinkStore, resource_key
+from app.services.pacing import stagger
 from app.services.quality import RESOLUTION_RANK, meets_requirement
 from app.services.relevance import build_target, judge
 
@@ -103,6 +105,7 @@ class SubscriptionWatcher:
         self._agent = agent
         self.auto_saver = auto_saver
         self.lookup = None  # MetadataLookup：刷新剧集总集数（main 注入）
+        self.stagger = 0.0  # 批量检查时两个订阅之间平均等几秒（错开对夸克和搜索源的请求）
         self._store = store
         self._webhook = webhook
         self._client = client
@@ -389,7 +392,9 @@ class SubscriptionWatcher:
             logger.exception("系列新作检查失败")
             total = 0
         subs = [x for x in await self._store.list_subscriptions() if x[1].state != "paused"]
-        for client_id, sub in subs[:limit]:
+        for i, (client_id, sub) in enumerate(subs[:limit]):
+            if i and self.stagger > 0:
+                await asyncio.sleep(stagger(self.stagger))
             try:
                 total += len(await self.check(client_id, sub))
             except Exception as exc:  # 单个订阅失败不影响其余

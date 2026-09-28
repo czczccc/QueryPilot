@@ -57,6 +57,11 @@ class Settings:
     pansou_token: str = field(default="", repr=False)  # PanSou 开启认证时的 JWT
     pansou_timeout: float = 6.0
     pansou_src: str = "plugin"  # plugin（只用白名单插件）/ tg / all
+    # 防夸克风控：同一账号两次写操作（转存、建目录、移动、改名、删除）至少间隔几秒 + 随机抖动
+    quark_write_gap: float = 1.5
+    quark_write_jitter: float = 2.0
+    save_daily_limit: int = 100  # 每个账号每天转存次数（手动 + 自动），0 不限
+    check_stagger_seconds: float = 20.0  # 后台批量检查订阅时，两个订阅之间平均间隔几秒
     extra: dict = field(default_factory=dict)
 
 
@@ -117,5 +122,9 @@ def load_settings() -> Settings:
         pansou_token=os.getenv("PANSOU_TOKEN", "").strip(),
         pansou_timeout=_float("PANSOU_TIMEOUT", 6.0),
         pansou_src=os.getenv("PANSOU_SRC", "plugin").strip().lower() or "plugin",
+        quark_write_gap=_float("QUARK_WRITE_GAP", 1.5),
+        quark_write_jitter=_float("QUARK_WRITE_JITTER", 2.0),
+        save_daily_limit=_int("SAVE_DAILY_LIMIT", 100),
+        check_stagger_seconds=_float("CHECK_STAGGER_SECONDS", 20.0),
         trust_proxy=os.getenv("TRUST_PROXY", "false").strip().lower() in ("1", "true", "yes"),
     )
