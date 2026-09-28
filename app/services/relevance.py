@@ -219,6 +219,18 @@ def _title_hits(title: str, target: RelevanceTarget) -> bool:
                for t in target.tokens)
 
 
+_PER_SHARE_SOURCES = ("PanSou", "Telegram", "资源站")
+
+
+def _per_share_title(link: QuarkLink, target: RelevanceTarget) -> bool:
+    """来源给的标题是这一个分享自己的（不是一页上百个链接的聚合页），且里面有片名。
+    标题只有片名本身时不算：PanSou 没有标题时会用搜索词代替。"""
+    if not link.source.startswith(_PER_SHARE_SOURCES):
+        return False
+    title = norm(link.name)
+    return any(contains_name(n, title) and title != n for n in target.names)
+
+
 def judge(link: QuarkLink, target: RelevanceTarget) -> None:
     """规则判定并写回 `link.relevance` / `link.relevance_note`。
 
@@ -271,6 +283,10 @@ def judge(link: QuarkLink, target: RelevanceTarget) -> None:
     hits = [t for t in target.tokens if len(t) >= 3 and any(t in x for x in normalized)]
     if primary and hits:
         link.relevance, link.relevance_note = "match", None
+    elif primary and _per_share_title(link, target):
+        # 分享页标题 / 文件名里没写片名（常见「01.mp4」「Season 1」），但这条是 PanSou、
+        # Telegram、资源站这类一条对应一个分享的来源，它给的标题里有片名：算相关
+        link.relevance, link.relevance_note = "match", "按来源标题判定"
     else:  # 可能是别名 / 英文名：留给 LLM 核对，核对前不算相关
         link.relevance, link.relevance_note = "uncertain", "标题里没找到片名"
 

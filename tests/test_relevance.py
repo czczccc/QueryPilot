@@ -381,3 +381,24 @@ def test_later_seasons_keep_later_years():
     movie = L(title="流浪地球2 2019", files=["a.mkv"])
     judge(movie, build_target(P("流浪地球2"), "流浪地球2", "2023"))
     assert movie.relevance == "mismatch"
+
+
+def test_per_share_source_title_counts_when_share_page_has_no_name():
+    from app.models import ParsedResource, QuarkLink
+    from app.services.relevance import build_target, judge
+    target = build_target(ParsedResource(resource="我不是大师", search_suggestions=["我不是大师"]),
+                          "我不是大师")
+
+    def mk(source, name):
+        return QuarkLink(name=name, share="s", source=source, time="", state="valid",
+                         share_title="更新中", files_preview=["01.mp4", "02.mp4"])
+
+    pansou = mk("PanSou·tg", "我不是大师 (2026) 更新至10集 4K")
+    judge(pansou, target)
+    assert pansou.relevance == "match"
+    only_keyword = mk("PanSou", "我不是大师")  # PanSou 没标题时用搜索词代替：不算
+    judge(only_keyword, target)
+    assert only_keyword.relevance == "uncertain"
+    aggregate = mk("https://example.com/list", "我不是大师 等 100 部资源合集")
+    judge(aggregate, target)
+    assert aggregate.relevance == "uncertain"
