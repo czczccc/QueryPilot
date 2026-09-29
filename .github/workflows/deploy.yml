@@ -17,5 +17,6 @@ jobs:
           script: |
             cd /opt/querypilot
             git pull origin main
+            git submodule update --init --recursive
             docker compose up -d --build
             docker compose ps

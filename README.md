@@ -147,3 +147,21 @@ quark_search_gui.py         # 旧版 Tkinter 原型，仅供参考
 ## 许可证
 
 [MIT](LICENSE)
+
+## 独立设计系统
+
+设计系统已迁至 [cz-design-system](https://github.com/czczccc/cz-design-system)，本仓库通过 Git 子模块固定引用其版本。
+
+首次克隆：
+
+```bash
+git clone --recurse-submodules https://github.com/czczccc/QueryPilot.git
+```
+
+已有克隆在拉取本次变更后，先初始化子模块再执行 Docker 或前端构建：
+
+```bash
+git submodule update --init --recursive
+```
+
+开发设计系统请在独立仓库提交。升级后在 QueryPilot 提交子模块的新 commit 指针，不自动追踪上游 main。
