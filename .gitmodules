@@ -1,0 +1,3 @@
+[submodule "packages/cz-design-system"]
+	path = packages/cz-design-system
+	url = https://github.com/czczccc/cz-design-system.git
